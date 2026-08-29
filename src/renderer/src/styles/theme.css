@@ -25,8 +25,19 @@
 
   --radius-card: 12px;
 
-  --font-sans: 'Inter', 'Segoe UI Variable Text', 'Segoe UI', system-ui, sans-serif;
-  --font-display: 'Inter', 'Segoe UI Variable Display', 'Segoe UI', system-ui, sans-serif;
+  /*
+   * Inter carries Latin, Greek and Cyrillic and nothing else, so a filename in
+   * Japanese, Chinese, Korean or Arabic falls straight past it. The per-glyph
+   * fallbacks after it are named explicitly rather than left to the renderer's
+   * last resort, which on Windows produces boxes as readily as text - and a
+   * download manager is exactly where names from anywhere in the world arrive.
+   */
+  --font-cjk: 'Yu Gothic UI', 'Meiryo', 'Microsoft YaHei UI', 'Microsoft JhengHei UI',
+    'Malgun Gothic', 'Nirmala UI', 'Segoe UI Emoji', 'Segoe UI Symbol';
+  --font-sans: 'Inter', 'Segoe UI Variable Text', 'Segoe UI', var(--font-cjk), system-ui,
+    sans-serif;
+  --font-display: 'Inter', 'Segoe UI Variable Display', 'Segoe UI', var(--font-cjk), system-ui,
+    sans-serif;
 }
 
 :root {

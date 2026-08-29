@@ -118,8 +118,8 @@ function Card({ candidate }: { candidate: MediaCandidate }): React.ReactElement 
           {candidate.variants.map((variant, index) => (
             <div key={variant.url + index} className="flex items-center gap-3 text-[11.5px]">
               <span className="font-semibold w-[70px] shrink-0">{variant.label}</span>
-              <span className="tnum text-faint w-[80px] shrink-0">
-                {variant.bandwidth ? Math.round(variant.bandwidth / 1000) + ' kbps' : ''}
+              <span className="text-faint w-[80px] shrink-0 uppercase tracking-[0.4px]">
+                {containerOf(candidate, variant)}
               </span>
               <span className="tnum text-faint w-[80px] shrink-0">
                 {variant.estimatedSize ? formatBytes(variant.estimatedSize) : ''}
@@ -157,13 +157,20 @@ function suggestName(candidate: MediaCandidate, variant: MediaVariant): string {
   const quality = variant.height ? ' ' + variant.height + 'p' : ''
   const baseName = (base || 'video') + quality
 
-  let ext = '.mp4'
-  if (candidate.type === 'file') ext = '.' + extensionFromUrl(variant.url)
-  else if (/\.mkv(\?|$)/i.test(variant.url)) ext = '.mkv'
-  else if (/\.webm(\?|$)/i.test(variant.url)) ext = '.webm'
-  else if (/\.ts(\?|$)/i.test(variant.url)) ext = '.ts'
+  return baseName + '.' + containerOf(candidate, variant)
+}
 
-  return baseName + ext
+/**
+ * The extension this quality will land as - the container the ladder worked out
+ * from the codecs it is about to mux, or the URL's own where there is nothing
+ * to mux. Shown in the list and used for the name, so the two cannot disagree.
+ */
+function containerOf(candidate: MediaCandidate, variant: MediaVariant): string {
+  if (variant.container) return variant.container
+  if (candidate.type === 'file') return extensionFromUrl(variant.url)
+
+  const match = /\.(mp4|mkv|webm|mov|m4v|ts)(\?|#|$)/i.exec(variant.url)
+  return match ? match[1].toLowerCase() : 'mp4'
 }
 
 function extensionFromUrl(url: string): string {

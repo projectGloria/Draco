@@ -35,7 +35,8 @@ export default defineConfig({
         input: {
           index: resolve(__dirname, 'src/renderer/index.html'),
           splash: resolve(__dirname, 'src/renderer/splash.html'),
-          handoff: resolve(__dirname, 'src/renderer/handoff.html')
+          handoff: resolve(__dirname, 'src/renderer/handoff.html'),
+          progress: resolve(__dirname, 'src/renderer/progress.html')
         }
       }
     }

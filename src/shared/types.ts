@@ -304,6 +304,11 @@ export interface Settings {
   takeoverExcludeHosts: string[]
   /** Watch the clipboard for URLs while running. */
   watchClipboard: boolean
+  /**
+   * Open a progress window of its own for each download the user starts, the
+   * way IDM does. Off leaves the main list as the only place a download shows.
+   */
+  showProgressWindow: boolean
   accent: string
   columns: ColumnPref[]
   sortColumn: ColumnId
@@ -364,6 +369,14 @@ export interface MediaVariant {
   codecs: string | null
   /** Estimated bytes, when the playlist gives enough to guess. */
   estimatedSize: number | null
+  /**
+   * Extension the finished file will carry - "mp4", "webm", "mkv".
+   *
+   * What a person picking a quality wants to know is what they will end up
+   * with; a bitrate is a number they cannot act on. It is also the container
+   * the mux must actually produce, so the two cannot drift apart.
+   */
+  container?: string | null
   /** Stable YouTube format identity, used to refresh expiring signed media URLs. */
   youtube?: { videoFormatId: string; audioFormatId?: string | null }
 }
@@ -405,6 +418,8 @@ export interface RendererApi {
 
   /* tasks */
   listTasks(): Promise<DownloadTask[]>
+  /** One task, for the windows that show a single download rather than the list. */
+  getTask(id: string): Promise<DownloadTask | null>
   addDownload(input: NewDownload): Promise<DownloadTask>
   probe(url: string, headers?: RequestHeaders): Promise<ProbeResult>
   startTasks(ids: string[]): Promise<void>
@@ -458,10 +473,24 @@ export interface RendererApi {
   registerIntegration(): Promise<IntegrationStatus>
   copyToClipboard(text: string): Promise<void>
 
+  /* icons */
+  /**
+   * The icon the shell associates with this file type, as a data URL, or null
+   * when Windows had nothing to give. Cached in main, so calling it per row is
+   * cheap after the first of each type.
+   */
+  fileIcon(extension: string): Promise<string | null>
+  /** The favicon of the site a download came from, as a data URL. */
+  siteIcon(url: string): Promise<string | null>
+
   /* window */
   minimize(): Promise<void>
   toggleMaximize(): Promise<void>
   close(): Promise<void>
+  /** Minimises whichever window asked, for the same reason as `closeSelf`. */
+  minimizeSelf(): Promise<void>
+  /** Closes whichever window asked - the per-download windows own no other. */
+  closeSelf(): Promise<void>
   /** The frame is custom, so the restore glyph has to be told when to change. */
   onMaximizeChange(cb: (maximized: boolean) => void): () => void
   onToast(cb: (toast: Toast) => void): () => void

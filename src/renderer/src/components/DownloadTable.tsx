@@ -4,6 +4,7 @@ import { formatBytes, formatEta, formatPercent, formatSpeed, formatWhen, percent
 import { queueName, useApp } from '../store/app'
 import { reportError, toast } from '../store/toasts'
 import ContextMenu, { type MenuItem, type MenuPosition } from './ContextMenu'
+import FileIcon from './FileIcon'
 import { DownloadIcon, SortArrow } from './Icons'
 import ProgressBar from './ProgressBar'
 
@@ -350,8 +351,12 @@ function Cell({
     case 'name':
       return (
         <div className={base + ' flex items-center gap-2'} title={task.filename + '\n' + task.url}>
-          <span className="shrink-0" style={{ color: STATUS_COLOR[task.status] }}>
-            <DownloadIcon className="w-3.5 h-3.5" />
+          <span className="shrink-0 grid place-items-center">
+            <FileIcon
+              name={task.filename}
+              className="w-4 h-4"
+              color={STATUS_COLOR[task.status]}
+            />
           </span>
           <span className="truncate">{task.filename}</span>
         </div>

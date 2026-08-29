@@ -61,45 +61,6 @@ export function primeYouTube(pageUrl: string, headers: RequestHeaders | undefine
   })
 }
 
-/**
- * The real, signed media URLs for one chosen format pair.
- *
- * This is the only place a YouTube download URL comes from. The page-derived
- * variants carry itags and nothing else, precisely so that web content never
- * decides what Draco fetches.
- */
-export async function resolveYouTubeUrls(
-  pageUrl: string,
-  headers: RequestHeaders | undefined,
-  videoFormatId: string,
-  audioFormatId: string | null
-): Promise<{ videoUrl: string; audioUrl: string | null }> {
-  const info = await loadInfo(pageUrl, headers)
-  // The same guard the ladder applies, repeated at the point of use: whatever
-  // route a format id arrived by, what goes to the engine must be a file it can
-  // fetch and not an HLS or DASH manifest.
-  const find = (id: string): YtDlpFormat | undefined =>
-    (info.formats ?? []).find(
-      (f) => f.format_id === id && f.url && /^https?:/i.test(f.url) && isDirectDownload(f)
-    )
-
-  const video = find(videoFormatId)
-  if (!video?.url) {
-    throw new Error(`YouTube format ${videoFormatId} is no longer available`)
-  }
-
-  let audioUrl: string | null = null
-  if (audioFormatId) {
-    const audio = find(audioFormatId)
-    if (!audio?.url) {
-      throw new Error(`YouTube audio format ${audioFormatId} is no longer available`)
-    }
-    audioUrl = audio.url
-  }
-
-  return { videoUrl: video.url, audioUrl }
-}
-
 export async function resolveYouTube(
   pageUrl: string,
   headers: RequestHeaders | undefined
@@ -125,13 +86,24 @@ export async function resolveYouTube(
 export async function refreshYouTubeFormat(
   pageUrl: string,
   headers: RequestHeaders | undefined,
-  formatId: string
+  formatId: string,
+  force = true
 ): Promise<string> {
-  // Forced past the cache. This is only ever called because the URL Draco holds
-  // has expired, and the cached lookup is where that expired URL came from.
-  const info = await loadInfo(pageUrl, headers, true)
+  // Forced only when the URL Draco holds has expired, because the cached lookup
+  // is where that expired URL came from. A download that is merely starting
+  // wants the cache: `primeYouTube` filled it while the window was open, and
+  // insisting on a fresh lookup there is six seconds spent to learn the same
+  // thing twice - once per stream, for a video and audio pair.
+  const info = await loadInfo(pageUrl, headers, force)
+  // The same guard the ladder applies, repeated at the point of use: this is
+  // the only place a YouTube download URL comes from, and what reaches the
+  // engine must be a file it can fetch rather than an HLS or DASH manifest.
   const format = (info.formats ?? []).find(
-    (candidate) => candidate.format_id === formatId && candidate.url && /^https?:/i.test(candidate.url)
+    (candidate) =>
+      candidate.format_id === formatId &&
+      candidate.url &&
+      /^https?:/i.test(candidate.url) &&
+      isDirectDownload(candidate)
   )
   if (!format?.url) {
     throw new Error(`YouTube format ${formatId} is no longer available`)

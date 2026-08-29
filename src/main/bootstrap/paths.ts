@@ -16,6 +16,8 @@ export interface AppPaths {
   queuesFile: string
   /** Streams the extension spotted, kept between runs so the panel survives a restart. */
   mediaFile: string
+  /** Empty stand-in files the shell is asked for a file-type icon against. */
+  iconCache: string
   ffmpegExe: string
   ytDlpExe: string
   defaultDownloadDir: string
@@ -49,6 +51,7 @@ export function getPaths(): AppPaths {
     categoriesFile: join(root, 'categories.json'),
     queuesFile: join(root, 'queues.json'),
     mediaFile: join(root, 'media.json'),
+    iconCache: join(root, 'icon-cache'),
     ffmpegExe: join(bin, 'ffmpeg.exe'),
     ytDlpExe: join(bin, 'yt-dlp.exe'),
     defaultDownloadDir: join(app.getPath('downloads'), 'Draco'),
@@ -64,7 +67,7 @@ export function getPaths(): AppPaths {
 /** Creates the writable tree. Safe to call repeatedly. */
 export function ensureDirs(): AppPaths {
   const p = getPaths()
-  for (const dir of [p.root, p.bin, p.logs]) {
+  for (const dir of [p.root, p.bin, p.logs, p.iconCache]) {
     mkdirSync(dir, { recursive: true })
   }
   return p

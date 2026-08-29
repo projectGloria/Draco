@@ -279,6 +279,7 @@ function normalizeMediaVariant(value: unknown): {
   bandwidth: number | null
   codecs: string | null
   estimatedSize: number | null
+  container: string | null
   youtube?: { videoFormatId: string; audioFormatId?: string | null }
 } {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Invalid media variant')
@@ -290,6 +291,17 @@ function normalizeMediaVariant(value: unknown): {
   const height = nonNegativeNumber(v.height, 'height')
   const bandwidth = nonNegativeNumber(v.bandwidth, 'bandwidth')
   const estimatedSize = nonNegativeNumber(v.estimatedSize, 'estimatedSize')
+
+  // Named on the wire so a page-derived ladder can say what the file will be,
+  // but constrained to something that can only ever be a file extension.
+  const container =
+    v.container === undefined || v.container === null
+      ? null
+      : (() => {
+          const text = boundedString(v.container, 8, 'variant container').toLowerCase()
+          if (!/^[a-z0-9]{1,8}$/.test(text)) throw new Error('Invalid variant container')
+          return text
+        })()
 
   let youtube: { videoFormatId: string; audioFormatId?: string | null } | undefined
   if (v.youtube !== undefined) {
@@ -303,7 +315,7 @@ function normalizeMediaVariant(value: unknown): {
     youtube = { videoFormatId, audioFormatId }
   }
 
-  return { url, audioUrl, label, height, bandwidth, codecs, estimatedSize, ...(youtube ? { youtube } : {}) }
+  return { url, audioUrl, label, height, bandwidth, codecs, estimatedSize, container, ...(youtube ? { youtube } : {}) }
 }
 
 function boundedString(value: unknown, max: number, label: string): string {

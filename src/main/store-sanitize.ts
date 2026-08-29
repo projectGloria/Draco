@@ -111,6 +111,7 @@ export function sanitizeSettings(input: unknown, base: Settings, defaultColumns:
     takeoverExtensions: lowerList(source.takeoverExtensions),
     takeoverExcludeHosts: lowerList(source.takeoverExcludeHosts),
     watchClipboard: source.watchClipboard === true,
+    showProgressWindow: source.showProgressWindow !== false,
     accent,
     columns,
     sortColumn: COLUMN_IDS.includes(source.sortColumn as ColumnId) ? source.sortColumn as ColumnId : base.sortColumn,

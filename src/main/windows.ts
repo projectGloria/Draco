@@ -12,7 +12,7 @@ let splashWindow: BrowserWindow | null = null
 const preload = join(__dirname, '../preload/index.js')
 
 function rendererUrl(
-  page: 'index' | 'splash' | 'handoff',
+  page: 'index' | 'splash' | 'handoff' | 'progress',
   query = ''
 ): { url?: string; file?: string; query: string } {
   const devServer = process.env.ELECTRON_RENDERER_URL
@@ -177,6 +177,87 @@ export function handoffIdForWebContents(id: number): string | null {
   return null
 }
 
+/* ------------------------------------------------------------------ */
+/* The progress window                                                 */
+/* ------------------------------------------------------------------ */
+
+/**
+ * IDM's per-download window: one small window per download the user started,
+ * showing what it is doing and offering the three buttons that matter, and
+ * turning into the "download complete" card when it finishes.
+ *
+ * It is a window rather than a row highlight because the whole point is that it
+ * is visible without the main window: the download was started from the browser
+ * and the person is still in the browser.
+ */
+const progressWindows = new Map<string, BrowserWindow>()
+
+export function createProgressWindow(taskId: string): BrowserWindow {
+  const existing = progressWindows.get(taskId)
+  if (existing && !existing.isDestroyed()) {
+    if (existing.isMinimized()) existing.restore()
+    existing.show()
+    return existing
+  }
+
+  const window = new BrowserWindow({
+    width: 470,
+    height: 264,
+    resizable: false,
+    // Minimisable, unlike the confirm window: that one asks a question and is
+    // gone, this one may sit there for an hour and has to be got out of the way
+    // without abandoning the download.
+    minimizable: true,
+    maximizable: false,
+    fullscreenable: false,
+    frame: false,
+    show: false,
+    backgroundColor: '#0b0e14',
+    webPreferences: { preload, sandbox: false, contextIsolation: true }
+  })
+
+  // Same reason the confirm windows stagger: a handful of downloads started in
+  // a row must not stack into one apparent window.
+  const offset = progressWindows.size * 26
+  if (offset > 0) {
+    const [x, y] = window.getPosition()
+    window.setPosition(x + offset, y + offset)
+  }
+
+  /*
+   * Shown, not shown-inactive.
+   *
+   * `showInactive` puts the window behind whatever is in front - and what is in
+   * front here is the browser, because the confirm window that was just clicked
+   * has closed and given focus back to it. The window was being created and
+   * then never seen, which is worse than the moment of focus it costs. IDM's
+   * progress window comes to the front too.
+   */
+  window.once('ready-to-show', () => {
+    window.show()
+    window.focus()
+  })
+
+  window.webContents.setWindowOpenHandler(({ url }) => {
+    void shell.openExternal(url)
+    return { action: 'deny' }
+  })
+
+  const target = rendererUrl('progress', `?id=${encodeURIComponent(taskId)}`)
+  if (target.url) void window.loadURL(target.url)
+  else void window.loadFile(target.file!, { search: target.query.replace(/^\?/, '') })
+
+  window.on('closed', () => progressWindows.delete(taskId))
+  progressWindows.set(taskId, window)
+  return window
+}
+
+export function closeProgressWindow(taskId: string): void {
+  const window = progressWindows.get(taskId)
+  if (window && !window.isDestroyed()) window.close()
+  progressWindows.delete(taskId)
+}
+
 /** Brings the window back from the tray or a minimised state. */
 export function showMainWindow(): void {
   if (!mainWindow) return
@@ -189,6 +270,21 @@ export function showMainWindow(): void {
 export function send(channel: string, ...args: unknown[]): void {
   if (mainWindow && !mainWindow.isDestroyed()) {
     mainWindow.webContents.send(channel, ...args)
+  }
+}
+
+/**
+ * Sends to every window that shows live download state.
+ *
+ * The progress windows are fed the same `tasks:changed` and `tasks:progress`
+ * feeds the main list is, rather than a private per-task channel: one source of
+ * truth means a paused download cannot read as running in one window and paused
+ * in the other.
+ */
+export function broadcast(channel: string, ...args: unknown[]): void {
+  send(channel, ...args)
+  for (const window of progressWindows.values()) {
+    if (!window.isDestroyed()) window.webContents.send(channel, ...args)
   }
 }
 

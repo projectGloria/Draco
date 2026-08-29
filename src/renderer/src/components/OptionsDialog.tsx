@@ -182,6 +182,12 @@ function GeneralTab(): React.ReactElement {
           onChange={(next) => void patch({ watchClipboard: next })}
           label="Watch the clipboard for download links"
         />
+        <Toggle
+          checked={settings.showProgressWindow}
+          onChange={(next) => void patch({ showProgressWindow: next })}
+          label="Show a progress window for each download"
+          hint="One small window per download you start, the way IDM does, with its own pause and cancel. Turn it off to keep everything in this list."
+        />
       </div>
     </div>
   )

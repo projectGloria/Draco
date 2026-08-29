@@ -323,3 +323,44 @@ test('a progressive format is ranked on its video bitrate, not its total', () =>
 
   assert.equal(variant.youtube.videoFormatId, '134')
 })
+
+test('a quality is labelled with the container it will actually be saved as', () => {
+  // AAC audio keeps a download in mp4 whatever the video codec is, because
+  // that is what ffmpeg is going to be asked to write.
+  const [avc] = buildVariants(formatsFromYtDlp([video('137', 1080), audio('140')]))
+  assert.equal(avc.container, 'mp4')
+
+  const [vp9] = buildVariants(
+    formatsFromYtDlp([video('248', 1080, { ext: 'webm', vcodec: 'vp9' }), audio('140')])
+  )
+  assert.equal(vp9.container, 'mp4')
+})
+
+test('opus audio decides the container it can actually live in', () => {
+  const [webm] = buildVariants(
+    formatsFromYtDlp([
+      video('248', 1080, { ext: 'webm', vcodec: 'vp9' }),
+      audio('251', { ext: 'webm', acodec: 'opus' })
+    ])
+  )
+  assert.equal(webm.container, 'webm')
+
+  // Opus beside an mp4-only video: Matroska is the only container that takes
+  // the pair without re-encoding either of them.
+  const [mixed] = buildVariants(
+    formatsFromYtDlp([
+      video('137', 1080),
+      audio('251', { ext: 'webm', acodec: 'opus' })
+    ])
+  )
+  assert.equal(mixed.container, 'mkv')
+})
+
+test('a progressive format keeps its own container', () => {
+  const [only] = buildVariants(
+    formatsFromYtDlp([
+      { format_id: '18', url: URL_, height: 360, ext: 'mp4', vcodec: 'avc1.42001E', acodec: 'mp4a.40.2', tbr: 600 }
+    ])
+  )
+  assert.equal(only.container, 'mp4')
+})

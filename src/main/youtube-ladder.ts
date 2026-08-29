@@ -167,9 +167,11 @@ function variantFor(
     .join(' / ')
 
   return {
-    // Page-derived formats have no URL of their own; the watch page stands in
-    // until `handoff:acceptMedia` resolves the real one. Nothing ever fetches
-    // this value - see `resolveYouTubeUrls`.
+    container: containerFor(video, audio),
+    // Page-derived formats have no URL of their own, and even a yt-dlp one is
+    // only ever displayed: the task carries the watch page and its format ids,
+    // and the engine resolves the signed URL as it starts. Nothing fetches this
+    // value - see `refreshYouTubeFormat`.
     url: video.url ?? '',
     audioUrl: audio?.url ?? null,
     label: tierLabel(tier, video.fps),
@@ -179,6 +181,39 @@ function variantFor(
     estimatedSize: size,
     youtube: { videoFormatId: video.id, audioFormatId: audio?.id ?? null }
   }
+}
+
+/**
+ * The extension the finished file will carry, which is also the container the
+ * mux has to produce.
+ *
+ * Muxing is always `-c copy`, so the container must accept both streams exactly
+ * as they came off the wire. MP4 takes all of YouTube's video codecs - avc1,
+ * vp9 and av01 alike - so an AAC audio track keeps the whole thing in the .mp4
+ * people expect. Opus is the awkward one: it belongs in WebM, and pairing it
+ * with an MP4-only video leaves Matroska as the only container that will hold
+ * the pair without re-encoding.
+ */
+export function containerFor(video: SourceFormat, audio: SourceFormat | null): string {
+  const videoFamily = familyOf(video)
+  if (!audio) return videoFamily ?? 'mp4'
+
+  const audioFamily = familyOf(audio)
+  if (audioFamily === 'mp4') return 'mp4'
+  if (audioFamily === 'webm') return videoFamily === 'webm' ? 'webm' : 'mkv'
+  return videoFamily ?? 'mp4'
+}
+
+/** Which of the two container families a format belongs to, by ext then codec. */
+function familyOf(format: SourceFormat): 'mp4' | 'webm' | null {
+  const ext = (format.ext ?? '').toLowerCase()
+  if (/^(mp4|m4a|m4v|mov|3gp)$/.test(ext)) return 'mp4'
+  if (/^(webm|weba)$/.test(ext)) return 'webm'
+
+  const codecs = `${format.vcodec ?? ''} ${format.acodec ?? ''}`.toLowerCase()
+  if (/mp4a|avc1|h264|aac/.test(codecs)) return 'mp4'
+  if (/opus|vorbis/.test(codecs)) return 'webm'
+  return null
 }
 
 function isStoryboardFormat(format: SourceFormat): boolean {

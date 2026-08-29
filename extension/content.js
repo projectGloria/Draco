@@ -106,6 +106,23 @@ const ADAPTIVE_SITES =
 const isTopFrame = window.top === window
 const overlays = new Map()
 
+/**
+ * Videos Draco has already taken, and whether anything on this page has been.
+ *
+ * Once a download has been handed over, the button has done its job and stays
+ * gone: leaving it there invites a second copy of the same file, and there is
+ * nothing useful for a second press to do.
+ *
+ * Both are forgotten the moment the page becomes a different page - see
+ * `checkNavigation`. YouTube is a single-page app, so the next video arrives
+ * without a reload and often in the very same `<video>` element; without that
+ * reset the button would be retired for the rest of the browsing session and
+ * the second video could not be downloaded at all.
+ */
+let handled = new WeakSet()
+let takenOver = false
+let pageKey = location.href
+
 let mediaCount = 0
 let scheduled = false
 let scanScheduled = false
@@ -220,6 +237,23 @@ function paint(entry) {
   entry.button.className = classes.join(' ')
 }
 
+/**
+ * Retires a button after Draco has taken its video: the confirmation stays up
+ * long enough to be read, then the button is gone for the rest of the page's
+ * life.
+ */
+function retire(entry) {
+  takenOver = true
+  handled.add(entry.video)
+  removePanel()
+
+  clearTimeout(entry.resetTimer)
+  entry.resetTimer = setTimeout(() => {
+    destroy(entry)
+    overlays.delete(entry.video)
+  }, 1800)
+}
+
 function setLabel(entry, text, state, title) {
   entry.label.textContent = text
   entry.state = state ?? ''
@@ -252,6 +286,7 @@ async function grab(entry) {
       const reply = await chrome.runtime.sendMessage({ type: 'draco:resolve-youtube' })
       if (reply?.ok) {
         setLabel(entry, 'Opened in Draco', 'done')
+        retire(entry)
       } else {
         setLabel(
           entry,
@@ -286,6 +321,7 @@ async function grab(entry) {
 
   if (reply?.ok) {
     setLabel(entry, 'Opened in Draco', 'done')
+    retire(entry)
     return
   }
 
@@ -387,9 +423,34 @@ function destroy(entry) {
   entry.host.remove()
 }
 
+/**
+ * Notices an in-page navigation and puts the button back.
+ *
+ * Checked here rather than through `history` patching or a site-specific event:
+ * this runs off the same mutation-driven scan the buttons already depend on, so
+ * it needs nothing from the page and works wherever that does.
+ */
+function checkNavigation() {
+  if (location.href === pageKey) return
+  pageKey = location.href
+
+  handled = new WeakSet()
+  takenOver = false
+
+  // The overlays go with the old page. Rebuilding them is what returns a button
+  // to a reused video element, and `destroy` also cancels the retire timer of
+  // anything that was mid-retirement when the navigation happened.
+  for (const [video, entry] of overlays) {
+    destroy(entry)
+    overlays.delete(video)
+  }
+}
+
 function scan() {
+  checkNavigation()
+
   for (const video of document.querySelectorAll('video')) {
-    if (!overlays.has(video)) createOverlay(video)
+    if (!overlays.has(video) && !handled.has(video)) createOverlay(video)
   }
   schedule()
 }
@@ -448,6 +509,7 @@ function ensurePanel() {
       .sendMessage({ type: 'draco:grab-best', videoSrc: '', adaptive: false })
       .catch(() => null)
 
+    if (reply?.ok) takenOver = true
     panelShadow.querySelector('.label').textContent = reply?.ok
       ? 'Opened in Draco'
       : 'Nothing Draco can grab'
@@ -467,6 +529,9 @@ function updatePanel() {
   // Only in the top frame, and only when there is no video to hang a button on
   // - otherwise the page gets a button *and* a panel saying the same thing.
   if (!isTopFrame) return
+  // The page has already been handed over; the retired button must not come
+  // back as a panel saying the same thing.
+  if (takenOver) return
 
   if (mediaCount > 0 && overlays.size === 0) {
     ensurePanel()

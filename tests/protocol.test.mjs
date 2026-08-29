@@ -38,6 +38,7 @@ test('native-message media variants are normalized to the supported shape', () =
       bandwidth: 4_000_000,
       codecs: 'avc1.640028',
       estimatedSize: 12_345,
+      container: 'MP4',
       ignoredByCaller: { anything: true }
     }]
   })
@@ -48,7 +49,8 @@ test('native-message media variants are normalized to the supported shape', () =
     height: 1080,
     bandwidth: 4_000_000,
     codecs: 'avc1.640028',
-    estimatedSize: 12_345
+    estimatedSize: 12_345,
+    container: 'mp4'
   }])
 })
 

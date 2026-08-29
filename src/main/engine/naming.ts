@@ -71,14 +71,47 @@ export function filenameFromDisposition(header: string | undefined): string | nu
     const raw = (plain[2] ?? plain[3] ?? '').trim()
     if (raw) {
       try {
-        return decodeURIComponent(raw)
+        return decodeHeaderText(decodeURIComponent(raw))
       } catch {
-        return raw
+        return decodeHeaderText(raw)
       }
     }
   }
 
   return null
+}
+
+/**
+ * Repairs a header value whose UTF-8 bytes were decoded as Latin-1.
+ *
+ * HTTP header values are bytes, and both the spec and every client decode them
+ * as ISO-8859-1 - so a server that writes a Japanese filename straight into
+ * `filename=` hands us one JS character per *byte*. Left alone that reaches the
+ * UI as mojibake and then becomes the name of the file on disk.
+ *
+ * Re-decoding is only attempted when the string could be raw bytes and those
+ * bytes are valid UTF-8. That combination is vanishingly unlikely to occur by
+ * accident: a genuinely Latin-1 name such as "Gruesse" spelled with U+00FC
+ * fails the UTF-8 check and is returned untouched.
+ */
+export function decodeHeaderText(value: string): string {
+  // Tested by codepoint rather than with a regex literal, for the same reason
+  // the control-character filter above is: those bytes do not survive editors.
+  let hasHighByte = false
+  for (const ch of value) {
+    const code = ch.codePointAt(0) ?? 0
+    // Something past Latin-1 is a real string, not a run of misread bytes.
+    if (code > 0xff) return value
+    if (code >= 0x80) hasHighByte = true
+  }
+  if (!hasHighByte) return value
+
+  const bytes = Uint8Array.from(value, (ch) => ch.charCodeAt(0))
+  try {
+    return new TextDecoder('utf-8', { fatal: true }).decode(bytes)
+  } catch {
+    return value
+  }
 }
 
 /** Last path segment of a URL, percent-decoded, query and fragment stripped. */

@@ -9,8 +9,9 @@ import type {
 } from '@shared/types'
 import { formatBytes, hostOf } from '../lib/format'
 import { applyAccent } from '../store/app'
-import { BrandMark, CloseGlyph, DownloadIcon, FolderIcon, VideoIcon } from './Icons'
+import { BrandMark, CloseGlyph, FolderIcon } from './Icons'
 import { GhostButton, PrimaryButton } from './Dialog'
+import FileIcon, { SiteIcon } from './FileIcon'
 
 /**
  * IDM's download dialog, as its own window.
@@ -167,7 +168,11 @@ function FileBody({
   return (
     <>
       <div className="flex-1 min-h-0 overflow-y-auto px-5 py-4 space-y-3.5">
-        <Source url={request.url} title={request.pageTitle} />
+        <Source
+          url={request.url}
+          title={request.pageTitle}
+          icon={<FileIcon name={filename} className="w-4 h-4" color="var(--accent)" />}
+        />
 
         <Field label="File name">
           <input
@@ -304,7 +309,11 @@ function MediaBody({
   return (
     <>
       <div className="flex-1 min-h-0 overflow-y-auto px-5 py-4 space-y-3.5">
-        <Source url={request.pageUrl ?? request.url} title={request.pageTitle} media />
+        <Source
+          url={request.pageUrl ?? request.url}
+          title={request.pageTitle}
+          icon={<SiteIcon url={request.pageUrl ?? request.url} className="w-4 h-4" />}
+        />
 
         <Field label="Quality">
           {error ? (
@@ -326,7 +335,7 @@ function MediaBody({
               {variants.map((entry, index) => (
                 <option key={entry.url + index} value={index}>
                   {entry.label}
-                  {entry.bandwidth ? ` · ${Math.round(entry.bandwidth / 1000)} kbps` : ''}
+                  {` · ${containerOf(entry, request).toUpperCase()}`}
                   {entry.estimatedSize ? ` · ${formatBytes(entry.estimatedSize)}` : ''}
                 </option>
               ))}
@@ -418,14 +427,21 @@ function Field({
   )
 }
 
+/**
+ * The one line that says what this window is about.
+ *
+ * The mark beside it is the source's own - the site's favicon for a video, the
+ * shell's file-type icon for a download - because a window that appeared
+ * unbidden in front of the browser has to be recognisable before it is read.
+ */
 function Source({
   url,
   title,
-  media
+  icon
 }: {
   url: string
   title?: string
-  media?: boolean
+  icon: React.ReactNode
 }): React.ReactElement {
   return (
     <div className="flex items-start gap-2.5">
@@ -433,7 +449,7 @@ function Source({
         className="w-8 h-8 rounded-lg grid place-items-center shrink-0"
         style={{ background: 'var(--accent-soft)', color: 'var(--accent)' }}
       >
-        {media ? <VideoIcon className="w-4 h-4" /> : <DownloadIcon className="w-4 h-4" />}
+        {icon}
       </span>
       <div className="min-w-0">
         <div className="text-[12.5px] font-semibold truncate" title={title || url}>
@@ -566,6 +582,23 @@ function fallbackName(url: string): string {
   }
 }
 
+/**
+ * The extension this quality will land as.
+ *
+ * The variant usually knows - the ladder works it out from the codecs it is
+ * about to mux together - and that is the answer to prefer, because it is the
+ * container ffmpeg will actually be asked to write. Falling back to the URL
+ * covers a progressive file, and mp4 covers a playlist, which is what
+ * `filenameForKind` turns an HLS download into.
+ */
+function containerOf(variant: MediaVariant | null, request: HandoffRequest): string {
+  if (variant?.container) return variant.container
+
+  const url = variant?.url || request.url || ''
+  const match = /\.(mp4|mkv|webm|mov|m4v|ts|mp3|m4a|opus|flac|wav)(\?|#|$)/i.exec(url)
+  return match ? match[1].toLowerCase() : 'mp4'
+}
+
 /** A video's name comes from the page title; a playlist URL never describes it. */
 function suggestName(request: HandoffRequest, variant: MediaVariant | null): string {
   let base = (request.pageTitle || hostOf(request.pageUrl ?? request.url) || 'video')
@@ -579,11 +612,5 @@ function suggestName(request: HandoffRequest, variant: MediaVariant | null): str
   const quality = variant?.height ? ' ' + variant.height + 'p' : ''
   const baseName = (base || 'video') + quality
 
-  const url = variant?.url || request.url || ''
-  let ext = '.mp4'
-  if (/\.mkv(\?|$)/i.test(url)) ext = '.mkv'
-  else if (/\.webm(\?|$)/i.test(url)) ext = '.webm'
-  else if (/\.ts(\?|$)/i.test(url)) ext = '.ts'
-
-  return baseName + ext
+  return baseName + '.' + containerOf(variant, request)
 }

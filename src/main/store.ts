@@ -87,6 +87,7 @@ export function defaultSettings(): Settings {
     takeoverExtensions: [],
     takeoverExcludeHosts: [],
     watchClipboard: false,
+    showProgressWindow: true,
     accent: '#38bdf8',
     columns: defaultColumns(),
     sortColumn: 'added',

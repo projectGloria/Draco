@@ -22,6 +22,7 @@ import { sanitizeFilename, uniquePath } from './engine/naming.ts'
 import type { DownloadManager } from './engine/manager.ts'
 import { probeUrl } from './engine/probe.ts'
 import { resolveVariants } from './hls/playlist.ts'
+import { iconForExtension, iconForSite } from './icons.ts'
 import { logger } from './log.ts'
 import type { Scheduler } from './queue/scheduler.ts'
 import {
@@ -32,8 +33,13 @@ import {
   saveSettings,
   persistTasks
 } from './store.ts'
-import { closeHandoffWindow, getMainWindow, send } from './windows.ts'
-import { resolveYouTubeUrls } from './youtube.ts'
+import {
+  broadcast,
+  closeHandoffWindow,
+  createProgressWindow,
+  getMainWindow,
+  send
+} from './windows.ts'
 
 const log = logger('ipc')
 
@@ -110,6 +116,19 @@ export function refileTask(task: DownloadTask): void {
   task.categoryId = categoryId
 }
 
+/**
+ * Opens the per-download window for a download the user just started.
+ *
+ * Only for downloads someone actually asked for: a queue draining overnight, or
+ * the restore pass at startup, must not paper the desktop with windows nobody
+ * pressed a button for.
+ */
+function announce(task: DownloadTask): void {
+  if (!getSettings().showProgressWindow) return
+  log.info(`progress window for ${task.filename || task.url}`)
+  createProgressWindow(task.id)
+}
+
 export function registerIpc(ctx: AppContext): void {
   const handle = <T extends unknown[], R>(
     channel: string,
@@ -132,8 +151,11 @@ export function registerIpc(ctx: AppContext): void {
   handle('tasks:add', async (input: NewDownload) => {
     const task = placeTask(input)
     ctx.manager.add(task, input.autoStart !== false)
+    if (input.autoStart !== false) announce(task)
     return task
   })
+
+  handle('tasks:get', (id: string) => ctx.manager.get(id) ?? null)
 
   handle('tasks:probe', (url: string, headers: RequestHeaders | undefined) =>
     probeUrl(validateUrl(url), { headers, timeoutMs: getSettings().timeoutMs })
@@ -204,6 +226,7 @@ export function registerIpc(ctx: AppContext): void {
       youtube: task.youtube ? { pageUrl: task.youtube.pageUrl, videoFormatId: task.youtube.videoFormatId, audioFormatId: task.youtube.audioFormatId ?? null } : undefined
     })
     ctx.manager.add(fresh, true)
+    announce(fresh)
   })
 
   handle('tasks:open', async (id: string) => {
@@ -216,7 +239,7 @@ export function registerIpc(ctx: AppContext): void {
       await access(target, constants.F_OK)
     } catch {
       task.status = 'missing'
-      send('tasks:changed', ctx.manager.list())
+      broadcast('tasks:changed', ctx.manager.list())
       return
     }
     await shell.openPath(target)
@@ -251,6 +274,7 @@ export function registerIpc(ctx: AppContext): void {
     })
 
     ctx.manager.add(task, input.autoStart !== false)
+    if (input.autoStart !== false) announce(task)
     closeHandoffWindow(id)
     return task
   })
@@ -274,10 +298,7 @@ export function registerIpc(ctx: AppContext): void {
     if (!candidate) throw new Error('That media entry is gone')
     if (candidate.type === 'dash') throw new Error('MPEG-DASH streams are not supported yet - only HLS')
 
-    // Resolved before the handoff is consumed, for the same reason: a lookup
-    // that fails should leave the window able to try again, not strand the user
-    // with a dismissed request and no download.
-    const urls = await resolveChosenUrls(candidate, opts)
+    const urls = resolveChosenUrls(candidate, opts)
 
     takeHandoff(id)
 
@@ -295,6 +316,7 @@ export function registerIpc(ctx: AppContext): void {
     })
 
     ctx.manager.add(task, true)
+    announce(task)
     closeHandoffWindow(id)
     return task
   })
@@ -338,7 +360,7 @@ export function registerIpc(ctx: AppContext): void {
     if (!candidate) throw new Error('That media entry is gone')
     if (candidate.type === 'dash') throw new Error('MPEG-DASH streams are not supported yet - only HLS')
 
-    const urls = await resolveChosenUrls(candidate, opts)
+    const urls = resolveChosenUrls(candidate, opts)
 
     const task = placeTask({
       url: urls.url,
@@ -351,6 +373,7 @@ export function registerIpc(ctx: AppContext): void {
     })
 
     ctx.manager.add(task, true)
+    announce(task)
     return task
   })
 
@@ -402,6 +425,11 @@ export function registerIpc(ctx: AppContext): void {
 
   handle('clipboard:write', (text: string) => clipboard.writeText(String(text)))
 
+  /* icons - the shell's, and the source site's */
+
+  handle('icons:file', (extension: string) => iconForExtension(String(extension)))
+  handle('icons:site', (url: string) => iconForSite(String(url)))
+
   /* window controls - the frame is custom, so these are the buttons */
 
   handle('window:minimize', () => getMainWindow()?.minimize())
@@ -415,6 +443,17 @@ export function registerIpc(ctx: AppContext): void {
     const window = getMainWindow()
     if (getSettings().closeToTray) window?.hide()
     else ctx.quit()
+  })
+
+  // The progress windows each need to work their own frame, and only their own.
+  // Registered raw rather than through `handle` because the sender is the whole
+  // point: a window may not name another window to act on.
+  ipcMain.handle('window:minimizeSelf', (event) => {
+    BrowserWindow.fromWebContents(event.sender)?.minimize()
+  })
+
+  ipcMain.handle('window:closeSelf', (event) => {
+    BrowserWindow.fromWebContents(event.sender)?.close()
   })
 }
 
@@ -468,39 +507,53 @@ export async function resolveCandidate(
 }
 
 /**
- * Turns a chosen quality into the URLs that will actually be fetched.
+ * Turns a chosen quality into the URLs the task will carry.
  *
  * A YouTube variant identifies its format by itag, not by URL - the ladder is
  * read from the page, which is web content and gets no say in what Draco
- * requests. So the signed URLs are looked up here, from yt-dlp, at the moment
- * the user commits. The lookup was primed when the window opened, so this is
- * usually already sitting in the cache.
+ * requests - so a YouTube task carries the watch page and its format ids, and
+ * the engine looks the signed URLs up itself as it starts (`TaskRunner.run`).
+ *
+ * Doing it there rather than here is what makes Start feel like IDM's. Pressing
+ * the button used to wait on yt-dlp before anything at all appeared; now the
+ * window closes at once and the wait, when there is one, happens in the
+ * progress window with the download visibly connecting. It also means a signed
+ * URL is never written to tasks.json, where it would expire and leave a task
+ * that cannot be resumed without one.
+ *
+ * The audio half is named the same way - the page URL stands in for it - because
+ * it is the presence of `audioUrl` that tells the manager this is a two-stream
+ * download to mux.
  */
-async function resolveChosenUrls(
+function resolveChosenUrls(
   candidate: MediaCandidate,
   opts: {
     variantUrl: string
     audioUrl?: string | null
     youtube?: { videoFormatId: string; audioFormatId?: string | null }
   }
-): Promise<{ url: string; audioUrl: string | null }> {
+): { url: string; audioUrl: string | null } {
   if (!opts.youtube) {
     return { url: opts.variantUrl, audioUrl: opts.audioUrl ?? null }
   }
 
-  const resolved = await resolveYouTubeUrls(
-    candidate.pageUrl,
-    candidate.headers,
-    opts.youtube.videoFormatId,
-    opts.youtube.audioFormatId ?? null
-  )
-  return { url: resolved.videoUrl, audioUrl: resolved.audioUrl }
+  return {
+    url: candidate.pageUrl,
+    audioUrl: opts.youtube.audioFormatId ? candidate.pageUrl : null
+  }
 }
 
 /** Turns an extension handoff into a queued download. */
 export function handoffToTask(
   ctx: AppContext,
-  message: { url: string; filename?: string; referer?: string; cookie?: string; userAgent?: string }
+  message: {
+    url: string
+    filename?: string
+    referer?: string
+    cookie?: string
+    userAgent?: string
+    bulk?: boolean
+  }
 ): DownloadTask {
   const task = placeTask({
     url: message.url,
@@ -513,6 +566,10 @@ export function handoffToTask(
   })
 
   ctx.manager.add(task, true)
+  // With the confirm window turned off this is the only thing the user sees of
+  // a download they started, so it matters most here. A bulk action still gets
+  // nothing: forty windows is the problem the confirm window already avoids.
+  if (!message.bulk) announce(task)
   return task
 }
 

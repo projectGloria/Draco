@@ -25,7 +25,7 @@ export interface TaskRunnerDeps {
   /** Fired on status transitions - the points worth persisting. */
   onUpdate(task: DownloadTask): void
   onFinished(task: DownloadTask, error: Error | null): void
-  refreshYouTube?(task: DownloadTask): Promise<string>
+  refreshYouTube?(task: DownloadTask, force: boolean): Promise<string>
   /**
    * Called once the probe has settled the real filename and MIME type, before
    * any bytes touch the disk. This is where the app re-files the task into the
@@ -229,9 +229,21 @@ export class TaskRunner {
 
     let probeTarget = this.task.url
     if (this.task.youtube && this.deps.refreshYouTube) {
-      probeTarget = this.forcedProbeUrl ?? await this.deps.refreshYouTube(this.task)
+      /*
+       * A YouTube task holds the watch page, never a signed media URL: those
+       * expire, so storing one only means the task is born with a fuse. The
+       * real URL is looked up here, at the moment bytes are about to be asked
+       * for, from the lookup the confirm window primed - which is why this is
+       * unforced and normally costs nothing.
+       */
+      if (!this.forcedProbeUrl) {
+        this.task.detail = 'Getting the download link…'
+        this.deps.onUpdate(this.task)
+      }
+      probeTarget = this.forcedProbeUrl ?? (await this.deps.refreshYouTube(this.task, false))
       this.forcedProbeUrl = null
       this.task.finalUrl = probeTarget
+      this.task.detail = null
     }
 
     const probe = await probeUrl(probeTarget, {
@@ -411,7 +423,8 @@ export class TaskRunner {
                 throw new Error('YouTube media URL expired again after a refresh')
               }
               this.urlRefreshes++
-              this.urlRefreshPromise = this.deps.refreshYouTube(this.task).then((refreshedUrl) => {
+              // Forced: the URL this task holds is the one that just 401'd.
+              this.urlRefreshPromise = this.deps.refreshYouTube(this.task, true).then((refreshedUrl) => {
                 if (!/^https?:\/\//i.test(refreshedUrl)) {
                   throw new Error('YouTube returned an invalid refreshed media URL')
                 }

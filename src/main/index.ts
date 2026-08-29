@@ -33,6 +33,7 @@ import {
 } from './store.ts'
 import { createTray, destroyTray } from './tray.ts'
 import {
+  broadcast,
   closeSplash,
   createHandoffWindow,
   createMainWindow,
@@ -122,9 +123,11 @@ async function main(): Promise<void> {
     },
     onTasks: (tasks) => {
       persistTasks(tasks)
-      send('tasks:changed', tasks)
+      // Broadcast rather than sent: each open progress window is watching the
+      // same feed for the one task it is about.
+      broadcast('tasks:changed', tasks)
     },
-    onProgress: (updates) => send('tasks:progress', updates),
+    onProgress: (updates) => broadcast('tasks:progress', updates),
     onProbed: (task) => refileTask(task),
     createHlsRunner: (task, context) =>
       new HlsRunner(
@@ -142,11 +145,11 @@ async function main(): Promise<void> {
         }
       ),
     createDashRunner: (task, context) => new DashRunner(task, context),
-    refreshYouTube: async (task) => {
+    refreshYouTube: async (task, force) => {
       if (!task.youtube) throw new Error('Missing YouTube source metadata')
       const formatId = task.youtube.role === 'audio' ? task.youtube.audioFormatId : task.youtube.videoFormatId
       if (!formatId) throw new Error('Missing YouTube format identity')
-      return refreshYouTubeFormat(task.youtube.pageUrl, task.headers, formatId)
+      return refreshYouTubeFormat(task.youtube.pageUrl, task.headers, formatId, force)
     }
   })
 

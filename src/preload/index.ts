@@ -35,6 +35,7 @@ const api: RendererApi = {
 
   /* tasks */
   listTasks: () => ipcRenderer.invoke('tasks:list'),
+  getTask: (id: string) => ipcRenderer.invoke('tasks:get', id),
   addDownload: (input: NewDownload) => ipcRenderer.invoke('tasks:add', input),
   probe: (url: string, headers?: RequestHeaders) => ipcRenderer.invoke('tasks:probe', url, headers),
   startTasks: (ids: string[]) => ipcRenderer.invoke('tasks:start', ids),
@@ -90,10 +91,16 @@ const api: RendererApi = {
   registerIntegration: () => ipcRenderer.invoke('integration:register'),
   copyToClipboard: (text: string) => ipcRenderer.invoke('clipboard:write', text),
 
+  /* icons */
+  fileIcon: (extension: string) => ipcRenderer.invoke('icons:file', extension),
+  siteIcon: (url: string) => ipcRenderer.invoke('icons:site', url),
+
   /* window */
   minimize: () => ipcRenderer.invoke('window:minimize'),
   toggleMaximize: () => ipcRenderer.invoke('window:toggleMaximize'),
   close: () => ipcRenderer.invoke('window:close'),
+  minimizeSelf: () => ipcRenderer.invoke('window:minimizeSelf'),
+  closeSelf: () => ipcRenderer.invoke('window:closeSelf'),
   onMaximizeChange: (cb) => subscribe<boolean>('window:maximized', cb),
   onToast: (cb) => subscribe<Toast>('toast', cb),
   onClipboardUrl: (cb) => subscribe<string>('clipboard:url', cb)

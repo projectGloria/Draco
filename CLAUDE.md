@@ -42,8 +42,9 @@ node tools/dl.ts <url> [--dir DIR] [--conn N] [--limit BPS] [--min-split BYTES] 
 Four separately-built artifacts cooperate:
 
 1. **Electron main** (`src/main`) — owns all state and all privilege.
-2. **Renderer** (`src/renderer`) — React 19 + Zustand + Tailwind v4; three HTML
-   entries: `index` (app), `splash`, `handoff` (the per-download confirm window).
+2. **Renderer** (`src/renderer`) — React 19 + Zustand + Tailwind v4; four HTML
+   entries: `index` (app), `splash`, `handoff` (the per-download confirm window)
+   and `progress` (IDM's per-download progress window).
 3. **Go native host** (`host/main.go`) — a console binary Chrome launches.
 4. **Chrome MV3 extension** (`extension/`) — loaded unpacked by the user.
 
@@ -139,19 +140,26 @@ seeing the quality list:
   that set them.
 - **`pageFormats` is metadata only and carries no URLs.** The page is web
   content; it may name a format by itag but must never nominate what Draco
-  fetches. Every download URL still comes from yt-dlp, resolved in
-  `handoff:acceptMedia` / `media:download` via `resolveChosenUrls`. Consequently
-  a page-derived `MediaVariant.url` is `''` until then — `sanitizeVariants`
+  fetches. Every download URL still comes from yt-dlp, and from exactly one
+  place: `refreshYouTubeFormat`, which re-applies `isDirectDownload`.
+  Consequently a page-derived `MediaVariant.url` is `''` — `sanitizeVariants`
   permits that only when a `youtube` format id is present.
+- **A YouTube task carries the watch page, never a signed URL.** `url` (and
+  `audioUrl`, which is what selects the DASH runner) is the watch page plus the
+  chosen format ids; `TaskRunner.run` resolves the real URL as it starts. That
+  keeps an expiring URL out of `tasks.json`, and it is why pressing Start closes
+  the confirm window at once instead of waiting on yt-dlp first.
 - `primeYouTube` starts the yt-dlp lookup as the confirm window opens, so it
-  overlaps with the user choosing. `loadInfo` caches per video id for 5 minutes;
-  `refreshYouTubeFormat` forces past that cache, since it is only ever called
-  because the cached URL expired.
+  overlaps with the user choosing and the start above normally finds it cached.
+  `loadInfo` caches per video id for 5 minutes. `refreshYouTube(task, force)`
+  distinguishes the two callers: a start takes the cache, a 401/403 part-way
+  through forces past it, because the expired URL came from that cache. Forcing
+  on both would run yt-dlp again per stream — twice more for a video+audio pair.
 - Main logs which path produced the ladder ("from the page" vs "from yt-dlp") —
   check `%APPDATA%/Draco/logs/main.log` when the picker is slow.
 
 `youtube-ladder.ts` collapses YouTube's many duplicate formats into one entry per
-quality rung — the highest-bitrate copy of each — labelled 8K/4K/2K/1080p. Three
+quality rung — the highest-bitrate copy of each — labelled 8K/4K/2K/1080p. Four
 rules there are not obvious and are individually tested:
 
 - **Only directly fetchable formats** (`isDirectDownload`). yt-dlp also lists
@@ -164,6 +172,11 @@ rules there are not obvious and are individually tested:
 - **Progressive formats are ranked on video bitrate**, discounting the audio that
   their `tbr` includes, so they do not beat video-only formats on bitrate they do
   not have.
+- **`container` is what the mux must produce**, not what the video half happens
+  to be: `-c copy` means the container has to take both streams as they are. AAC
+  keeps it `.mp4` whatever the video codec, Opus needs `.webm`, and Opus beside
+  an MP4-only video leaves `.mkv`. It is also the extension the quality picker
+  shows and the name it suggests, so the label and the file cannot disagree.
 
 ### Playlists (`src/main/hls`)
 
@@ -201,6 +214,16 @@ or filling an undrained pipe, is a finished download stuck on "Muxing" forever.
   only `runBootstrap()` is retryable.
 - Handoffs are held in `AppContext.pendingHandoffs` in main, because the host can
   cold-start the app *in order to* service a download and there is no window yet.
+- The progress windows (`windows.ts`, one per task id) are fed by `broadcast()`
+  rather than `send()`: they watch the same `tasks:changed` and `tasks:progress`
+  feeds the list does, so no window can disagree with another about a download.
+  `ipc.ts:announce` opens one only for downloads a person actually started - not
+  for a queue draining or the restore pass - and only while `showProgressWindow`
+  is on. A window whose task leaves the list closes itself.
+- Icons in the UI are not Draco's: `icons.ts` asks the shell for the file-type
+  association (via an empty stand-in file, because `app.getFileIcon` needs a real
+  path) and fetches the source site's own `/favicon.ico`, both cached per process
+  and handed over as data URLs so `img-src 'self' data:` stays as tight as it is.
 
 ## Conventions
 
@@ -216,7 +239,7 @@ typecheck. The renderer additionally has `@` → `src/renderer/src`.
 
 **What can be unit-tested.** A module is testable only if its whole value-import
 graph is free of Electron. `paths.ts`, `integration.ts`, `clipboard.ts`,
-`index.ts`, `ipc.ts`, `tray.ts` and `windows.ts` import `electron`, and anything
+`icons.ts`, `index.ts`, `ipc.ts`, `tray.ts` and `windows.ts` import `electron`, and anything
 pulling one of them in (`log.ts` → `paths.ts`, so also `mux.ts`) cannot be loaded
 by `node --test`. When logic inside such a file is worth testing, split it out as
 its own Electron-free module — that is why `store-sanitize.ts` and

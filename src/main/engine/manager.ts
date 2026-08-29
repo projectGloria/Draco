@@ -32,7 +32,16 @@ export interface RunnerContext {
   onUpdate(task: DownloadTask): void
   onFinished(task: DownloadTask, error: Error | null): void
   onProbed?(task: DownloadTask): void | Promise<void>
-  refreshYouTube?(task: DownloadTask): Promise<string>
+  /**
+  * The signed media URL for this task's format.
+  *
+  * `force` distinguishes the two callers: starting a download wants whatever
+  * the last lookup found and is happy with a cached answer, while a 403
+  * part-way through means the URL in hand has expired and only a fresh lookup
+  * will do. Passing `true` on both would run yt-dlp again for every start,
+  * throwing away the lookup the confirm window already primed.
+  */
+  refreshYouTube?(task: DownloadTask, force: boolean): Promise<string>
 }
 
 export interface ManagerOptions {
@@ -50,7 +59,7 @@ export interface ManagerOptions {
    */
   createHlsRunner?(task: DownloadTask, context: RunnerContext): Runner
   createDashRunner?(task: DownloadTask, context: RunnerContext): Runner
-  refreshYouTube?: (task: DownloadTask) => Promise<string>
+  refreshYouTube?: (task: DownloadTask, force: boolean) => Promise<string>
 }
 
 /** How often speed, ETA and segment snapshots are recomputed and published. */

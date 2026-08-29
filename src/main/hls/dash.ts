@@ -182,6 +182,14 @@ export class DashRunner implements Runner {
     if (!this.muxing) {
       const states = [this.videoRunner.task.status, this.audioRunner.task.status]
       this.task.status = states.includes('downloading') ? 'downloading' : 'probing'
+
+      // Before any bytes move, the only thing worth saying is what the children
+      // are waiting on - resolving a YouTube URL, most of the time - and the
+      // parent is the task the list and the progress window are looking at.
+      this.task.detail =
+        this.task.status === 'downloading'
+          ? null
+          : (this.videoRunner.task.detail ?? this.audioRunner.task.detail)
     }
 
     this.task.received = this.videoRunner.task.received + this.audioRunner.task.received

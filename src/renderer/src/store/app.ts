@@ -51,6 +51,7 @@ function provisionalSettings(): Settings {
     takeoverExtensions: [],
     takeoverExcludeHosts: [],
     watchClipboard: false,
+    showProgressWindow: true,
     accent: '#38bdf8',
     columns: [
       { id: 'name', width: 320, visible: true },
