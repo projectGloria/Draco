@@ -33,6 +33,11 @@ const SOURCES = [
 /** Anything smaller is a redirect stub or an error page, not a build archive. */
 const MIN_ZIP_BYTES = 10_000_000
 
+/** How long the mirror gets to answer at all. */
+const CONNECT_TIMEOUT_MS = 30_000
+/** How long it may then go without producing a byte. */
+const STALL_TIMEOUT_MS = 60_000
+
 export interface ProvisionProgress {
   stage: 'downloading' | 'extracting'
   percent: number | null
@@ -58,6 +63,18 @@ export function ensureFfmpeg(onProgress?: (p: ProvisionProgress) => void): Promi
 async function provision(onProgress?: (p: ProvisionProgress) => void): Promise<string> {
   const target = getPaths().ffmpegExe
   if (await isUsable(target)) return target
+
+  /*
+   * A copy already on PATH is worth finding before fetching a second one. Plenty
+   * of machines already have ffmpeg installed, and the alternative - downloading
+   * 170 MB that fails on a flaky link - leaves a finished download sitting on
+   * "Muxing" with nothing to mux it.
+   */
+  const onPath = await findOnPath('ffmpeg.exe')
+  if (onPath && (await isUsable(onPath))) {
+    log.info(`using ffmpeg from PATH: ${onPath}`)
+    return onPath
+  }
 
   await mkdir(dirname(target), { recursive: true })
 
@@ -85,6 +102,10 @@ async function install(
   const zipPath = join(work, 'build.zip')
 
   try {
+    // Announced before the request rather than on the first chunk: connecting to
+    // a slow mirror can take many seconds, and until then the caller's own label
+    // ("Muxing") is left on screen describing the wrong thing entirely.
+    onProgress?.({ stage: 'downloading', percent: null })
     await download(url, zipPath, onProgress)
 
     onProgress?.({ stage: 'extracting', percent: null })
@@ -127,43 +148,68 @@ async function download(
   destPath: string,
   onProgress?: (p: ProvisionProgress) => void
 ): Promise<void> {
-  const res = await fetch(url, { redirect: 'follow', headers: { 'user-agent': 'Draco' } })
-  if (!res.ok || !res.body) throw new Error(`HTTP ${res.status} for ${url}`)
-
-  const lengthHeader = res.headers.get('content-length')
-  const total = lengthHeader ? Number(lengthHeader) : null
-  let received = 0
-
-  const file = createWriteStream(destPath)
-  const counter = new Writable({
-    write(chunk: Buffer, _encoding, callback) {
-      received += chunk.length
-      onProgress?.({
-        stage: 'downloading',
-        percent: total ? Math.min(100, (received / total) * 100) : null
-      })
-      file.write(chunk, () => callback())
-    },
-    final(callback) {
-      file.end(() => callback())
-    }
-  })
-
-  await pipeline(res.body as unknown as NodeJS.ReadableStream, counter)
-
   /*
-   * A stream that ends early does not always reject: the peer can close the
-   * connection cleanly mid-body and `pipeline` resolves on a partial file. That
-   * is how a 170 MB archive arrived as 152 MB and reached tar as "this does not
-   * look like a tar archive" - a confusing error a long way from its cause.
-   * Content-Length is the only thing that catches it.
+   * Both timeouts matter. Without them a mirror that accepts the connection and
+   * then goes quiet leaves the whole download parked on "Muxing" indefinitely -
+   * fetch has no timeout of its own and pipeline waits forever on a live socket.
    */
-  const written = await stat(destPath)
-  if (total !== null && written.size !== total) {
-    throw new Error(`Download ended early: got ${written.size} of ${total} bytes`)
+  const controller = new AbortController()
+  let stall: NodeJS.Timeout = setTimeout(() => controller.abort(), CONNECT_TIMEOUT_MS)
+  const resetStall = (): void => {
+    clearTimeout(stall)
+    stall = setTimeout(() => controller.abort(), STALL_TIMEOUT_MS)
   }
-  if (written.size < MIN_ZIP_BYTES) {
-    throw new Error(`Archive is only ${written.size} bytes; the source returned something else`)
+
+  try {
+    const res = await fetch(url, {
+      redirect: 'follow',
+      headers: { 'user-agent': 'Draco' },
+      signal: controller.signal
+    })
+    if (!res.ok || !res.body) throw new Error(`HTTP ${res.status} for ${url}`)
+    resetStall()
+
+    const lengthHeader = res.headers.get('content-length')
+    const total = lengthHeader ? Number(lengthHeader) : null
+    let received = 0
+
+    const file = createWriteStream(destPath)
+    const counter = new Writable({
+      write(chunk: Buffer, _encoding, callback) {
+        received += chunk.length
+        resetStall()
+        onProgress?.({
+          stage: 'downloading',
+          percent: total ? Math.min(100, (received / total) * 100) : null
+        })
+        file.write(chunk, () => callback())
+      },
+      final(callback) {
+        file.end(() => callback())
+      }
+    })
+
+    await pipeline(res.body as unknown as NodeJS.ReadableStream, counter)
+
+    /*
+     * A stream that ends early does not always reject: the peer can close the
+     * connection cleanly mid-body and `pipeline` resolves on a partial file. That
+     * is how a 170 MB archive arrived as 152 MB and reached tar as "this does not
+     * look like a tar archive" - a confusing error a long way from its cause.
+     * Content-Length is the only thing that catches it.
+     */
+    const written = await stat(destPath)
+    if (total !== null && written.size !== total) {
+      throw new Error(`Download ended early: got ${written.size} of ${total} bytes`)
+    }
+    if (written.size < MIN_ZIP_BYTES) {
+      throw new Error(`Archive is only ${written.size} bytes; the source returned something else`)
+    }
+  } catch (err) {
+    if (controller.signal.aborted) throw new Error(`Timed out fetching ${url}`)
+    throw err
+  } finally {
+    clearTimeout(stall)
   }
 }
 
@@ -199,11 +245,45 @@ async function isUsable(path: string): Promise<boolean> {
   }
 }
 
+/**
+ * Locates a binary the user already has. Mirrors what `youtube.ts` does for
+ * yt-dlp: an ffmpeg already on PATH is the same ffmpeg we would download.
+ */
+async function findOnPath(name: string): Promise<string | null> {
+  return new Promise((resolve) => {
+    const child = spawn('where.exe', [name], {
+      shell: false,
+      windowsHide: true,
+      stdio: ['ignore', 'pipe', 'ignore']
+    })
+
+    let stdout = ''
+    child.stdout.on('data', (chunk: Buffer) => {
+      stdout = (stdout + chunk.toString('utf8')).slice(0, 4096)
+    })
+    child.on('error', () => resolve(null))
+    child.on('close', () => {
+      const first = stdout
+        .split(/\r?\n/)
+        .map((line) => line.trim())
+        .find(Boolean)
+      resolve(first || null)
+    })
+  })
+}
+
 function run(command: string, args: string[], cwd?: string): Promise<void> {
   return new Promise((resolve, reject) => {
     // Argument array with shell:false throughout - none of these paths are
     // allowed anywhere near a command line the shell gets to parse.
-    const child = spawn(command, args, { shell: false, windowsHide: true, cwd })
+    // stdout is discarded rather than piped: `ffmpeg -version` is verbose, and
+    // an unread pipe is a buffer waiting to fill up and wedge the child.
+    const child = spawn(command, args, {
+      shell: false,
+      windowsHide: true,
+      cwd,
+      stdio: ['ignore', 'ignore', 'pipe']
+    })
 
     let stderr = ''
     child.stderr.on('data', (chunk: Buffer) => {

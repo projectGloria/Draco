@@ -43,6 +43,12 @@ import {
 } from './windows.ts'
 
 import { DashRunner } from './hls/dash.ts'
+import {
+  primeYouTube,
+  refreshYouTubeFormat,
+  resolveYouTube,
+  resolveYouTubeInstant
+} from './youtube.ts'
 
 const log = logger('main')
 
@@ -135,7 +141,13 @@ async function main(): Promise<void> {
           onProbed: context.onProbed
         }
       ),
-    createDashRunner: (task, context) => new DashRunner(task, context)
+    createDashRunner: (task, context) => new DashRunner(task, context),
+    refreshYouTube: async (task) => {
+      if (!task.youtube) throw new Error('Missing YouTube source metadata')
+      const formatId = task.youtube.role === 'audio' ? task.youtube.audioFormatId : task.youtube.videoFormatId
+      if (!formatId) throw new Error('Missing YouTube format identity')
+      return refreshYouTubeFormat(task.youtube.pageUrl, task.headers, formatId)
+    }
   })
 
   const scheduler = new Scheduler({
@@ -205,9 +217,11 @@ async function runBootstrap(): Promise<void> {
   await runStep('integration', async () => {
     const registered = await ensureRegistered()
     if (!registered.chrome && !registered.edge && !registered.brave) {
-      // Not fatal: the app is perfectly usable without the browser link, and
-      // the extension key may simply not have been generated yet.
-      throw new Error('No browser could be registered yet')
+      // Browser integration is optional. A machine with no supported Chromium
+      // browser, a portable install, or a missing extension key must not prevent
+      // the download manager itself from starting. The integration can be retried
+      // from Options after the user installs/enables it.
+      log.warn('no browser integration registered; continuing without browser takeover')
     }
   })
 
@@ -299,10 +313,64 @@ function publish(): void {
 /* Messages from the browser                                           */
 /* ------------------------------------------------------------------ */
 
+const hostReplyCache = new Map<string, { expiresAt: number; reply: HostReply }>()
+const hostReplyInFlight = new Map<string, Promise<HostReply>>()
+const HOST_REPLY_TTL_MS = 5 * 60_000
+const HOST_REPLY_CACHE_MAX = 512
+
+function hostMessageCanMutate(type: HostMessage['type']): boolean {
+  return type === 'download' || type === 'youtube' || type === 'media'
+}
+
+function pruneHostReplyCache(now: number): void {
+  for (const [key, entry] of hostReplyCache) {
+    if (entry.expiresAt <= now) hostReplyCache.delete(key)
+  }
+  while (hostReplyCache.size > HOST_REPLY_CACHE_MAX) {
+    const first = hostReplyCache.keys().next().value as string | undefined
+    if (first === undefined) break
+    hostReplyCache.delete(first)
+  }
+}
+
 async function handleHostMessage(message: HostMessage): Promise<HostReply> {
   if (!ctx) return { ok: false, error: 'app not ready' }
-  ctx.lastHandoffAt = Date.now()
+  // Captured once. The module-level `ctx` is a mutable `let`, so narrowing it
+  // here does not survive into the async closure below.
+  const app = ctx
+  app.lastHandoffAt = Date.now()
 
+  const now = Date.now()
+  pruneHostReplyCache(now)
+  const requestId = message.requestId
+  if (requestId && hostMessageCanMutate(message.type)) {
+    const cached = hostReplyCache.get(requestId)
+    if (cached && cached.expiresAt > now) return cached.reply
+
+    const existing = hostReplyInFlight.get(requestId)
+    if (existing) return existing
+
+    const work = (async () => {
+      const reply = await handleHostMessageOnce(app, message)
+      hostReplyCache.set(requestId, { expiresAt: Date.now() + HOST_REPLY_TTL_MS, reply })
+      pruneHostReplyCache(Date.now())
+      return reply
+    })()
+
+    hostReplyInFlight.set(requestId, work)
+    try {
+      return await work
+    } finally {
+      if (hostReplyInFlight.get(requestId) === work) hostReplyInFlight.delete(requestId)
+    }
+  }
+
+  return handleHostMessageOnce(app, message)
+}
+
+/** `ctx` is a parameter rather than the module-level singleton: the caller has
+ * already established that the app is ready, and this must not re-check it. */
+async function handleHostMessageOnce(ctx: AppContext, message: HostMessage): Promise<HostReply> {
   switch (message?.type) {
     case 'ping':
       return { ok: true, version }
@@ -372,6 +440,78 @@ async function handleHostMessage(message: HostMessage): Promise<HostReply> {
         return { ok: true, taken: true }
       } catch (err) {
         return { ok: false, taken: false, error: err instanceof Error ? err.message : String(err) }
+      }
+    }
+
+    case 'youtube': {
+      try {
+        if (!/^https?:\/\/(?:www\.|m\.)?(?:youtube\.com)(?:\/|$)|^https?:\/\/youtu\.be\//i.test(message.pageUrl)) {
+          return { ok: false, error: 'Not a supported YouTube URL' }
+        }
+
+        const headers = {
+          referer: message.referer ?? message.pageUrl,
+          cookie: message.cookie,
+          userAgent: message.userAgent
+        }
+
+        /*
+         * The browser already parsed the ladder in order to play the video, so
+         * take it from there and put the window up at once. yt-dlp remains the
+         * only source of an actual download URL - it is just no longer in the
+         * way of showing the choice.
+         */
+        const instant = resolveYouTubeInstant(
+          message.pageUrl,
+          message.pageTitle,
+          message.pageFormats
+        )
+        const resolved = instant ?? (await resolveYouTube(message.pageUrl, headers))
+        log.info(
+          instant
+            ? `ladder from the page: ${resolved.variants.length} qualities`
+            : `ladder from yt-dlp: ${resolved.variants.length} qualities` +
+              ' (the extension sent no page formats - is it reloaded?)'
+        )
+
+        // Start the lookup the accept path will need. When the ladder came from
+        // the page this is the only yt-dlp call there is, and it now overlaps
+        // with the user choosing a quality rather than following their click.
+        primeYouTube(message.pageUrl, headers)
+
+        const candidate = recordMedia(ctx, {
+          pageUrl: message.pageUrl,
+          pageTitle: resolved.title || message.pageTitle,
+          mediaUrl: message.pageUrl,
+          variants: resolved.variants,
+          kind: 'file',
+          referer: message.referer ?? message.pageUrl,
+          cookie: message.cookie,
+          userAgent: message.userAgent
+        })
+
+        const request: HandoffRequest = {
+          id: randomUUID(),
+          kind: 'media',
+          url: candidate.mediaUrl,
+          headers: candidate.headers,
+          size: null,
+          mimeType: null,
+          pageUrl: candidate.pageUrl,
+          pageTitle: candidate.pageTitle,
+          mediaId: candidate.id
+        }
+
+        ctx.pendingHandoffs.push(request)
+        if (ctx.pendingHandoffs.length > 12) ctx.pendingHandoffs.shift()
+
+        createHandoffWindow(request.id)
+        return { ok: true }
+      } catch (err) {
+        return {
+          ok: false,
+          error: err instanceof Error ? err.message : String(err)
+        }
       }
     }
 

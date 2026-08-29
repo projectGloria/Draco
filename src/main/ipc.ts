@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto'
-import { access, constants } from 'node:fs/promises'
+import { access, constants, rename } from 'node:fs/promises'
 import { join } from 'node:path'
 import { BrowserWindow, clipboard, dialog, ipcMain, shell } from 'electron'
 import type {
@@ -18,6 +18,7 @@ import { checkRegistered, ensureRegistered, readExtensionId } from './bridge/int
 import type { PipeServer } from './bridge/pipe-server.ts'
 import { directoryFor } from './categories.ts'
 import { createTask, filenameForKind, kindForUrl, validateUrl } from './engine/create.ts'
+import { sanitizeFilename, uniquePath } from './engine/naming.ts'
 import type { DownloadManager } from './engine/manager.ts'
 import { probeUrl } from './engine/probe.ts'
 import { resolveVariants } from './hls/playlist.ts'
@@ -28,9 +29,11 @@ import {
   getSettings,
   saveCategories,
   saveMedia,
-  saveSettings
+  saveSettings,
+  persistTasks
 } from './store.ts'
 import { closeHandoffWindow, getMainWindow, send } from './windows.ts'
+import { resolveYouTubeUrls } from './youtube.ts'
 
 const log = logger('ipc')
 
@@ -79,6 +82,8 @@ export function placeTask(input: NewDownload): DownloadTask {
   return createTask({
     url,
     dir,
+    audioUrl: input.audioUrl,
+    youtube: input.youtube ? { ...input.youtube } : undefined,
     filename: chosenName,
     categoryId,
     queueId: input.queueId ?? null,
@@ -142,7 +147,7 @@ export function registerIpc(ctx: AppContext): void {
   )
   handle('tasks:removeCompleted', () => ctx.manager.removeCompleted())
 
-  handle('tasks:update', (id: string, patch: Partial<DownloadTask>) => {
+  handle('tasks:update', async (id: string, patch: Partial<DownloadTask>) => {
     const task = ctx.manager.get(id)
     if (!task) return null
 
@@ -151,10 +156,35 @@ export function registerIpc(ctx: AppContext): void {
     if (typeof patch.description === 'string') task.description = patch.description.slice(0, 500)
     if (typeof patch.queueId === 'string' || patch.queueId === null) task.queueId = patch.queueId
     if (typeof patch.filename === 'string' && patch.filename.trim()) {
-      task.filename = patch.filename.trim()
+      const nextFilename = sanitizeFilename(patch.filename.trim(), task.filename || 'download')
+      if (task.status === 'downloading' || task.status === 'probing' || task.status === 'queued') {
+        throw new Error('Pause the download before changing its filename')
+      }
+
+      if (task.status === 'done') {
+        const currentPath = join(task.dir, task.filename)
+        try {
+          await access(currentPath, constants.F_OK)
+          const targetPath = await uniquePath(task.dir, nextFilename)
+          await rename(currentPath, targetPath)
+          task.filename = targetPath.split(/[\\/]/).pop() || nextFilename
+        } catch (err) {
+          if ((err as NodeJS.ErrnoException)?.code !== 'ENOENT') throw err
+          task.filename = nextFilename
+          task.status = 'missing'
+        }
+      } else {
+        // Paused partial downloads keep their on-disk identity. Renaming only the
+        // row would orphan the `.dracodl` and journal. Keep the operation explicit
+        // instead of pretending it is safe.
+        throw new Error('Resume or redownload this task before changing its filename')
+      }
       task.filenameLocked = true
     }
 
+    // UI-only task metadata should be persisted immediately enough that a clean
+    // restart does not lose a rename/description/queue move.
+    persistTaskSnapshot(ctx)
     return task
   })
 
@@ -169,7 +199,9 @@ export function registerIpc(ctx: AppContext): void {
       headers: task.headers,
       description: task.description,
       queueId: task.queueId,
-      kind: task.kind
+      kind: task.kind,
+      audioUrl: task.audioUrl,
+      youtube: task.youtube ? { pageUrl: task.youtube.pageUrl, videoFormatId: task.youtube.videoFormatId, audioFormatId: task.youtube.audioFormatId ?? null } : undefined
     })
     ctx.manager.add(fresh, true)
   })
@@ -229,17 +261,30 @@ export function registerIpc(ctx: AppContext): void {
     return resolveCandidate(ctx, request.mediaId)
   })
 
-  handle('handoff:acceptMedia', (
+  handle('handoff:acceptMedia', async (
     id: string,
-    opts: { variantUrl: string; filename: string; dir?: string; categoryId?: string; queueId?: string; audioUrl?: string | null }
+    opts: { variantUrl: string; filename: string; dir?: string; categoryId?: string; queueId?: string; audioUrl?: string | null; youtube?: { videoFormatId: string; audioFormatId?: string | null } }
   ) => {
-    const request = takeHandoff(id)
+    // Validate the media entry before consuming the pending handoff. A media
+    // list can be cleared concurrently from another window; in that case the
+    // request should remain recoverable rather than disappearing on failure.
+    const request = ctx.pendingHandoffs.find((h) => h.id === id)
+    if (!request) throw new Error('That download request has expired')
     const candidate = ctx.media.find((m) => m.id === request.mediaId)
     if (!candidate) throw new Error('That media entry is gone')
+    if (candidate.type === 'dash') throw new Error('MPEG-DASH streams are not supported yet - only HLS')
+
+    // Resolved before the handoff is consumed, for the same reason: a lookup
+    // that fails should leave the window able to try again, not strand the user
+    // with a dismissed request and no download.
+    const urls = await resolveChosenUrls(candidate, opts)
+
+    takeHandoff(id)
 
     const task = placeTask({
-      url: opts.variantUrl,
-      audioUrl: opts.audioUrl,
+      url: urls.url,
+      audioUrl: urls.audioUrl,
+      youtube: opts.youtube ? { pageUrl: candidate.pageUrl, videoFormatId: opts.youtube.videoFormatId, audioFormatId: opts.youtube.audioFormatId ?? null } : undefined,
       filename: opts.filename,
       dir: opts.dir,
       categoryId: opts.categoryId,
@@ -269,7 +314,12 @@ export function registerIpc(ctx: AppContext): void {
 
   handle('queues:list', () => ctx.scheduler.list())
   handle('queues:save', (queue: Queue) => ctx.scheduler.save(queue))
-  handle('queues:remove', (id: string) => ctx.scheduler.remove(id))
+  handle('queues:remove', async (id: string) => {
+    await ctx.scheduler.remove(id)
+    // Queue removal clears task.queueId in memory; persist that mutation too,
+    // otherwise a restart resurrects references to a queue that no longer exists.
+    persistTasks(ctx.manager.list())
+  })
   handle('queues:start', (id: string) => ctx.scheduler.startQueue(id))
   handle('queues:stop', (id: string) => ctx.scheduler.stopQueue(id))
   handle('queues:cancelPending', () => ctx.scheduler.cancelPending())
@@ -282,14 +332,18 @@ export function registerIpc(ctx: AppContext): void {
 
   handle('media:download', async (
     id: string,
-    opts: { variantUrl: string; filename: string; audioUrl?: string | null }
+    opts: { variantUrl: string; filename: string; audioUrl?: string | null; youtube?: { videoFormatId: string; audioFormatId?: string | null } }
   ) => {
     const candidate = ctx.media.find((m) => m.id === id)
     if (!candidate) throw new Error('That media entry is gone')
+    if (candidate.type === 'dash') throw new Error('MPEG-DASH streams are not supported yet - only HLS')
+
+    const urls = await resolveChosenUrls(candidate, opts)
 
     const task = placeTask({
-      url: opts.variantUrl,
-      audioUrl: opts.audioUrl,
+      url: urls.url,
+      audioUrl: urls.audioUrl,
+      youtube: opts.youtube ? { pageUrl: candidate.pageUrl, videoFormatId: opts.youtube.videoFormatId, audioFormatId: opts.youtube.audioFormatId ?? null } : undefined,
       filename: opts.filename,
       headers: candidate.headers,
       description: candidate.pageTitle,
@@ -364,6 +418,12 @@ export function registerIpc(ctx: AppContext): void {
   })
 }
 
+function persistTaskSnapshot(ctx: AppContext): void {
+  // `persistTasks` is coalesced, so metadata edits remain cheap even when the
+  // user is rapidly editing several rows.
+  persistTasks(ctx.manager.list())
+}
+
 /**
  * Works out what qualities a candidate offers. Shared by the grabber panel and
  * by the confirm window, which must not disagree about what is downloadable.
@@ -375,15 +435,15 @@ export async function resolveCandidate(
   const candidate = ctx.media.find((m) => m.id === id)
   if (!candidate) throw new Error('That media entry is gone')
 
-  if (candidate.variants && candidate.variants.length > 0) {
-    return candidate
-  }
-
   // The extension spots MPEG-DASH so the page's streams are all visible, but
   // only HLS can be downloaded. Refusing here is far clearer than letting the
   // .mpd be parsed as a playlist and fail with "no media segments".
   if (candidate.type === 'dash') {
     throw new Error('MPEG-DASH streams are not supported yet - only HLS')
+  }
+
+  if (candidate.variants && candidate.variants.length > 0) {
+    return candidate
   }
 
   if (candidate.type === 'file') {
@@ -405,6 +465,36 @@ export async function resolveCandidate(
   await saveMedia(ctx.media)
   send('media:changed', ctx.media)
   return candidate
+}
+
+/**
+ * Turns a chosen quality into the URLs that will actually be fetched.
+ *
+ * A YouTube variant identifies its format by itag, not by URL - the ladder is
+ * read from the page, which is web content and gets no say in what Draco
+ * requests. So the signed URLs are looked up here, from yt-dlp, at the moment
+ * the user commits. The lookup was primed when the window opened, so this is
+ * usually already sitting in the cache.
+ */
+async function resolveChosenUrls(
+  candidate: MediaCandidate,
+  opts: {
+    variantUrl: string
+    audioUrl?: string | null
+    youtube?: { videoFormatId: string; audioFormatId?: string | null }
+  }
+): Promise<{ url: string; audioUrl: string | null }> {
+  if (!opts.youtube) {
+    return { url: opts.variantUrl, audioUrl: opts.audioUrl ?? null }
+  }
+
+  const resolved = await resolveYouTubeUrls(
+    candidate.pageUrl,
+    candidate.headers,
+    opts.youtube.videoFormatId,
+    opts.youtube.audioFormatId ?? null
+  )
+  return { url: resolved.videoUrl, audioUrl: resolved.audioUrl }
 }
 
 /** Turns an extension handoff into a queued download. */
@@ -441,7 +531,23 @@ export function recordMedia(
   }
 ): MediaCandidate {
   const existing = ctx.media.find((m) => m.mediaUrl === message.mediaUrl)
-  if (existing) return existing
+  if (existing) {
+    if (message.variants && message.variants.length > 0) {
+      existing.pageUrl = message.pageUrl
+      existing.pageTitle = message.pageTitle
+      existing.type = message.kind
+      existing.variants = message.variants
+      existing.headers = {
+        referer: message.referer,
+        cookie: message.cookie,
+        userAgent: message.userAgent
+      }
+      existing.discoveredAt = Date.now()
+      void saveMedia(ctx.media)
+      send('media:changed', ctx.media)
+    }
+    return existing
+  }
 
   const candidate: MediaCandidate = {
     id: randomUUID(),

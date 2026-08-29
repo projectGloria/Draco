@@ -47,6 +47,7 @@ function provisionalSettings(): Settings {
     startMinimized: false,
     takeoverEnabled: true,
     takeoverMinSize: 1024 * 1024,
+    confirmHandoff: true,
     takeoverExtensions: [],
     takeoverExcludeHosts: [],
     watchClipboard: false,

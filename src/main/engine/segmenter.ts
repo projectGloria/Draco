@@ -74,6 +74,7 @@ export class Segmenter {
   }
 
   get complete(): boolean {
+    if (this.size === 0) return true
     return this.segments.every((seg) => seg.end >= 0 && seg.position > seg.end)
   }
 

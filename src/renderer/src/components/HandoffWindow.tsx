@@ -292,7 +292,8 @@ function MediaBody({
         dir: dir ?? undefined,
         categoryId: categoryId || undefined,
         queueId: queueId || undefined,
-        audioUrl: variant.audioUrl ?? null
+        audioUrl: variant.audioUrl ?? null,
+        youtube: variant.youtube
       })
     } catch (err) {
       setBusy(false)

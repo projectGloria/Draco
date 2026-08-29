@@ -1,5 +1,6 @@
 import type { ProbeResult, RequestHeaders } from '../../shared/types.ts'
 import { getDispatcher } from './http.ts'
+import { isEmptyRangeResponse } from './probe-helpers.ts'
 import { filenameFromDisposition, filenameFromUrl, sanitizeFilename } from './naming.ts'
 
 /**
@@ -47,7 +48,7 @@ export function totalFromContentRange(value: string | null): number | null {
   const match = /bytes\s+\d+-\d+\/(\d+)/i.exec(value)
   if (!match) return null
   const total = Number(match[1])
-  return Number.isFinite(total) && total >= 0 ? total : null
+  return Number.isSafeInteger(total) && total >= 0 ? total : null
 }
 
 export async function probeUrl(url: string, options: ProbeOptions = {}): Promise<ProbeResult> {
@@ -76,7 +77,10 @@ export async function probeUrl(url: string, options: ProbeOptions = {}): Promise
     if (head.ok) {
       finalUrl = head.url || finalUrl
       const len = head.headers.get('content-length')
-      if (len && /^\d+$/.test(len)) size = Number(len)
+      if (len && /^\d+$/.test(len)) {
+        const parsed = Number(len)
+        if (Number.isSafeInteger(parsed)) size = parsed
+      }
       etag = head.headers.get('etag')
       lastModified = head.headers.get('last-modified')
       mimeType = head.headers.get('content-type')
@@ -98,11 +102,31 @@ export async function probeUrl(url: string, options: ProbeOptions = {}): Promise
   } as RequestInit)
 
   try {
+    finalUrl = ranged.url || finalUrl
+
+    // Empty resources commonly answer `Range: bytes=0-0` with 416 and
+    // `Content-Range: bytes */0`.
+    if (isEmptyRangeResponse(ranged.status, ranged.headers.get('content-range'))) {
+        etag = ranged.headers.get('etag') ?? etag
+        lastModified = ranged.headers.get('last-modified') ?? lastModified
+        mimeType = ranged.headers.get('content-type') ?? mimeType
+        disposition = ranged.headers.get('content-disposition') ?? disposition
+        return {
+          finalUrl,
+          filename: resolveFilename(disposition, finalUrl, url, mimeType),
+          size: 0,
+          resumable: false,
+          etag,
+          lastModified,
+          mimeType,
+          statusCode: 416
+        }
+      }
+
     if (!ranged.ok) {
       throw new Error(`Server responded ${ranged.status}`)
     }
 
-    finalUrl = ranged.url || finalUrl
     const resumable = ranged.status === 206
 
     if (resumable) {
@@ -112,7 +136,10 @@ export async function probeUrl(url: string, options: ProbeOptions = {}): Promise
       // A 200 to a ranged request means the whole body is coming, so
       // Content-Length is the file size and resuming is off the table.
       const len = ranged.headers.get('content-length')
-      if (len && /^\d+$/.test(len)) size = Number(len)
+      if (len && /^\d+$/.test(len)) {
+        const parsed = Number(len)
+        if (Number.isSafeInteger(parsed)) size = parsed
+      }
     }
 
     etag = ranged.headers.get('etag') ?? etag

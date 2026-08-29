@@ -2,6 +2,7 @@ import { spawn } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import type { PendingAction, Queue, QueueCompletionAction } from '@shared/types'
 import type { DownloadManager } from '../engine/manager.ts'
+import { isInQueueWindow } from './scheduler-window.ts'
 import { logger } from '../log.ts'
 
 const log = logger('scheduler')
@@ -66,13 +67,29 @@ export class Scheduler {
   /* ---------------------------------------------------------------- */
 
   async save(queue: Queue): Promise<Queue> {
+    const normalizeTime = (value: string | null): string | null => {
+      if (typeof value !== 'string') return null
+      const match = /^(\d{2}):(\d{2})$/.exec(value.trim())
+      if (!match) return null
+      const hour = Number(match[1])
+      const minute = Number(match[2])
+      return hour <= 23 && minute <= 59 ? `${match[1]}:${match[2]}` : null
+    }
     const normalized: Queue = {
       ...queue,
-      id: queue.id || randomUUID(),
-      name: queue.name.trim().slice(0, 60) || 'Queue',
-      maxConcurrent: Math.min(20, Math.max(1, Math.round(queue.maxConcurrent) || 1)),
-      taskIds: Array.isArray(queue.taskIds) ? queue.taskIds : [],
-      days: Array.isArray(queue.days) ? queue.days.filter((d) => d >= 0 && d <= 6) : []
+      id: typeof queue.id === 'string' && queue.id ? queue.id.slice(0, 128) : randomUUID(),
+      name: typeof queue.name === 'string' ? queue.name.trim().slice(0, 60) || 'Queue' : 'Queue',
+      maxConcurrent: Math.min(20, Math.max(1, Math.round(Number(queue.maxConcurrent)) || 1)),
+      taskIds: Array.isArray(queue.taskIds) ? [...new Set(queue.taskIds.filter((id): id is string => typeof id === 'string').map((id) => id.slice(0, 256)))] : [],
+      days: Array.isArray(queue.days) ? [...new Set(queue.days.filter((d) => Number.isInteger(d) && d >= 0 && d <= 6))] : [],
+      mode: queue.mode === 'onetime' || queue.mode === 'periodic' ? queue.mode : 'manual',
+      startTime: normalizeTime(queue.startTime),
+      stopTime: normalizeTime(queue.stopTime),
+      onComplete: queue.onComplete === 'exit' || queue.onComplete === 'sleep' || queue.onComplete === 'hibernate' || queue.onComplete === 'shutdown'
+        ? queue.onComplete
+        : 'none',
+      running: queue.running === true,
+      oneTimeCompleted: queue.oneTimeCompleted === true
     }
 
     const index = this.queues.findIndex((q) => q.id === normalized.id)
@@ -85,6 +102,7 @@ export class Scheduler {
   }
 
   async remove(id: string): Promise<void> {
+    if (this.pending?.queueId === id) this.cancelPending()
     const queue = this.queues.find((q) => q.id === id)
     if (queue) {
       // Orphaned tasks would otherwise be invisible: they'd still carry a
@@ -101,7 +119,10 @@ export class Scheduler {
   async startQueue(id: string): Promise<void> {
     const queue = this.queues.find((q) => q.id === id)
     if (!queue) return
+    if (this.pending?.queueId === id) this.cancelPending()
     queue.running = true
+    // An explicit Start means "run this once more" for one-time queues.
+    if (queue.mode === 'onetime') queue.oneTimeCompleted = false
     await this.persist()
     this.tick()
   }
@@ -109,6 +130,7 @@ export class Scheduler {
   async stopQueue(id: string): Promise<void> {
     const queue = this.queues.find((q) => q.id === id)
     if (!queue) return
+    if (this.pending?.queueId === id) this.cancelPending()
     queue.running = false
     await this.deps.manager.pause(this.tasksOf(queue).map((t) => t.id))
     await this.persist()
@@ -141,7 +163,7 @@ export class Scheduler {
         }
       }
 
-      if (queue.running) this.feed(queue)
+      if (queue.running && !(queue.mode === 'onetime' && queue.oneTimeCompleted)) this.feed(queue)
     }
 
     this.deps.onQueues(this.queues)
@@ -149,7 +171,10 @@ export class Scheduler {
 
   /** Promotes this queue's tasks in order, up to its own concurrency limit. */
   private feed(queue: Queue): void {
+    if (queue.mode === 'onetime' && queue.oneTimeCompleted) return
+
     const tasks = this.tasksOf(queue)
+    const existingPending = this.pending?.queueId === queue.id
     const active = tasks.filter(
       (t) => t.status === 'downloading' || t.status === 'probing' || t.status === 'queued'
     ).length
@@ -167,11 +192,17 @@ export class Scheduler {
 
     if (startable.length > 0) this.deps.manager.start(startable)
 
-    // Drained: everything in the queue reached a terminal state.
+    // Drained: everything in the queue reached a terminal state. A pending
+    // action is cancelled automatically when the queue is no longer drained,
+    // e.g. when the user resumes/adds work during the grace period.
     const finished = tasks.length > 0 && tasks.every((t) => t.status === 'done')
-    if (finished && queue.onComplete !== 'none') {
+    if (!finished && existingPending) this.cancelPending()
+    if (finished) {
+      // A one-time queue is consumed once it drains, even when no completion
+      // action is configured. Otherwise it would re-enter its time window forever.
+      if (queue.mode === 'onetime') queue.oneTimeCompleted = true
       queue.running = false
-      this.scheduleAction(queue.id, queue.onComplete)
+      if (queue.onComplete !== 'none') this.scheduleAction(queue.id, queue.onComplete)
     }
   }
 
@@ -190,26 +221,8 @@ export class Scheduler {
     return ordered
   }
 
-  /**
-   * "HH:MM" windows in local time. A window whose stop time is earlier than its
-   * start time is treated as crossing midnight, which is the common case for an
-   * overnight queue.
-   */
   private inWindow(queue: Queue, now: Date): boolean {
-    if (!queue.startTime) return false
-    if (queue.mode === 'periodic' && queue.days.length > 0 && !queue.days.includes(now.getDay())) {
-      return false
-    }
-
-    const minutes = now.getHours() * 60 + now.getMinutes()
-    const start = parseHHMM(queue.startTime)
-    if (start === null) return false
-    if (!queue.stopTime) return minutes >= start
-
-    const stop = parseHHMM(queue.stopTime)
-    if (stop === null) return minutes >= start
-
-    return stop >= start ? minutes >= start && minutes < stop : minutes >= start || minutes < stop
+    return isInQueueWindow(queue, now)
   }
 
   /* ---------------------------------------------------------------- */
@@ -236,15 +249,6 @@ export class Scheduler {
     await this.deps.saveQueues(this.queues)
     this.deps.onQueues(this.queues)
   }
-}
-
-function parseHHMM(value: string): number | null {
-  const match = /^(\d{1,2}):(\d{2})$/.exec(value.trim())
-  if (!match) return null
-  const h = Number(match[1])
-  const m = Number(match[2])
-  if (h > 23 || m > 59) return null
-  return h * 60 + m
 }
 
 /**

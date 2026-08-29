@@ -396,13 +396,20 @@ function Cell({
         </div>
       )
 
+    /*
+     * Both read the figure rather than the status label. A stream fetched as
+     * separate video and audio parts stays `probing` until its parts are past
+     * their own probe, and gating on the label left these columns blank for the
+     * whole transfer. The engine zeroes speed and nulls eta on pause, error and
+     * completion, so the value alone says whether there is anything to show.
+     */
     case 'eta':
-      return <div className={base}>{task.status === 'downloading' ? formatEta(task.eta) : ''}</div>
+      return <div className={base}>{formatEta(task.eta)}</div>
 
     case 'speed':
       return (
         <div className={base} style={{ color: task.speed > 0 ? 'var(--accent)' : undefined }}>
-          {task.status === 'downloading' ? formatSpeed(task.speed) : ''}
+          {formatSpeed(task.speed)}
         </div>
       )
 

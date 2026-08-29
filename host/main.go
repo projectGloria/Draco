@@ -109,13 +109,34 @@ func readFrame(r io.Reader) ([]byte, error) {
 }
 
 func writeFrame(w io.Writer, body []byte) error {
+	if uint64(len(body)) > uint64(maxFrame) {
+		return fmt.Errorf("frame of %d bytes exceeds the limit", len(body))
+	}
 	var header [4]byte
 	binary.LittleEndian.PutUint32(header[:], uint32(len(body)))
-	if _, err := w.Write(header[:]); err != nil {
+	if _, err := writeAll(w, header[:]); err != nil {
 		return err
 	}
-	_, err := w.Write(body)
+	_, err := writeAll(w, body)
 	return err
+}
+
+func writeAll(w io.Writer, data []byte) (int, error) {
+	total := 0
+	for len(data) > 0 {
+		n, err := w.Write(data)
+		if n > 0 {
+			total += n
+			data = data[n:]
+		}
+		if err != nil {
+			return total, err
+		}
+		if n == 0 {
+			return total, io.ErrShortWrite
+		}
+	}
+	return total, nil
 }
 
 func errorReply(err error) []byte {

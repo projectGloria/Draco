@@ -59,7 +59,11 @@ export async function removeJournal(path: string): Promise<void> {
  * silent corruption is the expensive one, so anything short of a solid match
  * starts over.
  */
-export function journalMatches(journal: JournalData, probe: ProbeResult): boolean {
+export function journalMatches(
+  journal: JournalData,
+  probe: ProbeResult,
+  options: { allowFinalUrlChange?: boolean } = {}
+): boolean {
   if (journal.size !== probe.size) return false
 
   // A strong validator settles it outright. Weak ETags (W/"...") only promise
@@ -68,6 +72,12 @@ export function journalMatches(journal: JournalData, probe: ProbeResult): boolea
     const weak = journal.etag.startsWith('W/') || probe.etag.startsWith('W/')
     return !weak && journal.etag === probe.etag
   }
+
+  // Without a strong ETag match, a changed redirect target is not safe to resume
+  // from: the same-size URL can now point at completely different bytes.
+  // YouTube is the explicit exception because its stable page/format identity is
+  // stored separately and its signed CDN URL is expected to change.
+  if (!options.allowFinalUrlChange && journal.finalUrl !== probe.finalUrl) return false
 
   if (journal.lastModified && probe.lastModified) {
     return journal.lastModified === probe.lastModified
@@ -81,4 +91,27 @@ export function journalMatches(journal: JournalData, probe: ProbeResult): boolea
 
 export function segmentsForJournal(segments: Segment[]): Segment[] {
   return segments.map((seg) => ({ ...seg, active: false }))
+}
+
+/** Validates a persisted segment snapshot before Segmenter.restore consumes it. */
+export function journalSegmentsValid(segments: Segment[], size: number | null): boolean {
+  if (!Array.isArray(segments) || segments.length === 0) return false
+
+  let lastEnd = -1
+  let total = 0
+  for (const seg of segments) {
+    if (!Number.isSafeInteger(seg.start) || !Number.isSafeInteger(seg.position)) return false
+    if (!Number.isSafeInteger(seg.end) || seg.start < 0 || seg.position < seg.start) return false
+    if (seg.end >= 0 && seg.end < seg.start) return false
+    if (seg.end >= 0 && seg.position > seg.end + 1) return false
+    if (seg.start <= lastEnd) return false
+    if (seg.end >= 0) {
+      if (size !== null && seg.end >= size) return false
+      lastEnd = seg.end
+    }
+    total += seg.position - seg.start
+    if (!Number.isSafeInteger(total)) return false
+  }
+
+  return size === null || total <= size
 }

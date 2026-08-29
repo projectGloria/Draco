@@ -17,6 +17,7 @@ export interface AppPaths {
   /** Streams the extension spotted, kept between runs so the panel survives a restart. */
   mediaFile: string
   ffmpegExe: string
+  ytDlpExe: string
   defaultDownloadDir: string
   /** The folder the user points chrome://extensions -> Load unpacked at. */
   extensionDir: string
@@ -49,6 +50,7 @@ export function getPaths(): AppPaths {
     queuesFile: join(root, 'queues.json'),
     mediaFile: join(root, 'media.json'),
     ffmpegExe: join(bin, 'ffmpeg.exe'),
+    ytDlpExe: join(bin, 'yt-dlp.exe'),
     defaultDownloadDir: join(app.getPath('downloads'), 'Draco'),
     extensionDir: join(resourceRoot, 'extension'),
     hostExe: app.isPackaged

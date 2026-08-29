@@ -18,7 +18,10 @@ export default function StatusBar({
 
   const active = tasks.filter((t) => t.status === 'downloading')
   const queued = tasks.filter((t) => t.status === 'queued').length
-  const speed = active.reduce((sum, t) => sum + t.speed, 0)
+  // Summed over every task, not just the ones labelled `downloading`: a stream
+  // fetched as separate video and audio parts reports its speed while the parent
+  // is still `probing`. Idle tasks contribute zero.
+  const speed = tasks.reduce((sum, t) => sum + t.speed, 0)
 
   const remaining = tasks.reduce((sum, t) => {
     if (t.status === 'done' || !t.size) return sum

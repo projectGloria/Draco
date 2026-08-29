@@ -7,7 +7,6 @@
  * socket on its own - there is no separate throttling machinery.
  */
 export class RateLimiter {
-  /** Bytes per second. Infinity means uncapped, which short-circuits everything. */
   private bytesPerSecond = Infinity
   private tokens = Infinity
   private lastRefill = Date.now()
@@ -16,14 +15,11 @@ export class RateLimiter {
     this.setLimit(bytesPerSecond)
   }
 
-  /** null or a non-positive value removes the cap. */
   setLimit(bytesPerSecond: number | null): void {
     const next = bytesPerSecond && bytesPerSecond > 0 ? bytesPerSecond : Infinity
     if (next === this.bytesPerSecond) return
 
     this.bytesPerSecond = next
-    // Start a newly-applied cap with a full bucket rather than a debt carried
-    // over from the uncapped period.
     this.tokens = next === Infinity ? Infinity : next
     this.lastRefill = Date.now()
   }
@@ -42,31 +38,41 @@ export class RateLimiter {
       return
     }
 
-    // One second of budget is the burst ceiling. Allowing more would let an idle
-    // app bank credit and then blow far past the cap the moment it resumes.
     this.tokens = Math.min(this.bytesPerSecond, this.tokens + elapsed * this.bytesPerSecond)
   }
 
   /**
-   * Blocks until `bytes` worth of budget has been paid for. The balance is
-   * allowed to go negative so a chunk larger than one second of budget still
-   * settles instead of deadlocking - it just waits proportionally longer.
+   * Blocks until `bytes` worth of budget has been paid for.
+   * `signal` lets pause/stop abort a long wait immediately.
    */
-  async consume(bytes: number): Promise<void> {
+  async consume(bytes: number, signal?: AbortSignal): Promise<void> {
     if (this.bytesPerSecond === Infinity || bytes <= 0) return
+    if (signal?.aborted) throw new Error('aborted')
 
     this.refill()
     this.tokens -= bytes
 
     while (this.tokens < 0) {
       const waitMs = Math.ceil((-this.tokens / this.bytesPerSecond) * 1000)
-      // Cap each nap so a cap raised mid-wait takes effect promptly.
-      await delay(Math.min(Math.max(waitMs, 5), 250))
+      await delay(Math.min(Math.max(waitMs, 5), 250), signal)
       this.refill()
     }
   }
 }
 
-function delay(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms))
+function delay(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort)
+      resolve()
+    }, ms)
+
+    function onAbort(): void {
+      clearTimeout(timer)
+      reject(new Error('aborted'))
+    }
+
+    signal?.addEventListener('abort', onAbort, { once: true })
+    if (signal?.aborted) onAbort()
+  })
 }

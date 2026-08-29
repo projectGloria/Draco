@@ -1,4 +1,4 @@
-import { createDecipheriv } from 'node:crypto'
+import { createDecipheriv, createHash } from 'node:crypto'
 import {
   mkdir,
   open,
@@ -68,7 +68,7 @@ export class HlsRunner implements Runner {
   private tracks: Array<{
     type: 'video' | 'audio'
     segments: HlsSegment[]
-    initSegment: string | null
+    initSegment: { url: string; byteRange: { offset: number; length: number } | null } | null
     mediaSequence: number
   }> = []
 
@@ -104,11 +104,20 @@ export class HlsRunner implements Runner {
     return join(this.task.dir, this.task.filename + '.dracodl.audio')
   }
 
+  private get manifestPath(): string {
+    return join(this.partsDir, '.playlist.json')
+  }
+
   async start(): Promise<void> {
     if (this.running) return
     this.running = true
     this.controller = new AbortController()
     this.samples = []
+    this.tracks = []
+    this.received = 0
+    this.completed = 0
+    this.active.clear()
+    this.keys.clear()
 
     try {
       this.inFlight = this.run()
@@ -243,12 +252,25 @@ export class HlsRunner implements Runner {
     await this.deps.onProbed?.(this.task)
     await mkdir(this.partsDir, { recursive: true })
 
+    // A VOD playlist can change while keeping the same URL. Reusing pieces by
+    // index alone can silently splice an old recording into a new one. Keep a
+    // compact fingerprint of the resolved playlist inputs and discard stale
+    // pieces before resuming.
+    const playlistIdentity = buildPlaylistIdentity(this.tracks)
+    const previousIdentity = await readPlaylistIdentity(this.manifestPath)
+    if (previousIdentity !== playlistIdentity) {
+      await clearPlaylistParts(this.partsDir)
+    }
+    await writeFile(this.manifestPath, playlistIdentity, 'utf8')
+
     const totalSegments = this.tracks.reduce((acc, t) => acc + t.segments.length, 0)
     
-    // Pieces already on disk from an earlier run
+    // Pieces already on disk from an earlier run. Build one global work queue:
+    // separate per-track pools would otherwise create up to 2x the configured
+    // connection count for video+audio streams.
     let totalBytes = 0
     let totalCompleted = 0
-    const pendingTasks: Array<() => Promise<void>> = []
+    const jobs: Array<(slot: number) => Promise<void>> = []
 
     for (const track of this.tracks) {
       const done = await this.existingPieces(track.type, track.segments.length)
@@ -256,10 +278,23 @@ export class HlsRunner implements Runner {
       totalCompleted += done.indices.size
 
       if (track.initSegment) {
-        pendingTasks.push(() => this.fetchInit(track.type, track.initSegment!))
+        const initPath = this.initPath(track.type)
+        const existing = await stat(initPath).catch(() => null)
+        if (!existing || existing.size === 0) {
+          jobs.push(async (slot) => {
+            const body = await this.download(track.initSegment!.url, track.initSegment!.byteRange, slot)
+            await writeAtomic(initPath, body)
+            this.received += body.length
+          })
+        } else {
+          totalBytes += existing.size
+        }
       }
-      
-      pendingTasks.push(() => this.fetchAll(track, done.indices))
+
+      for (let index = 0; index < track.segments.length; index++) {
+        if (done.indices.has(index)) continue
+        jobs.push((slot) => this.fetchPiece(track, index, slot))
+      }
     }
 
     this.received = totalBytes
@@ -272,8 +307,7 @@ export class HlsRunner implements Runner {
     this.task.detail = `${totalSegments} pieces`
     this.deps.onUpdate(this.task)
 
-    // Run track fetchers concurrently (they share the active connections pool)
-    await Promise.all(pendingTasks.map(fn => fn()))
+    await this.runSharedPool(jobs)
     this.throwIfAborted()
 
     await this.assemble()
@@ -319,57 +353,57 @@ export class HlsRunner implements Runner {
     return { indices, bytes }
   }
 
-  private async fetchInit(trackType: string, url: string): Promise<void> {
-    const existing = await stat(this.initPath(trackType)).catch(() => null)
-    if (existing && existing.size > 0) return
+  /** Runs init segments and media pieces through one global connection pool. */
+  private async runSharedPool(jobs: Array<(slot: number) => Promise<void>>): Promise<void> {
+    if (jobs.length === 0) return
 
-    const body = await this.download(url, null, -1)
-    await writeAtomic(this.initPath(trackType), body)
-  }
-
-  /** A fixed pool of workers pulling from a shared index cursor. */
-  private async fetchAll(track: { type: string; segments: HlsSegment[]; mediaSequence: number }, alreadyDone: Set<number>): Promise<void> {
     let cursor = 0
+    let failed = false
+    let firstError: Error | null = null
+    const workerCount = Math.min(this.config.maxConnections, jobs.length)
     const workers: Promise<void>[] = []
-    const poolSize = Math.min(this.config.maxConnections, track.segments.length)
 
     const worker = async (slot: number): Promise<void> => {
       for (;;) {
-        if (this.controller.signal.aborted) return
-
+        this.throwIfAborted()
+        if (failed) return
         const index = cursor++
-        if (index >= track.segments.length) return
-        if (alreadyDone.has(index)) continue
+        if (index >= jobs.length) return
 
         this.active.set(slot, { bytes: 0 })
         try {
-          await this.fetchPiece(track, index, slot)
+          await jobs[index](slot)
+        } catch (err) {
+          failed = true
+          if (!firstError) firstError = err instanceof Error ? err : new Error(String(err))
+          return
         } finally {
           this.active.delete(slot)
         }
       }
     }
 
-    for (let slot = 0; slot < poolSize; slot++) workers.push(worker(slot))
+    for (let slot = 0; slot < workerCount; slot++) workers.push(worker(slot))
 
-    // allSettled, then rethrow: one worker failing should not leave the others
-    // writing into a directory that is about to be torn down.
-    const results = await Promise.allSettled(workers)
+    await Promise.all(workers)
     this.throwIfAborted()
-
-    const failure = results.find((r) => r.status === 'rejected')
-    if (failure && failure.status === 'rejected') {
-      throw failure.reason instanceof Error ? failure.reason : new Error(String(failure.reason))
-    }
+    if (firstError) throw firstError
   }
 
-  private async fetchPiece(track: { type: string; segments: HlsSegment[]; mediaSequence: number }, index: number, slot: number): Promise<void> {
+  private async fetchPiece(
+    track: { type: string; segments: HlsSegment[]; mediaSequence: number },
+    index: number,
+    slot: number
+  ): Promise<void> {
     const segment = track.segments[index]
     const raw = await this.download(segment.url, segment.byteRange, slot)
     const body = segment.key ? await this.decrypt(raw, segment.key, track.mediaSequence + index) : raw
 
     await writeAtomic(this.piecePath(track.type, index), body)
 
+    // Count bytes only after the durable piece exists. A failed filesystem write
+    // must never make progress jump forward and later report an impossible ETA.
+    this.received += body.length
     this.completed++
     this.deps.onUpdate(this.task)
   }
@@ -406,13 +440,37 @@ export class HlsRunner implements Runner {
         } as RequestInit)
 
         if (!res.ok) throw new Error(`HTTP ${res.status} ${res.statusText}`)
+        if (byteRange) {
+          if (res.status !== 206) {
+            throw new Error('HLS byte-range request was not honoured by the server')
+          }
+
+          const contentRange = res.headers.get('content-range') ?? ''
+          const match = /^bytes\s+(\d+)-(\d+)\/(\d+|\*)$/i.exec(contentRange)
+          const rangeStart = match ? Number(match[1]) : NaN
+          const rangeEnd = match ? Number(match[2]) : NaN
+          const total = match && match[3] !== '*' ? Number(match[3]) : null
+          const expectedEnd = byteRange.offset + byteRange.length - 1
+          if (
+            !match ||
+            !Number.isSafeInteger(rangeStart) ||
+            !Number.isSafeInteger(rangeEnd) ||
+            (total !== null && (!Number.isSafeInteger(total) || total < rangeEnd + 1)) ||
+            rangeStart !== byteRange.offset ||
+            rangeEnd !== expectedEnd
+          ) {
+            throw new Error('HLS byte-range response did not match the requested range')
+          }
+        }
 
         const body = Buffer.from(await res.arrayBuffer())
+        if (byteRange && body.length !== byteRange.length) {
+          throw new Error(`HLS byte-range returned ${body.length} bytes, expected ${byteRange.length}`)
+        }
 
-        this.received += body.length
         const state = this.active.get(slot)
         if (state) state.bytes = body.length
-        await this.deps.limiter.consume(body.length)
+        await this.deps.limiter.consume(body.length, this.controller.signal)
 
         return body
       } catch (err) {
@@ -432,17 +490,36 @@ export class HlsRunner implements Runner {
     let material = this.keys.get(key.url)
 
     if (!material) {
-      const res = await fetch(key.url, {
-        headers: buildHeaders(this.task.headers),
-        redirect: 'follow',
-        signal: this.controller.signal,
-        dispatcher: getDispatcher(this.config.timeoutMs)
-      } as RequestInit)
+      let lastError: Error | null = null
+      for (let attempt = 0; attempt < this.config.retryLimit; attempt++) {
+        this.throwIfAborted()
+        if (attempt > 0) {
+          const backoff = Math.min(15_000, 500 * 2 ** attempt) * (0.5 + Math.random())
+          await delay(backoff, this.controller.signal)
+        }
+        try {
+          const res = await fetch(key.url, {
+            headers: buildHeaders(this.task.headers),
+            redirect: 'follow',
+            signal: this.controller.signal,
+            dispatcher: getDispatcher(this.config.timeoutMs)
+          } as RequestInit)
 
-      if (!res.ok) throw new Error(`Could not fetch the decryption key (HTTP ${res.status})`)
-      material = Buffer.from(await res.arrayBuffer())
-      if (material.length !== 16) throw new Error('Decryption key was not 16 bytes')
-      this.keys.set(key.url, material)
+          if (!res.ok) throw new Error(`Could not fetch the decryption key (HTTP ${res.status})`)
+          const candidate = Buffer.from(await res.arrayBuffer())
+          if (candidate.length !== 16) throw new Error('Decryption key was not 16 bytes')
+          material = candidate
+          this.keys.set(key.url, material)
+          lastError = null
+          break
+        } catch (err) {
+          if (this.controller.signal.aborted) throw new AbortedError()
+          lastError = err instanceof Error ? err : new Error(String(err))
+        }
+      }
+      if (!material) {
+        throw new Error(`Decryption key failed after ${this.config.retryLimit} attempts: ${lastError?.message ?? 'unknown error'}`)
+      }
     }
 
     const decipher = createDecipheriv('aes-128-cbc', material, ivFor(key.iv, index))
@@ -501,8 +578,13 @@ export class HlsRunner implements Runner {
    */
   private async finalize(): Promise<string> {
     const target = await uniquePath(this.task.dir, this.task.filename)
+    const muxTemp = muxTempPath(target)
 
     try {
+      // Never let ffmpeg write the user's final filename. A process crash during
+      // muxing must leave only a disposable temp artifact, not a file that looks
+      // successfully completed to the next launch.
+      await rm(muxTemp, { force: true }).catch(() => {})
       /*
        * Fetching ffmpeg is a large download that happens once, on the first
        * stream ever downloaded. Without saying so the task sits at 100% for
@@ -526,15 +608,18 @@ export class HlsRunner implements Runner {
         ffmpegPath,
         inputPath: this.joinedVideoPath,
         audioInputPath: hasAudio ? this.joinedAudioPath : undefined,
-        outputPath: target,
+        outputPath: muxTemp,
         signal: this.controller.signal
       })
 
+      this.throwIfAborted()
+      await rename(muxTemp, target)
       await rm(this.joinedVideoPath, { force: true }).catch(() => {})
       await rm(this.joinedAudioPath, { force: true }).catch(() => {})
       this.task.detail = null
       return target
     } catch (err) {
+      await rm(muxTemp, { force: true }).catch(() => {})
       if (this.controller.signal.aborted) throw new AbortedError()
 
       const reason = err instanceof Error ? err.message : String(err)
@@ -578,6 +663,45 @@ export class HlsRunner implements Runner {
 
 /* ------------------------------------------------------------------ */
 
+function buildPlaylistIdentity(
+  tracks: Array<{
+    type: 'video' | 'audio'
+    segments: HlsSegment[]
+    initSegment: { url: string; byteRange: { offset: number; length: number } | null } | null
+    mediaSequence: number
+  }>
+): string {
+  const canonical = tracks.map((track) => ({
+    type: track.type,
+    initSegment: track.initSegment,
+    mediaSequence: track.mediaSequence,
+    segments: track.segments.map((segment) => ({
+      url: segment.url,
+      byteRange: segment.byteRange,
+      key: segment.key,
+      duration: segment.duration
+    }))
+  }))
+  return createHash('sha256').update(JSON.stringify(canonical), 'utf8').digest('hex')
+}
+
+async function readPlaylistIdentity(path: string): Promise<string | null> {
+  try {
+    const value = (await readFile(path, 'utf8')).trim()
+    return /^[0-9a-f]{64}$/i.test(value) ? value : null
+  } catch {
+    return null
+  }
+}
+
+async function clearPlaylistParts(dir: string): Promise<void> {
+  const entries = await readdir(dir).catch(() => [])
+  for (const name of entries) {
+    if (name === '.playlist.json') continue
+    await rm(join(dir, name), { recursive: false, force: true }).catch(() => {})
+  }
+}
+
 /**
  * The IV for a piece: whatever EXT-X-KEY declared, or the media sequence number
  * as a 16-byte big-endian counter.
@@ -585,19 +709,45 @@ export class HlsRunner implements Runner {
 function ivFor(declared: string | null, sequenceNumber: number): Buffer {
   if (declared) {
     const hex = declared.replace(/^0x/i, '')
-    if (hex.length === 32) return Buffer.from(hex, 'hex')
+    if (!/^[0-9a-f]{32}$/i.test(hex)) throw new Error('Invalid HLS IV')
+    return Buffer.from(hex, 'hex')
   }
 
+  if (!Number.isSafeInteger(sequenceNumber) || sequenceNumber < 0) throw new Error('Invalid HLS media sequence')
   const iv = Buffer.alloc(16)
-  iv.writeUInt32BE(sequenceNumber, 12)
+  iv.writeBigUInt64BE(BigInt(sequenceNumber), 8)
   return iv
+}
+
+function muxTempPath(target: string): string {
+  const dot = target.lastIndexOf('.')
+  return dot > target.lastIndexOf('\\') && dot > target.lastIndexOf('/')
+    ? `${target.slice(0, dot)}.draco-mux-temp${target.slice(dot)}`
+    : `${target}.draco-mux-temp.mp4`
 }
 
 /** Write to a temp name and rename, so a piece file only ever exists complete. */
 async function writeAtomic(path: string, body: Buffer): Promise<void> {
-  const tmp = path + '.tmp'
-  await writeFile(tmp, body)
-  await rename(tmp, path)
+  const tmp = `${path}.${process.pid}.${Date.now()}.${Math.random().toString(16).slice(2)}.tmp`
+  const handle = await open(tmp, 'w')
+  try {
+    let offset = 0
+    while (offset < body.length) {
+      const result = await handle.write(body, offset, body.length - offset, offset)
+      const written = result.bytesWritten
+      if (!Number.isSafeInteger(written) || written <= 0) throw new Error('File write made no progress')
+      offset += written
+    }
+    await handle.sync()
+  } finally {
+    await handle.close().catch(() => {})
+  }
+
+  try {
+    await rename(tmp, path)
+  } finally {
+    await rm(tmp, { force: true }).catch(() => {})
+  }
 }
 
 /**
@@ -606,7 +756,14 @@ async function writeAtomic(path: string, body: Buffer): Promise<void> {
  * ordinary sequential append with no offset arithmetic to get wrong.
  */
 async function appendPiece(handle: FileHandle, path: string): Promise<void> {
-  await handle.write(await readFile(path))
+  const body = await readFile(path)
+  let offset = 0
+  while (offset < body.length) {
+    const result = await handle.write(body, offset, body.length - offset, null)
+    const written = result.bytesWritten
+    if (!Number.isSafeInteger(written) || written <= 0) throw new Error('File write made no progress')
+    offset += written
+  }
 }
 
 function delay(ms: number, signal: AbortSignal): Promise<void> {

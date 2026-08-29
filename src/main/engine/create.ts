@@ -16,6 +16,7 @@ export function createTask(input: {
   description?: string
   kind?: TaskKind
   audioUrl?: string | null
+  youtube?: { pageUrl: string; videoFormatId: string; audioFormatId?: string | null }
 }): DownloadTask {
   const kind = input.kind ?? 'file'
   // Applied to the URL-derived fallback too, not just to a name the caller
@@ -28,6 +29,7 @@ export function createTask(input: {
     id: randomUUID(),
     url: input.url,
     audioUrl: input.audioUrl ?? null,
+    youtube: input.youtube ? { ...input.youtube, role: 'video' } : undefined,
     finalUrl: input.url,
     filename,
     // Only a name the caller chose is authoritative; one guessed from the URL

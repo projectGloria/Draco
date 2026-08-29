@@ -1,6 +1,12 @@
 import { createServer, type Server, type Socket } from 'node:net'
 import { logger } from '../log.ts'
-import { encodeFrame, readFrames, type HostMessage, type HostReply } from './protocol.ts'
+import {
+  encodeFrame,
+  readFrames,
+  validateHostMessage,
+  type HostMessage,
+  type HostReply
+} from './protocol.ts'
 
 const log = logger('bridge')
 
@@ -69,6 +75,7 @@ export class PipeServer {
     // Annotated because `subarray` widens the backing store to ArrayBufferLike,
     // which no longer assigns back to the ArrayBuffer that `alloc` inferred.
     let buffer: Buffer = Buffer.alloc(0)
+    let dispatchChain = Promise.resolve()
 
     socket.on('data', (chunk: Buffer) => {
       buffer = Buffer.concat([buffer, chunk])
@@ -86,7 +93,11 @@ export class PipeServer {
         return
       }
 
-      for (const frame of frames) void this.dispatch(socket, frame)
+      for (const frame of frames) {
+        dispatchChain = dispatchChain
+          .then(() => this.dispatch(socket, frame))
+          .catch((err) => log.error('host dispatch failed', err))
+      }
     })
 
     socket.on('error', (err) => log.warn(`host socket error: ${err.message}`))
@@ -99,7 +110,7 @@ export class PipeServer {
     try {
       // Everything arriving here originates in a web page's network activity.
       // It is data, never instructions, and the handler validates it again.
-      reply = await this.handlers.onMessage(frame as HostMessage)
+      reply = await this.handlers.onMessage(validateHostMessage(frame))
     } catch (err) {
       reply = { ok: false, error: err instanceof Error ? err.message : String(err) }
     }

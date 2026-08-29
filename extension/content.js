@@ -237,96 +237,48 @@ function setLabel(entry, text, state, title) {
   }
 }
 
-function getYouTubeData() {
-  return chrome.runtime.sendMessage({ type: 'draco:get-yt-data' }).catch(() => null);
-}
-
-function extractYouTubeVariants(data) {
-  if (!data || !data.streamingData) return null;
-  const { formats, adaptiveFormats } = data.streamingData;
-  const variants = [];
-  let hasCiphered = false;
-
-  if (formats) {
-    for (const f of formats) {
-      if (f.url) {
-        variants.push({
-          url: f.url,
-          label: (f.qualityLabel || f.quality) || 'Standard',
-          height: f.height || null,
-          bandwidth: f.bitrate || null,
-          codecs: f.mimeType || null,
-          estimatedSize: f.contentLength ? Number(f.contentLength) : null
-        });
-      } else if (f.signatureCipher) {
-        hasCiphered = true;
-      }
-    }
-  }
-
-  if (adaptiveFormats) {
-    const videos = adaptiveFormats.filter(f => f.mimeType && f.mimeType.startsWith('video/'));
-    const audios = adaptiveFormats.filter(f => f.mimeType && f.mimeType.startsWith('audio/'));
-    
-    audios.sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0));
-    const bestAudio = audios.find(a => a.url);
-
-    for (const v of videos) {
-      if (v.url) {
-        variants.push({
-          url: v.url,
-          audioUrl: bestAudio ? bestAudio.url : null,
-          label: (v.qualityLabel || v.quality) || 'High Quality',
-          height: v.height || null,
-          bandwidth: (v.bitrate || 0) + (bestAudio ? (bestAudio.bitrate || 0) : 0),
-          codecs: v.mimeType,
-          estimatedSize: (v.contentLength ? Number(v.contentLength) : 0) + (bestAudio && bestAudio.contentLength ? Number(bestAudio.contentLength) : 0)
-        });
-      } else if (v.signatureCipher) {
-        hasCiphered = true;
-      }
-    }
-  }
-
-  const unique = new Map();
-  for (const v of variants) {
-    const existing = unique.get(v.label);
-    if (!existing || (v.bandwidth && existing.bandwidth && v.bandwidth > existing.bandwidth)) {
-      unique.set(v.label, v);
-    }
-  }
-
-  const result = Array.from(unique.values()).sort((a, b) => (b.height || 0) - (a.height || 0));
-  
-  if (result.length === 0 && hasCiphered) {
-    return 'ciphered';
-  }
-  
-  return result.length > 0 ? result : null;
-}
-
 async function grab(entry) {
   setLabel(entry, 'Checking…', 'busy')
 
-  const source = entry.video.currentSrc || entry.video.src || ''
+  const isYouTube =
+    (
+      /(^|\.)youtube\.com$/i.test(location.hostname) &&
+      (/^\/watch$/i.test(location.pathname) || /^\/shorts\//i.test(location.pathname))
+    ) ||
+    /(^|\.)youtu\.be$/i.test(location.hostname)
 
-  let ytVariants = null;
-  if (location.hostname.includes('youtube.com') && location.pathname === '/watch') {
-    const ytData = await getYouTubeData();
-    ytVariants = extractYouTubeVariants(ytData);
-    if (ytVariants === 'ciphered') {
-      setLabel(entry, 'Ciphered Video', 'bad', 'This is a protected video (e.g. music video) that uses a rolling cipher. Draco cannot natively extract it yet.');
-      return;
+  if (isYouTube) {
+    try {
+      const reply = await chrome.runtime.sendMessage({ type: 'draco:resolve-youtube' })
+      if (reply?.ok) {
+        setLabel(entry, 'Opened in Draco', 'done')
+      } else {
+        setLabel(
+          entry,
+          'YouTube failed',
+          'bad',
+          reply?.error ?? 'Could not extract this YouTube video.'
+        )
+      }
+      return
+    } catch (err) {
+      setLabel(
+        entry,
+        'YouTube failed',
+        'bad',
+        err instanceof Error ? err.message : String(err)
+      )
+      return
     }
   }
 
+  const source = entry.video.currentSrc || entry.video.src || ''
   let reply
   try {
     reply = await chrome.runtime.sendMessage({
       type: 'draco:grab-best',
       videoSrc: /^https?:/i.test(source) ? source : '',
-      adaptive: source.startsWith('blob:') || ADAPTIVE_SITES.test(location.hostname),
-      ytVariants
+      adaptive: source.startsWith('blob:') || ADAPTIVE_SITES.test(location.hostname)
     })
   } catch (err) {
     reply = { ok: false, error: String(err?.message ?? err) }

@@ -32,6 +32,7 @@ export interface RunnerContext {
   onUpdate(task: DownloadTask): void
   onFinished(task: DownloadTask, error: Error | null): void
   onProbed?(task: DownloadTask): void | Promise<void>
+  refreshYouTube?(task: DownloadTask): Promise<string>
 }
 
 export interface ManagerOptions {
@@ -49,6 +50,7 @@ export interface ManagerOptions {
    */
   createHlsRunner?(task: DownloadTask, context: RunnerContext): Runner
   createDashRunner?(task: DownloadTask, context: RunnerContext): Runner
+  refreshYouTube?: (task: DownloadTask) => Promise<string>
 }
 
 /** How often speed, ETA and segment snapshots are recomputed and published. */
@@ -252,7 +254,8 @@ export class DownloadManager {
       timeoutMs: settings.timeoutMs,
       onUpdate: () => this.emitTasks(),
       onFinished: (finished, error) => void this.onFinished(runner, finished, error),
-      onProbed: (probed) => this.options.onProbed?.(probed)
+      onProbed: (probed) => this.options.onProbed?.(probed),
+      refreshYouTube: this.options.refreshYouTube
     }
 
     let runner: Runner
@@ -399,7 +402,7 @@ async function reconcileWithJournal(task: DownloadTask): Promise<void> {
       task.segments.push(...aSegs)
     }
     
-    if (vJournal?.size && aJournal?.size) {
+    if (vJournal?.size !== null && vJournal?.size !== undefined && aJournal?.size !== null && aJournal?.size !== undefined) {
       task.size = vJournal.size + aJournal.size
     }
     return

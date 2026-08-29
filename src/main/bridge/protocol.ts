@@ -6,20 +6,26 @@
  * frames through without parsing or re-encoding them.
  */
 
+import type { PageFormat } from '../../shared/types.ts'
+
 /** Chrome's own cap on a single native message. */
 export const MAX_FRAME_BYTES = 64 * 1024 * 1024
 
 export interface PingMessage {
   type: 'ping'
+  /** Stable per-call identity; lets the app deduplicate native-host retries. */
+  requestId?: string
 }
 
 /** The extension asks what it should be intercepting before it intercepts. */
 export interface ConfigMessage {
   type: 'config'
+  requestId?: string
 }
 
 export interface DownloadMessage {
   type: 'download'
+  requestId?: string
   url: string
   filename?: string
   referer?: string
@@ -35,8 +41,28 @@ export interface DownloadMessage {
   bulk?: boolean
 }
 
+export interface YouTubeMessage {
+  type: 'youtube'
+  requestId?: string
+  pageUrl: string
+  pageTitle: string
+  referer?: string
+  cookie?: string
+  userAgent?: string
+  /**
+   * The quality ladder as the page itself already knows it, so the picker can
+   * be shown at once instead of after a yt-dlp round trip.
+   *
+   * Metadata only. These entries name formats by itag and carry no URL, because
+   * this side of the bridge is web content and must never be able to choose
+   * what the app fetches - only what it lists.
+   */
+  pageFormats?: PageFormat[]
+}
+
 export interface MediaMessage {
   type: 'media'
+  requestId?: string
   pageUrl: string
   pageTitle: string
   mediaUrl: string
@@ -48,7 +74,7 @@ export interface MediaMessage {
   userAgent?: string
 }
 
-export type HostMessage = PingMessage | ConfigMessage | DownloadMessage | MediaMessage
+export type HostMessage = PingMessage | ConfigMessage | DownloadMessage | MediaMessage | YouTubeMessage
 
 export interface HostReply {
   ok: boolean
@@ -92,7 +118,219 @@ export function readFrames(buffer: Buffer): { frames: unknown[]; rest: Buffer } 
 
 export function encodeFrame(value: unknown): Buffer {
   const body = Buffer.from(JSON.stringify(value), 'utf8')
+  if (body.length > MAX_FRAME_BYTES) {
+    throw new Error(`Frame of ${body.length} bytes exceeds the limit`)
+  }
   const header = Buffer.allocUnsafe(4)
   header.writeUInt32LE(body.length, 0)
   return Buffer.concat([header, body])
 }
+
+
+export function validateHostMessage(value: unknown): HostMessage {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error('Native message must be an object')
+  }
+  const message = value as Record<string, unknown>
+  const type = message.type
+  if (typeof type !== 'string') throw new Error('Native message type is missing')
+
+  const requestId = message.requestId === undefined || message.requestId === null
+    ? undefined
+    : typeof message.requestId === 'string' && /^[A-Za-z0-9._:-]{1,128}$/.test(message.requestId)
+      ? message.requestId
+      : (() => { throw new Error('Invalid requestId') })()
+
+  const stringField = (name: string, max = 16_384): string | undefined => {
+    const v = message[name]
+    if (v === undefined || v === null) return undefined
+    if (typeof v !== 'string' || v.length > max) throw new Error(`Invalid ${name}`)
+    return v
+  }
+  const urlField = (name: string): string => {
+    const v = stringField(name, 32_768)
+    if (!v) throw new Error(`Missing ${name}`)
+    try {
+      const u = new URL(v)
+      if (u.protocol !== 'http:' && u.protocol !== 'https:') throw new Error()
+    } catch {
+      throw new Error(`Invalid ${name}`)
+    }
+    return v
+  }
+  const optionalUrl = (name: string): string | undefined => {
+    const v = stringField(name, 32_768)
+    if (!v) return undefined
+    try {
+      const u = new URL(v)
+      if (u.protocol !== 'http:' && u.protocol !== 'https:') throw new Error()
+    } catch {
+      throw new Error(`Invalid ${name}`)
+    }
+    return v
+  }
+
+  switch (type) {
+    case 'ping':
+    case 'config':
+      return { type, ...(requestId ? { requestId } : {}) } as HostMessage
+    case 'download': {
+      const size = message.size
+      if (size !== undefined && size !== null && (typeof size !== 'number' || !Number.isSafeInteger(size) || size < 0)) {
+        throw new Error('Invalid size')
+      }
+      const bulk = message.bulk
+      if (bulk !== undefined && typeof bulk !== 'boolean') throw new Error('Invalid bulk flag')
+      return {
+        type,
+        ...(requestId ? { requestId } : {}),
+        url: urlField('url'),
+        filename: stringField('filename', 512),
+        referer: optionalUrl('referer'),
+        cookie: stringField('cookie', 1_000_000),
+        userAgent: stringField('userAgent', 1024),
+        size: (size ?? null) as number | null,
+        mimeType: stringField('mimeType', 1024) ?? null,
+        bulk: bulk ?? false
+      }
+    }
+    case 'youtube': {
+      const pageFormats = message.pageFormats
+      if (pageFormats !== undefined) {
+        // A page can publish a long ladder, but not an unbounded one.
+        if (!Array.isArray(pageFormats) || pageFormats.length > 100) {
+          throw new Error('Invalid pageFormats')
+        }
+      }
+      return {
+        type,
+        ...(requestId ? { requestId } : {}),
+        pageUrl: urlField('pageUrl'),
+        pageTitle: stringField('pageTitle', 1000) ?? '',
+        referer: optionalUrl('referer'),
+        cookie: stringField('cookie', 1_000_000),
+        userAgent: stringField('userAgent', 1024),
+        pageFormats: Array.isArray(pageFormats)
+          ? pageFormats.map(normalizePageFormat)
+          : undefined
+      }
+    }
+    case 'media': {
+      const kind = message.kind
+      if (kind !== 'hls' && kind !== 'dash' && kind !== 'file') throw new Error('Invalid media kind')
+      const variants = message.variants
+      if (variants !== undefined) {
+        if (!Array.isArray(variants) || variants.length > 50) throw new Error('Invalid variants')
+        for (const variant of variants) normalizeMediaVariant(variant)
+      }
+      return {
+        type,
+        ...(requestId ? { requestId } : {}),
+        pageUrl: urlField('pageUrl'),
+        pageTitle: stringField('pageTitle', 1000) ?? '',
+        mediaUrl: urlField('mediaUrl'),
+        audioUrl: optionalUrl('audioUrl') ?? null,
+        variants: Array.isArray(variants) ? variants.map(normalizeMediaVariant) : undefined,
+        kind,
+        referer: optionalUrl('referer'),
+        cookie: stringField('cookie', 1_000_000),
+        userAgent: stringField('userAgent', 1024)
+      }
+    }
+    default:
+      throw new Error(`Unsupported native message type: ${type}`)
+  }
+}
+
+/**
+ * Rebuilds a page format from scratch rather than trusting the object handed
+ * over: every field is checked and anything else the page attached is dropped.
+ */
+function normalizePageFormat(value: unknown): PageFormat {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error('Invalid page format')
+  }
+  const f = value as Record<string, unknown>
+
+  const itag = f.itag
+  if (typeof itag !== 'number' || !Number.isSafeInteger(itag) || itag < 0 || itag > 100_000) {
+    throw new Error('Invalid page format itag')
+  }
+
+  return {
+    itag,
+    mimeType:
+      f.mimeType === undefined || f.mimeType === null
+        ? null
+        : boundedString(f.mimeType, 200, 'page format mimeType'),
+    bitrate: nonNegativeNumber(f.bitrate, 'page format bitrate'),
+    width: nonNegativeNumber(f.width, 'page format width'),
+    height: nonNegativeNumber(f.height, 'page format height'),
+    fps: nonNegativeNumber(f.fps, 'page format fps'),
+    contentLength: nonNegativeNumber(f.contentLength, 'page format contentLength')
+  }
+}
+
+function normalizeMediaVariant(value: unknown): {
+  url: string
+  audioUrl: string | null
+  label: string | null
+  height: number | null
+  bandwidth: number | null
+  codecs: string | null
+  estimatedSize: number | null
+  youtube?: { videoFormatId: string; audioFormatId?: string | null }
+} {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Invalid media variant')
+  const v = value as Record<string, unknown>
+  const url = requiredUrlValue(v.url, 'variant url')
+  const audioUrl = v.audioUrl === undefined || v.audioUrl === null ? null : optionalUrlValue(v.audioUrl, 'variant audioUrl')
+  const label = v.label === undefined || v.label === null ? null : boundedString(v.label, 200, 'variant label')
+  const codecs = v.codecs === undefined || v.codecs === null ? null : boundedString(v.codecs, 1000, 'variant codecs')
+  const height = nonNegativeNumber(v.height, 'height')
+  const bandwidth = nonNegativeNumber(v.bandwidth, 'bandwidth')
+  const estimatedSize = nonNegativeNumber(v.estimatedSize, 'estimatedSize')
+
+  let youtube: { videoFormatId: string; audioFormatId?: string | null } | undefined
+  if (v.youtube !== undefined) {
+    if (!v.youtube || typeof v.youtube !== 'object' || Array.isArray(v.youtube)) throw new Error('Invalid YouTube variant')
+    const y = v.youtube as Record<string, unknown>
+    const videoFormatId = boundedString(y.videoFormatId, 200, 'YouTube video format id')
+    if (!videoFormatId) throw new Error('Invalid YouTube video format id')
+    const audioFormatId = y.audioFormatId === undefined || y.audioFormatId === null
+      ? null
+      : boundedString(y.audioFormatId, 200, 'YouTube audio format id')
+    youtube = { videoFormatId, audioFormatId }
+  }
+
+  return { url, audioUrl, label, height, bandwidth, codecs, estimatedSize, ...(youtube ? { youtube } : {}) }
+}
+
+function boundedString(value: unknown, max: number, label: string): string {
+  if (typeof value !== 'string' || value.length > max) throw new Error(`Invalid ${label}`)
+  return value
+}
+
+function requiredUrlValue(value: unknown, label: string): string {
+  return optionalUrlValue(value, label)
+}
+
+function optionalUrlValue(value: unknown, label: string): string {
+  if (typeof value !== 'string' || value.length > 32_768) throw new Error(`Invalid ${label}`)
+  try {
+    const u = new URL(value)
+    if (u.protocol !== 'http:' && u.protocol !== 'https:') throw new Error()
+  } catch {
+    throw new Error(`Invalid ${label}`)
+  }
+  return value
+}
+
+function nonNegativeNumber(value: unknown, label: string): number | null {
+  if (value === undefined || value === null) return null
+  if (typeof value !== 'number' || !Number.isFinite(value) || value < 0 || value > Number.MAX_SAFE_INTEGER) {
+    throw new Error(`Invalid variant ${label}`)
+  }
+  return value
+}
+

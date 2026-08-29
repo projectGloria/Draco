@@ -36,6 +36,16 @@ export class NotResumableError extends Error {
  * would be wrong - the right answer is to use fewer connections, which is what
  * the task runner does when it sees this.
  */
+export class HttpStatusError extends Error {
+  readonly statusCode: number
+
+  constructor(statusCode: number, statusText = '') {
+    super(`HTTP ${statusCode}${statusText ? ` ${statusText}` : ''}`)
+    this.name = 'HttpStatusError'
+    this.statusCode = statusCode
+  }
+}
+
 export class ServerBusyError extends Error {
   readonly statusCode: number
 
@@ -56,6 +66,7 @@ export interface SegmentContext {
   limiter: RateLimiter
   timeoutMs: number
   retryLimit: number
+  expectedSize: number | null
   signal: AbortSignal
   /** Called after every write so the task can update speed and journal state. */
   onBytes(count: number): void
@@ -78,6 +89,13 @@ export async function runSegment(seg: Segment, ctx: SegmentContext): Promise<voi
       // limit. Hand it back so the task can drop a connection and requeue it.
       if (err instanceof ServerBusyError) throw err
 
+      // Signed media URLs commonly return 403/410 as soon as they expire.
+      // Let the owning task refresh its stable source identity immediately
+      // instead of spending the whole generic retry budget first.
+      if (err instanceof HttpStatusError && [401, 403, 410].includes(err.statusCode)) {
+        throw err
+      }
+
       // The segment may already be finished even though the stream died - a
       // truncated-but-complete read is a success, not a retry.
       if (Segmenter.remaining(seg) <= 0) return
@@ -95,7 +113,9 @@ export async function runSegment(seg: Segment, ctx: SegmentContext): Promise<voi
 
 async function attemptSegment(seg: Segment, ctx: SegmentContext): Promise<void> {
   const openEnded = seg.end < 0
-  const range = openEnded ? `bytes=${seg.position}-` : `bytes=${seg.position}-${seg.end}`
+  const requestedStart = seg.position
+  const requestedEnd = seg.end
+  const range = openEnded ? `bytes=${requestedStart}-` : `bytes=${requestedStart}-${requestedEnd}`
 
   const res = await request(ctx.url, {
     method: 'GET',
@@ -104,9 +124,17 @@ async function attemptSegment(seg: Segment, ctx: SegmentContext): Promise<void> 
     signal: ctx.signal
   })
 
-  if (res.statusCode === 200 && seg.position > 0) {
+  // A non-resumable server is allowed to return the complete file for the
+  // initial single-connection request. What is unsafe is a 200 that ignores a
+  // partial/split range, because accepting that body would overlap other work.
+  const isWholeFileRequest =
+    requestedStart === 0 &&
+    requestedEnd >= 0 &&
+    ctx.expectedSize !== null &&
+    requestedEnd + 1 === ctx.expectedSize
+  if (res.statusCode === 200 && (requestedStart > 0 || (requestedEnd >= 0 && !isWholeFileRequest))) {
     await res.body.dump().catch(() => {})
-    throw new NotResumableError('Server ignored the range request')
+    throw new NotResumableError('Server ignored the requested byte range')
   }
 
   if (BUSY_STATUS.has(res.statusCode)) {
@@ -115,8 +143,40 @@ async function attemptSegment(seg: Segment, ctx: SegmentContext): Promise<void> 
   }
 
   if (res.statusCode !== 206 && res.statusCode !== 200) {
+    // undici exposes no reason phrase; the status code is the whole signal.
     await res.body.dump().catch(() => {})
-    throw new Error(`Segment request failed with ${res.statusCode}`)
+    throw new HttpStatusError(res.statusCode)
+  }
+
+  if (res.statusCode === 206) {
+    const contentRange = res.headers['content-range']
+    const match = typeof contentRange === 'string'
+      ? /^bytes\s+(\d+)-(\d+)\/(\d+|\*)$/i.exec(contentRange)
+      : null
+    if (!match) {
+      await res.body.dump().catch(() => {})
+      throw new Error('Server returned 206 without a valid Content-Range')
+    }
+
+    const rangeStart = Number(match[1])
+    const rangeEnd = Number(match[2])
+    const total = match[3] === '*' ? null : Number(match[3])
+    if (!Number.isSafeInteger(rangeStart) || !Number.isSafeInteger(rangeEnd) || rangeEnd < rangeStart) {
+      await res.body.dump().catch(() => {})
+      throw new Error('Server returned an invalid Content-Range')
+    }
+    if (rangeStart !== requestedStart || (requestedEnd >= 0 && rangeEnd !== requestedEnd)) {
+      await res.body.dump().catch(() => {})
+      throw new Error('Server returned a range different from the requested bytes')
+    }
+    if (total !== null && (!Number.isSafeInteger(total) || total < rangeEnd + 1)) {
+      await res.body.dump().catch(() => {})
+      throw new Error('Server returned an invalid Content-Range total')
+    }
+    if (ctx.expectedSize !== null && total !== null && total !== ctx.expectedSize) {
+      await res.body.dump().catch(() => {})
+      throw new Error('Server reported a different resource size than the probe')
+    }
   }
 
   // Read chunks with a pull-based loop instead of `for await...of`.
@@ -147,14 +207,14 @@ async function attemptSegment(seg: Segment, ctx: SegmentContext): Promise<void> 
       if (allowed <= 0) break
 
       const slice = allowed === buf.length ? buf : buf.subarray(0, allowed)
-      await ctx.fh.write(slice, 0, slice.length, seg.position)
+      await writeAtFully(ctx.fh, slice, seg.position)
 
       seg.position += slice.length
       ctx.onBytes(slice.length)
 
       // Pay for the bytes only after they are safely written. Awaiting here is
       // what applies backpressure all the way down to the socket.
-      await ctx.limiter.consume(slice.length)
+      await ctx.limiter.consume(slice.length, ctx.signal)
 
       if (allowed < buf.length) break
     }
@@ -167,6 +227,18 @@ async function attemptSegment(seg: Segment, ctx: SegmentContext): Promise<void> 
     throw new Error(
       `Connection closed with ${Segmenter.remaining(seg)} bytes of the range outstanding`
     )
+  }
+}
+
+async function writeAtFully(fh: FileHandle, buffer: Buffer, position: number): Promise<void> {
+  let offset = 0
+  while (offset < buffer.length) {
+    const result = await fh.write(buffer, offset, buffer.length - offset, position + offset)
+    const written = result.bytesWritten
+    if (!Number.isSafeInteger(written) || written <= 0) {
+      throw new Error('File write made no progress')
+    }
+    offset += written
   }
 }
 

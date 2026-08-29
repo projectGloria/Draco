@@ -2,179 +2,234 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-# Draco
+## What this is
 
-A personal Windows download manager in the mould of Internet Download Manager: dynamic segmented
-downloads, browser takeover through an unpacked MV3 extension, categories, queues with a scheduler,
-and an HLS grabber.
-
-Personal use only. The extension is loaded from disk with **Load unpacked** and is never published
-to the Chrome Web Store.
+Draco is a Windows-only IDM-style download manager: an Electron + React app whose
+hand-written download engine does dynamic segmented downloads, plus a Chrome MV3
+extension and a Go native-messaging host that let it take downloads away from the
+browser. There is no README; the source carries block comments explaining *why*
+each part is the way it is — read them before changing behaviour, they usually
+record a decision rather than describe the code.
 
 ## Commands
 
-| Command | What it does |
-| --- | --- |
-| `npm run dev` | electron-vite dev server + Electron |
-| `npm run typecheck` | `tsconfig.node.json` (main/preload) then `tsconfig.web.json` (renderer) |
-| `npm run build` | typecheck + build into `out/` |
-| `npm run dist` | NSIS installer + portable via electron-builder |
-| `npm run dl -- <url>` | Drives the engine headless from a terminal (see below) |
-| `npm run keygen` | Generates `extension/key.pem` and pins the extension ID into the manifest |
-| `npm run icon` | Redraws `resources/icon.ico` from the brand mark |
-| `npm run host` | Builds `host/draco-host.exe` (needs Go) |
-| `npm run pack` / `npm run start` | Unpacked build / preview the built app |
+```bash
+npm run dev          # electron-vite dev (main + preload + 3 renderer entries, HMR)
+npm run build        # typecheck, then electron-vite build -> out/
+npm run typecheck    # tsc --noEmit over tsconfig.node.json and tsconfig.web.json
+npm test             # node --experimental-strip-types --test tests/*.test.mjs
+npm run dist         # build + electron-builder --win (nsis + portable) -> dist/
+npm run pack         # build + electron-builder --dir (unpacked, for quick checks)
 
-There is no test suite and no linter. Verification is done by running the thing — see **Verifying
-a change**. `npm run typecheck` is the only automated gate, and it covers two projects: fixing one
-does not mean the other passes.
-
-**If `npm run dev` dies with `Error: Electron uninstall`,** Electron's binary was never downloaded
-(its postinstall was skipped). Fix it with `node node_modules/electron/install.js` — reinstalling
-the package does not necessarily re-run it.
-
-## Layout
-
-```
-src/main/
-  engine/      probe, segmenter, worker, journal, limiter, task, manager   ← Electron-free
-  hls/         playlist, runner, mux, ffmpeg
-  queue/       scheduler
-  bridge/      pipe-server, protocol, integration (registry + native manifest)
-  bootstrap/   paths
-  store.ts categories.ts ipc.ts windows.ts tray.ts clipboard.ts log.ts index.ts
-src/preload/index.ts        the whole contextBridge surface
-src/renderer/               React + Zustand + Tailwind 4
-src/shared/types.ts         the window.api contract
-extension/                  unpacked MV3 extension
-host/                       Go native-messaging host
-tools/                      dl.ts, gen-extension-key.mjs, gen-icon.mjs, register-host.ps1
+npm run host         # builds host/draco-host.exe via host/build.ps1 (needs Go)
+npm run keygen       # one-time: generates extension/key.pem and pins the extension ID
+npm run icon         # regenerates resources/icon.ico
 ```
 
-Runtime data lives in `%APPDATA%/Draco`: `settings.json`, `tasks.json`, `categories.json`,
-`queues.json`, `media.json`, `bin/ffmpeg.exe`, `logs/main.log`.
+Run a single test file: `node --experimental-strip-types --test tests/segmenter.test.mjs`.
+Tests are plain `node:test` `.mjs` files that `import` the `.ts` sources directly
+via type stripping — no test build step, no framework. There is no linter.
 
-## Rules that are easy to break
+Drive the engine without any UI (prints the live segment table, so you can watch
+splitting and confirm Ctrl-C resumes at the right offsets):
 
-**IPC changes touch three files in lockstep.** `src/shared/types.ts`, `src/main/ipc.ts` and
-`src/preload/index.ts`. Adding a channel in one and not the others typechecks in some
-configurations and fails at runtime.
+```bash
+node tools/dl.ts <url> [--dir DIR] [--conn N] [--limit BPS] [--min-split BYTES] [--tasks N]
+```
 
-**`src/main/engine/**` must not import Electron.** It is driven by `tools/dl.ts` under bare Node so
-the engine can be exercised without a GUI, and by the app in production — the same code path both
-times. Anything the engine needs from the app is injected (`ManagerOptions.getSettings`,
-`createHlsRunner`). Files there use relative `.ts` import specifiers so `node tools/dl.ts` runs
-them with no build step, which also means **erasable-only TypeScript**: no parameter properties, no
-enums, no namespaces.
+## Architecture
 
-**The renderer has no Node.** No `fs`, no `child_process`, no `require`. Every capability is an
-explicit channel. `tasks:update` whitelists the fields the UI may patch — letting a renderer write
-`segments` or `received` would corrupt the engine's own bookkeeping.
+Four separately-built artifacts cooperate:
 
-**There are three renderer entry points**, not one: `index.html` (the main window), `splash.html`
-(bootstrap progress, framework-free so it paints on the first frame) and `handoff.html` (the
-confirm window). Adding a fourth means editing `electron.vite.config.ts`'s `input` map *and* the
-page union in `windows.ts`'s `rendererUrl()` — miss either and it silently 404s in dev or fails to
-load when packaged. All three share one preload, so `window.api` is the same everywhere.
+1. **Electron main** (`src/main`) — owns all state and all privilege.
+2. **Renderer** (`src/renderer`) — React 19 + Zustand + Tailwind v4; three HTML
+   entries: `index` (app), `splash`, `handoff` (the per-download confirm window).
+3. **Go native host** (`host/main.go`) — a console binary Chrome launches.
+4. **Chrome MV3 extension** (`extension/`) — loaded unpacked by the user.
 
-**There are two runner implementations behind one interface.** `engine/runner.ts` defines `Runner`;
-`TaskRunner` does ranged HTTP and `HlsRunner` does playlists. The manager is written against the
-interface and gets the HLS one injected (`ManagerOptions.createHlsRunner`), which is what keeps
-`engine/` free of Electron and ffmpeg.
+### The browser bridge
 
-**Nothing lands at its final name until it is complete.** Partial data lives in `<name>.dracodl`
-(plus `<name>.dracodl.json`, the resume journal) or `<name>.dracoparts/` for a playlist. Journals
-and piece files are written to a temp name and renamed, so a crash can only ever cost the last
-flush, never leave a file that parses as valid but is not.
+`extension → native messaging (stdio) → host/draco-host.exe → named pipe \\.\pipe\draco → PipeServer → handleHostMessage`
 
-**Resume validation errs toward re-downloading.** `journalMatches` rejects weak ETags and any size
-disagreement. Starting over is the cheap mistake; splicing two different responses into one file is
-not, because the result looks complete and is not.
+- `src/main/bridge/protocol.ts` is the single wire-format definition, shared by
+  all three sides. It is byte-identical to Chrome's own framing (4-byte LE length
+  + UTF-8 JSON) precisely so the Go host relays frames without parsing them.
+- The Go host is a **console-subsystem** binary on purpose (Chrome 115+ hides
+  those; a GUI one flashes a window per download) and must **never** write
+  anything to stdout except a protocol frame.
+- A named pipe rather than a loopback port: the default ACL scopes it to the
+  logged-in user, so there is no port to find and no shared secret.
+- `bridge/integration.ts` rewrites the native-messaging manifest and the three
+  HKCU registry keys (Chrome/Edge/Brave) on **every** launch, so moving the app
+  repairs the integration instead of breaking it.
+- Message types: `ping`, `config` (extension asks what to intercept), `download`,
+  `media`, `youtube`. Mutating types are deduplicated in main by `requestId`,
+  because the host retries.
+- Everything from the extension originated in a web page — treat it as untrusted
+  and validate (`engine/create.ts:validateUrl`) before acting.
 
-**Progress is a batched 4 Hz feed.** `DownloadManager` publishes `tasks:progress` for every running
-task on one ticker; nothing emits per chunk. The ticker stops itself when no task is running.
+**The host cold-starts the app**, so an idle extension launches Draco on its own
+— the config poll alone is enough. It reads `%APPDATA%/Draco/host-config.json`,
+written by `writeHostFiles`. In development `appPath` is Electron itself and
+`appArgs` must be `app.getAppPath()` (the directory with `package.json`), *not*
+`paths.root` (userData). Get that wrong and Electron shows "Unable to find
+Electron app at …" with nobody having tried to open anything.
 
-**Spawns use argument arrays with `shell: false`.** `shutdown`, `taskkill`, `reg`, `tar`, `ffmpeg`.
-Never build a command string.
+### Extension identity
 
-## Things that already bit us
+The extension ID is pinned by the `key` field in `extension/manifest.json`,
+derived from `extension/key.pem` (gitignored, never shipped — see the
+`electron-builder.yml` filter). An unpacked extension's ID otherwise changes with
+its folder path, which would silently break `allowed_origins`. Never regenerate
+the key casually; `tools/gen-extension-key.mjs` deliberately reuses an existing
+`key.pem`.
 
-- `undici` 7 moved redirects to `interceptors.redirect()` composed onto an `Agent`; there is no
-  `maxRedirections` option on a request. `engine/http.ts` owns the one shared dispatcher. The probe
-  uses `fetch` rather than `request` because `context.history` omits the final hop and
-  `response.url` does not.
-- `accept-encoding: identity` is mandatory. Over a compressed transfer `Content-Length` describes
-  the compressed size and byte ranges stop matching file offsets.
-- `Accept-Ranges: bytes` is advisory and servers lie about it. Only a real 206 with a
-  `Content-Range` proves a file is resumable.
-- Some servers answer the 3rd..8th connection with **429**. That is a cap, not a failure:
-  `TaskRunner` ratchets `connectionCap` down and backs off rather than failing the task.
-- `DownloadManager`'s constructor must not read settings — it is built during bootstrap, before
-  `settings.json` has been loaded. The limit is applied in `schedule()`.
-- `tasks.json` is written on a one-second coalesce, so after a hard kill it lags. `manager.load()`
-  reconciles every unfinished task against its journal (or its piece files) so the list is honest
-  before the user presses Resume.
-- **A stream that ends early does not always reject.** A peer can close cleanly mid-body and
-  `stream/promises.pipeline` resolves on a partial file. `hls/ffmpeg.ts` compares the bytes written
-  against `Content-Length`; without that a truncated archive reached `tar` as the baffling "this
-  does not look like a tar archive".
-- **bsdtar reads `host:path` as a remote spec**, so an absolute Windows path starting `C:\` fails
-  with "Cannot connect to C: resolve failed". Run it with `cwd` set and a relative archive name.
-- **`filenameForKind` must stay idempotent.** It runs in `placeTask` *and* again in `createTask`; a
-  version that blindly appended produced `video 1080p.mp4.mp4.mp4`.
-- `DownloadTask.detail` is what the Status column shows when the status word alone is not enough
-  ("Fetching ffmpeg 40%", "Muxing…"). Long silent stages must set it or they look like a hang.
+Chrome runs the old service worker until the extension is reloaded at
+`chrome://extensions`, so changes to `extension/` need that reload before they
+take effect — otherwise main silently sees the old message shape.
 
-## The browser link
+### The download engine (`src/main/engine`)
 
-Chrome hands a native-messaging host its stdio, so the host cannot be Electron: `host/main.go`
-builds a small console binary that relays length-prefixed JSON between Chrome and
-`\\.\pipe\draco`. It launches Draco if the pipe is not there, and **never writes to stdout** except
-protocol frames — that channel is the protocol; diagnostics go to `logs/host.log`.
+The core idea, and the reason this is hand-written rather than an aria2 wrapper,
+lives in `segmenter.ts`: start with one range and **split on demand** — when a
+connection frees up, take the segment with the most remaining work and hand half
+of it to the idle connection. Splitting only moves a segment's `end` backwards
+into unwritten bytes, so a mid-flight worker just stops early.
 
-The extension ID is pinned by the `key` field in `extension/manifest.json`, derived from
-`extension/key.pem` (gitignored — anyone holding it can impersonate the extension). The native
-manifest's `allowed_origins` must match that ID, which is why `npm run keygen` writes both.
+- `manager.ts` owns every task and decides what runs. **It imports no Electron
+  and no ffmpeg** — that is load-bearing, because `tools/dl.ts` drives the exact
+  same manager from a terminal. Anything Electron- or ffmpeg-specific is injected
+  through `ManagerOptions` (`createHlsRunner`, `createDashRunner`,
+  `refreshYouTube`, `onProbed`).
+- `runner.ts` is the interface the manager is written against. Runner selection:
+  `kind === 'hls'` → HLS runner; `task.audioUrl` set → DASH runner (separate
+  video+audio tracks, muxed at the end); otherwise `TaskRunner`.
+- `worker.ts` writes with positioned `fh.write(..., position)` so all connections
+  share one file handle with no locking. `HttpStatusError` (e.g. 429) is distinct
+  from a generic failure so the task ratchets its connection cap down instead of
+  failing.
+- `http.ts` holds one shared undici `Agent` per timeout value, so keep-alive is
+  reused across segments *and* across downloads to the same host.
+- **Resume contract** (`journal.ts`): partial data is `<name>.dracodl`, beside it
+  `<name>.dracodl.json` recording every segment's position. Journal writes go
+  through temp-file + rename. On load, every unfinished task is reconciled
+  against its journal — not just ones caught mid-flight, since the journal can be
+  ahead of `tasks.json` by several restarts.
+- `probe.ts` settles the real filename and MIME type before any bytes land; that
+  is when `onProbed` re-files the task into its category folder.
 
-`ensureRegistered()` runs on every launch, so moving the app folder repairs the registration
-rather than silently breaking it.
+A runner's `status` is what the UI reads: `DownloadTable` and `StatusBar` show
+speed and ETA from the task's own figures, and every runner is expected to zero
+`speed` and null `eta` on pause, error and completion. A composite runner must
+also keep the parent's status honest while its children work — `DashRunner.tick`
+derives it from them, because a parent stuck on `probing` for the whole transfer
+reads as a broken speed indicator.
 
-**Suppressing the browser's own UI has one rule: cancel before any `await`.** Chrome puts a
-download on the shelf - and opens its Save As dialog, if that setting is on - the moment the item
-exists. Reading cookies or asking the native host first means all of that has already appeared on
-screen. So `downloads.onCreated` cancels synchronously against the *cached* rules and asks
-afterwards; `giveBack()` hands the download back to the browser if Draco turns out not to want it,
-and `passThrough` stops the re-issued copy being intercepted again. Better still is the content
-script, which cancels the click before a download exists at all.
+### YouTube (`src/main/youtube.ts`, `src/main/youtube-ladder.ts`)
 
-**The confirm window is a window, not a modal.** `createHandoffWindow` opens a small always-on-top
-window per request. The click that triggered it happened in the browser, so the answer belongs in
-front of the browser - dragging the whole download manager forward to ask two questions is the
-interruption IDM avoids. Requests are queued in `AppContext.pendingHandoffs` rather than pushed at
-a renderer, because the host can cold-start the app *in order to* service a download and the
-request has to outlive having no window at all.
+yt-dlp costs ~6.5s per video, nearly all of it its own startup plus YouTube round
+trips, so it is deliberately kept off the path between pressing the button and
+seeing the quality list:
 
-## Verifying a change
+- The extension reads the ladder out of the page (`#movie_player`'s
+  `getPlayerResponse()`, then `ytInitialPlayerResponse`) via
+  `chrome.scripting.executeScript` with `world: 'MAIN'`, and sends it as
+  `pageFormats` on the `youtube` message. It checks the response's `videoId`
+  against the URL first — YouTube is an SPA and those globals outlive the video
+  that set them.
+- **`pageFormats` is metadata only and carries no URLs.** The page is web
+  content; it may name a format by itag but must never nominate what Draco
+  fetches. Every download URL still comes from yt-dlp, resolved in
+  `handoff:acceptMedia` / `media:download` via `resolveChosenUrls`. Consequently
+  a page-derived `MediaVariant.url` is `''` until then — `sanitizeVariants`
+  permits that only when a `youtube` format id is present.
+- `primeYouTube` starts the yt-dlp lookup as the confirm window opens, so it
+  overlaps with the user choosing. `loadInfo` caches per video id for 5 minutes;
+  `refreshYouTubeFormat` forces past that cache, since it is only ever called
+  because the cached URL expired.
+- Main logs which path produced the ladder ("from the page" vs "from yt-dlp") —
+  check `%APPDATA%/Draco/logs/main.log` when the picker is slow.
 
-1. **Engine** — `npm run dl -- <url> --conn 8`. Watch segments split as connections free up. Stop
-   it partway, run it again, confirm it resumes and the hash matches.
-2. **UI** — `npm run dev`. Add a URL, pause/resume/stop, sort every column, open the detail dialog
-   and confirm the segment bars track the engine. Kill the app mid-download and relaunch: the task
-   must come back **paused** with its real progress, not lost and not at zero.
-3. **Queues** — a queue with a start time two minutes out; confirm it fires, respects
-   `maxConcurrent`, and that a shutdown action shows a countdown you can cancel.
-4. **Extension** — `chrome://extensions` → Load unpacked → `extension/`. Confirm the ID matches
-   `allowed_origins`. Click a download link: the browser shelf stays empty and Draco picks it up
-   with cookies intact. Quit Draco and click a link — the host must cold-start it.
-5. **Grabber** — a page with an HLS player; check the badge counts it, download it, play the result.
-   Cancel one mid-mux and check Task Manager for a stray `ffmpeg.exe`.
+`youtube-ladder.ts` collapses YouTube's many duplicate formats into one entry per
+quality rung — the highest-bitrate copy of each — labelled 8K/4K/2K/1080p. Three
+rules there are not obvious and are individually tested:
 
-The named pipe is also the quickest way to inject a download without a browser: connect to
-`\\.\pipe\draco` and write a 4-byte little-endian length followed by
-`{"type":"download","url":"…"}`.
+- **Only directly fetchable formats** (`isDirectDownload`). yt-dlp also lists
+  HLS/DASH repackagings and prices them *above* the real file, so ranking on
+  bitrate alone picks a manifest at every rung; the engine then saves playlist
+  text as `.v.mp4` and ffmpeg rejects it with "Invalid data found". They also
+  carry no `filesize`, so every quality shows the same audio-only estimate.
+- **Rungs snap to the short side** of the frame, which is how YouTube names
+  quality — otherwise a 1080×1920 Short is offered as "4K".
+- **Progressive formats are ranked on video bitrate**, discounting the audio that
+  their `tbr` includes, so they do not beat video-only formats on bitrate they do
+  not have.
 
-## Not in scope
+### Playlists (`src/main/hls`)
 
-FTP, the site grabber (crawl-a-site-for-offline), and Firefox. Site-specific extractors
-(YouTube and friends) are deliberately out — the sibling Vega project covers that, and adding
-yt-dlp here would duplicate it.
+HLS deliberately does **not** reuse the byte-range segmenter — a playlist is
+hundreds of separate resources, some individually encrypted, not one resource in
+ranges. What is shared is the rate limiter, retry discipline, and the rule that
+nothing takes its final name until complete. HLS resume needs no journal: a
+finished piece is renamed into place, so the piece file's existence *is* the
+record.
+
+ffmpeg and yt-dlp are **not bundled**. Both look on PATH first and otherwise
+fetch into `%APPDATA%/Draco/bin`; the ffmpeg download is the step most likely to
+stall, so it carries connect and stall timeouts and reports progress *before* the
+request rather than on the first byte. Muxing is always `-c copy`, and `mux()`
+passes `-nostdin` with no stdout for the child: ffmpeg waiting on an open stdin,
+or filling an undrained pipe, is a finished download stuck on "Muxing" forever.
+
+### State, IPC and the renderer
+
+- All persistence is JSON files under `%APPDATA%/Draco` (`bootstrap/paths.ts` is
+  the only place that names them). `store.ts` writes via unique-temp + rename;
+  everything read back goes through `store-sanitize.ts`, which is defensive
+  against hostile/malformed records and is directly tested.
+- `preload/index.ts` is the entire renderer capability surface — no Node, no fs,
+  contextIsolation on. A new feature needs a channel in both `preload/index.ts`
+  and `main/ipc.ts`, and a type in `shared/types.ts` (`RendererApi`).
+- The renderer owns no truth: every mutation goes out over IPC and comes back
+  through a subscription. Task list changes push `tasks:changed`; progress is a
+  separate batched 4 Hz `tasks:progress` feed (manager ticks at 250 ms).
+- `queue/scheduler.ts` never downloads anything — it only decides which tasks are
+  allowed to be `queued`, so the manager remains the single place work starts.
+- Startup (`main/index.ts`) is a real 5-step sequence reported to the splash
+  window (`appdata`, `settings`, `restore`, `bridge`, `integration`); a failed
+  step becomes an error card with Retry/Continue. `main()` builds singletons once;
+  only `runBootstrap()` is retryable.
+- Handoffs are held in `AppContext.pendingHandoffs` in main, because the host can
+  cold-start the app *in order to* service a download and there is no window yet.
+
+## Conventions
+
+**Imports.** `shared/types.ts` exports types only, so every `@shared/types`
+import is an `import type` and is erased before Node sees it — the alias is safe
+anywhere. What matters is *runtime* imports: anything a test or `tools/dl.ts`
+loads must reach its dependencies through relative specifiers with an explicit
+`.ts` extension, because Node's type stripping resolves those for real and knows
+nothing about tsconfig paths. That is why `engine/**`, `bridge/protocol.ts`,
+`hls/playlist-parser.ts`, `queue/scheduler-window.ts` and `youtube-ladder.ts` are
+written that way. Breaking it fails only at test/tool runtime, never at
+typecheck. The renderer additionally has `@` → `src/renderer/src`.
+
+**What can be unit-tested.** A module is testable only if its whole value-import
+graph is free of Electron. `paths.ts`, `integration.ts`, `clipboard.ts`,
+`index.ts`, `ipc.ts`, `tray.ts` and `windows.ts` import `electron`, and anything
+pulling one of them in (`log.ts` → `paths.ts`, so also `mux.ts`) cannot be loaded
+by `node --test`. When logic inside such a file is worth testing, split it out as
+its own Electron-free module — that is why `store-sanitize.ts` and
+`youtube-ladder.ts` exist.
+
+**Line endings are mixed.** Six files are CRLF and the rest are LF:
+`electron.vite.config.ts`, `src/main/windows.ts`, `src/renderer/src/App.tsx`,
+and `components/{DownloadTable,OptionsDialog,TaskDetailDialog}.tsx`. Exact-string
+edits written with LF silently fail to match in those files, and rewriting one
+wholesale churns every line. Match the file's existing endings.
+
+**tsconfig.** `tsconfig.node.json` covers main/preload/shared; `tsconfig.web.json`
+covers renderer/preload/shared. `noUnusedLocals` is on in both, so an unused
+field or import is a build failure, not a warning.
+
+Comments here explain rationale, not mechanics — match that when adding code.

@@ -1,5 +1,5 @@
-import { basename, join } from 'node:path'
-import { rm } from 'node:fs/promises'
+import { basename, extname, join } from 'node:path'
+import { rename, rm } from 'node:fs/promises'
 import type { DownloadTask } from '@shared/types'
 import { TaskRunner } from '../engine/task.ts'
 import type { Runner } from '../engine/runner.ts'
@@ -15,6 +15,12 @@ export class DashRunner implements Runner {
   private audioRunner: TaskRunner
   private deps: RunnerContext
   private controller = new AbortController()
+  /**
+   * Which half of the job is running. While the children download, `tick()`
+   * derives the parent status from them; once muxing starts it must stop, or it
+   * would overwrite the mux status four times a second.
+   */
+  private muxing = false
   running = false
 
   constructor(task: DownloadTask, context: RunnerContext) {
@@ -27,6 +33,7 @@ export class DashRunner implements Runner {
     videoTask.size = null
     videoTask.received = 0
     videoTask.segments = []
+    if (task.youtube) videoTask.youtube = { ...task.youtube, role: 'video' }
 
     const audioTask: DownloadTask = JSON.parse(JSON.stringify(task))
     audioTask.id = task.id + '-a'
@@ -35,11 +42,19 @@ export class DashRunner implements Runner {
     audioTask.size = null
     audioTask.received = 0
     audioTask.segments = []
+    if (task.youtube?.audioFormatId) {
+      audioTask.youtube = { ...task.youtube, role: 'audio' }
+    }
 
     const childContext: RunnerContext = {
       ...context,
       onUpdate: () => this.tick(),
-      onFinished: () => {},
+      onFinished: (childTask, error) => {
+        if (!error) return
+        this.controller.abort()
+        if (childTask.id === videoTask.id) void this.audioRunner?.pause()
+        else void this.videoRunner?.pause()
+      },
       onProbed: () => {}
     }
 
@@ -57,6 +72,7 @@ export class DashRunner implements Runner {
   async start(): Promise<void> {
     if (this.running) return
     this.running = true
+    this.muxing = false
     this.controller = new AbortController()
 
     try {
@@ -73,7 +89,10 @@ export class DashRunner implements Runner {
       if (this.videoRunner.task.status === 'error') throw new Error(this.videoRunner.task.error || 'Video fetch failed')
       if (this.audioRunner.task.status === 'error') throw new Error(this.audioRunner.task.error || 'Audio fetch failed')
 
+      this.muxing = true
       this.task.status = 'downloading'
+      this.task.speed = 0
+      this.task.eta = null
       this.task.detail = 'Muxing…'
       this.deps.onUpdate(this.task)
 
@@ -93,14 +112,19 @@ export class DashRunner implements Runner {
       const videoPath = join(this.task.dir, this.videoRunner.task.filename)
       const audioPath = join(this.task.dir, this.audioRunner.task.filename)
       const targetPath = await uniquePath(this.task.dir, this.task.filename)
+      const muxTemp = muxTempPath(targetPath)
+      await rm(muxTemp, { force: true }).catch(() => {})
 
       await mux({
         ffmpegPath,
         inputPath: videoPath,
         audioInputPath: audioPath,
-        outputPath: targetPath,
+        outputPath: muxTemp,
         signal: this.controller.signal
       })
+
+      if (this.controller.signal.aborted) throw new AbortedError()
+      await rename(muxTemp, targetPath)
 
       await rm(videoPath, { force: true }).catch(() => {})
       await rm(audioPath, { force: true }).catch(() => {})
@@ -117,6 +141,8 @@ export class DashRunner implements Runner {
 
       this.deps.onFinished(this.task, null)
     } catch (err) {
+      const target = join(this.task.dir, this.task.filename)
+      await rm(muxTempPath(target), { force: true }).catch(() => {})
       if (err instanceof AbortedError || this.controller.signal.aborted) {
         this.task.speed = 0
         this.task.eta = null
@@ -148,6 +174,16 @@ export class DashRunner implements Runner {
     this.videoRunner.tick()
     this.audioRunner.tick()
 
+    /*
+     * The parent's status is the two children's, combined. Without this it stayed
+     * on `probing` for the entire download - and the table only shows a speed for
+     * a task that says it is downloading, so the column read empty throughout.
+     */
+    if (!this.muxing) {
+      const states = [this.videoRunner.task.status, this.audioRunner.task.status]
+      this.task.status = states.includes('downloading') ? 'downloading' : 'probing'
+    }
+
     this.task.received = this.videoRunner.task.received + this.audioRunner.task.received
 
     const vSize = this.videoRunner.task.size
@@ -158,7 +194,9 @@ export class DashRunner implements Runner {
       this.task.size = null
     }
 
-    this.task.speed = this.videoRunner.task.speed + this.audioRunner.task.speed
+    this.task.speed = this.muxing
+      ? 0
+      : this.videoRunner.task.speed + this.audioRunner.task.speed
 
     if (this.task.size !== null && this.task.speed > 1) {
       this.task.eta = Math.max(0, Math.round((this.task.size - this.task.received) / this.task.speed))
@@ -175,4 +213,10 @@ export class DashRunner implements Runner {
     const a = await this.audioRunner.resetForRestart()
     return v && a
   }
+}
+
+
+function muxTempPath(target: string): string {
+  const ext = extname(target)
+  return ext ? `${target.slice(0, -ext.length)}.draco-mux-temp${ext}` : `${target}.draco-mux-temp.mp4`
 }

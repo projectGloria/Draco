@@ -55,8 +55,10 @@ const PASSTHROUGH_EXPIRY_MS = 30_000
 /* ------------------------------------------------------------------ */
 
 async function callHost(message) {
+  const requestId = globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(36).slice(2)}`
+  const payload = { ...message, requestId }
   try {
-    const reply = await chrome.runtime.sendNativeMessage(HOST, message)
+    const reply = await chrome.runtime.sendNativeMessage(HOST, payload)
     return reply ?? { ok: false, error: 'empty reply' }
   } catch (err) {
     // The host is missing, not registered, or the app refused to start. Never
@@ -154,7 +156,7 @@ async function cookieHeaderFor(url) {
 
 chrome.downloads.onCreated.addListener(async (item) => {
   const url = item.finalUrl || item.url
-  if (passThrough.delete(url)) return
+  if (passThrough.delete(item.finalUrl) || passThrough.delete(item.url)) return
 
   const rules = await refreshConfig()
   if (!shouldTakeOver(item, rules)) return
@@ -211,6 +213,125 @@ chrome.runtime.onInstalled.addListener(() => {
 
 chrome.runtime.onStartup.addListener(() => void refreshConfig(true))
 
+function isYouTubePage(url) {
+  try {
+    const parsed = new URL(url)
+    return (
+      /(^|\\.)youtube\\.com$/i.test(parsed.hostname) ||
+      /(^|\\.)youtu\\.be$/i.test(parsed.hostname)
+    )
+  } catch {
+    return false
+  }
+}
+
+/**
+ * The quality ladder straight out of the page.
+ *
+ * YouTube already parsed its player response in order to play the video, so the
+ * whole ladder is sitting in the tab for free. Reading it here is the difference
+ * between a menu that appears the moment the button is pressed and one that
+ * appears after yt-dlp has spent six seconds asking YouTube the same question.
+ *
+ * Metadata only - itags, heights, bitrates. No URLs are taken from the page:
+ * the app looks those up itself, so a hostile page cannot nominate what Draco
+ * downloads. A null return is fine; the app falls back to asking yt-dlp.
+ */
+async function youTubePageFormats(tab) {
+  if (!tab || typeof tab.id !== 'number' || tab.id < 0) return null
+
+  try {
+    const results = await chrome.scripting.executeScript({
+      target: { tabId: tab.id },
+      world: 'MAIN',
+      func: () => {
+        const wanted =
+          new URLSearchParams(location.search).get('v') ||
+          (/^\/(?:shorts|embed|live)\/([^/?#]+)/.exec(location.pathname) || [])[1] ||
+          null
+
+        const sources = []
+        try {
+          // The live player, asked directly. Unlike the page globals below this
+          // always describes the video currently loaded, so it survives the
+          // in-page navigations YouTube does instead of real page loads.
+          const player = document.querySelector('#movie_player')
+          if (player && typeof player.getPlayerResponse === 'function') {
+            const live = player.getPlayerResponse()
+            if (live) sources.push(live)
+          }
+        } catch {}
+        try {
+          if (window.ytInitialPlayerResponse) sources.push(window.ytInitialPlayerResponse)
+        } catch {}
+        try {
+          const raw =
+            window.ytplayer && window.ytplayer.config && window.ytplayer.config.args
+              ? window.ytplayer.config.args.raw_player_response
+              : null
+          if (raw) sources.push(typeof raw === 'string' ? JSON.parse(raw) : raw)
+        } catch {}
+
+        for (const response of sources) {
+          const details = response && response.videoDetails
+          const streaming = response && response.streamingData
+          if (!details || !streaming) continue
+
+          // YouTube is a single-page app and these globals outlive the video
+          // that set them. A stale ladder is worse than none: it would offer
+          // qualities belonging to something the user is no longer watching.
+          if (wanted && details.videoId && details.videoId !== wanted) continue
+
+          const all = [].concat(streaming.formats || [], streaming.adaptiveFormats || [])
+          const formats = []
+          for (const format of all) {
+            if (!format || typeof format.itag !== 'number') continue
+            formats.push({
+              itag: format.itag,
+              mimeType: typeof format.mimeType === 'string' ? format.mimeType.slice(0, 200) : null,
+              bitrate: Number(format.bitrate) || null,
+              width: Number(format.width) || null,
+              height: Number(format.height) || null,
+              fps: Number(format.fps) || null,
+              contentLength: Number(format.contentLength) || null
+            })
+            if (formats.length >= 100) break
+          }
+
+          if (formats.length > 0) return { title: details.title || '', formats }
+        }
+
+        return null
+      }
+    })
+
+    const first = results && results[0]
+    return (first && first.result) || null
+  } catch {
+    return null
+  }
+}
+
+async function sendYouTube(tab) {
+  const cookie = await cookieHeaderFor(tab.url)
+  const page = await youTubePageFormats(tab)
+  const reply = await callHost({
+    type: 'youtube',
+    pageUrl: tab.url,
+    pageTitle: page?.title || tab.title || '',
+    referer: tab.url,
+    cookie: cookie || undefined,
+    userAgent: navigator.userAgent,
+    pageFormats: page?.formats
+  })
+
+  notify(
+    reply?.ok
+      ? 'YouTube video sent to Draco'
+      : `YouTube extraction failed: ${reply?.error ?? 'unknown error'}`
+  )
+}
+
 async function sendUrls(urls, referer) {
   const unique = [...new Set(urls.filter((u) => /^https?:/i.test(u)))]
   let taken = 0
@@ -240,6 +361,11 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
 
   if (info.menuItemId === 'draco-link' && info.linkUrl) {
     await sendUrls([info.linkUrl], referer)
+    return
+  }
+
+  if (info.menuItemId === 'draco-media' && tab?.url && isYouTubePage(tab.url)) {
+    await sendYouTube(tab)
     return
   }
 
@@ -436,6 +562,29 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             });
           });
         return true; // Keep message channel open for async response
+      }
+
+      case 'draco:resolve-youtube': {
+        const tab = sender.tab
+        if (!tab?.url) {
+          sendResponse({ ok: false, error: 'No active YouTube page' })
+          return
+        }
+
+        const cookie = await cookieHeaderFor(tab.url)
+        const page = await youTubePageFormats(tab)
+        const reply = await callHost({
+          type: 'youtube',
+          pageUrl: tab.url,
+          pageTitle: page?.title || tab.title || '',
+          referer: tab.url,
+          cookie: cookie || undefined,
+          userAgent: navigator.userAgent,
+          pageFormats: page?.formats
+        })
+
+        sendResponse(reply)
+        return
       }
 
       case 'draco:grab-best': {

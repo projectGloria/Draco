@@ -87,7 +87,17 @@ export async function writeHostFiles(extensionId: string): Promise<void> {
   // cannot infer where the app lives. Record it explicitly.
   const config: { appPath: string; appArgs?: string[] } = { appPath: app.getPath('exe') }
   if (!app.isPackaged) {
-    config.appArgs = [paths.root]
+    /*
+     * In development `exe` is Electron itself, which needs to be told which app
+     * to run - the directory holding package.json, exactly as `electron .` does.
+     *
+     * Not `paths.root`: that is userData (%APPDATA%/Draco), which has no
+     * package.json in it. Pointing Electron there makes it refuse to start with
+     * "Unable to find Electron app at ...", and because the extension cold-starts
+     * the app through this config, the dialog appears on its own with nobody
+     * having tried to open anything.
+     */
+    config.appArgs = [app.getAppPath()]
   }
 
   await writeFile(

@@ -38,7 +38,8 @@ function blankQueue(): Queue {
     days: [1, 2, 3, 4, 5],
     maxConcurrent: 2,
     onComplete: 'none',
-    running: false
+    running: false,
+    oneTimeCompleted: false
   }
 }
 

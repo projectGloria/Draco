@@ -1,12 +1,12 @@
 import { open, mkdir, rename, rm, stat, type FileHandle } from 'node:fs/promises'
 import { basename, join } from 'node:path'
 import type { DownloadTask, Segment } from '../../shared/types.ts'
-import { journalMatches, readJournal, removeJournal, segmentsForJournal, writeJournal, JOURNAL_VERSION } from './journal.ts'
+import { journalMatches, journalSegmentsValid, readJournal, removeJournal, segmentsForJournal, writeJournal, JOURNAL_VERSION } from './journal.ts'
 import type { RateLimiter } from './limiter.ts'
 import { uniquePath } from './naming.ts'
 import { buildHeaders, probeUrl } from './probe.ts'
 import { Segmenter } from './segmenter.ts'
-import { AbortedError, NotResumableError, ServerBusyError, runSegment } from './worker.ts'
+import { AbortedError, HttpStatusError, NotResumableError, ServerBusyError, runSegment } from './worker.ts'
 
 /**
  * Drives one download: probe, resume-or-start, keep the connection pool fed,
@@ -25,6 +25,7 @@ export interface TaskRunnerDeps {
   /** Fired on status transitions - the points worth persisting. */
   onUpdate(task: DownloadTask): void
   onFinished(task: DownloadTask, error: Error | null): void
+  refreshYouTube?(task: DownloadTask): Promise<string>
   /**
    * Called once the probe has settled the real filename and MIME type, before
    * any bytes touch the disk. This is where the app re-files the task into the
@@ -39,6 +40,16 @@ const FLUSH_EVERY_MS = 1000
 /** Window the smoothed speed is measured over. */
 const SPEED_WINDOW_MS = 3000
 
+class UrlRefreshError extends Error {
+  readonly url: string
+
+  constructor(url: string) {
+    super('The media URL expired and must be refreshed')
+    this.name = 'UrlRefreshError'
+    this.url = url
+  }
+}
+
 export class TaskRunner {
   private controller = new AbortController()
   private segmenter: Segmenter | null = null
@@ -48,9 +59,16 @@ export class TaskRunner {
   private samples: Array<{ t: number; received: number }> = []
   private bytesSinceFlush = 0
   private lastFlush = 0
-  private flushing = false
+  private flushPromise: Promise<void> | null = null
+  private lifecyclePromise: Promise<void> | null = null
   private fatal: Error | null = null
   private restarted = false
+  private urlRefreshes = 0
+  /** Only one YouTube refresh may be in flight; all expired workers share it. */
+  private urlRefreshPromise: Promise<string> | null = null
+  /** The URL the last successful refresh produced, so a second expiry can reuse it. */
+  private lastRefreshedUrl: string | null = null
+  private forcedProbeUrl: string | null = null
   /**
    * Live connection budget. Starts at the configured maximum and ratchets down
    * whenever the server says it will not take another connection.
@@ -78,32 +96,75 @@ export class TaskRunner {
   }
 
   async start(): Promise<void> {
-    if (this.running) return
+    if (this.running) {
+      await this.lifecyclePromise
+      return
+    }
+
     this.running = true
     this.controller = new AbortController()
     this.fatal = null
     this.samples = []
+    this.urlRefreshes = 0
+    this.urlRefreshPromise = null
+    this.lastRefreshedUrl = null
+    this.forcedProbeUrl = null
 
+    const lifecycle = this.runLifecycle()
+    this.lifecyclePromise = lifecycle
     try {
-      await this.run()
-      await this.finish()
-      this.deps.onFinished(this.task, null)
-    } catch (err) {
-      const error = err as Error
-      await this.teardown()
-
-      if (error instanceof AbortedError) {
-        // A pause is not a failure; pause() has already set the status.
-        this.deps.onFinished(this.task, null)
-      } else {
-        this.task.status = 'error'
-        this.task.error = error.message
-        this.task.speed = 0
-        this.task.eta = null
-        this.deps.onFinished(this.task, error)
-      }
+      await lifecycle
     } finally {
+      this.lifecyclePromise = null
       this.running = false
+    }
+  }
+
+  private async runLifecycle(): Promise<void> {
+    let refreshRestarted = false
+
+    for (;;) {
+      try {
+        await this.run()
+        await this.finish()
+        this.deps.onFinished(this.task, null)
+        return
+      } catch (err) {
+        const error = err instanceof Error ? err : new Error(String(err))
+
+        if (error instanceof UrlRefreshError && this.task.youtube && !refreshRestarted) {
+          refreshRestarted = true
+          this.task.finalUrl = error.url
+          await this.teardown()
+          await rm(this.partPath, { force: true })
+          await removeJournal(this.journalPath)
+          this.segmenter = null
+          this.received = 0
+          this.task.received = 0
+          this.task.segments = []
+          this.task.error = null
+          this.task.detail = 'Refreshing YouTube stream…'
+          this.deps.onUpdate(this.task)
+          this.controller = new AbortController()
+          this.fatal = null
+          this.forcedProbeUrl = error.url
+          continue
+        }
+
+        await this.teardown()
+
+        if (error instanceof AbortedError) {
+          // A pause is not a failure; pause() has already set the status.
+          this.deps.onFinished(this.task, null)
+        } else {
+          this.task.status = 'error'
+          this.task.error = error.message
+          this.task.speed = 0
+          this.task.eta = null
+          this.deps.onFinished(this.task, error)
+        }
+        return
+      }
     }
   }
 
@@ -119,8 +180,7 @@ export class TaskRunner {
 
     this.task.status = 'paused'
     this.controller.abort()
-    await Promise.allSettled([...this.inflight])
-    await this.flushJournal(true)
+    await this.lifecyclePromise?.catch(() => {})
     this.task.speed = 0
     this.task.eta = null
     this.deps.onUpdate(this.task)
@@ -167,7 +227,14 @@ export class TaskRunner {
     this.task.detail = null
     this.deps.onUpdate(this.task)
 
-    const probe = await probeUrl(this.task.url, {
+    let probeTarget = this.task.url
+    if (this.task.youtube && this.deps.refreshYouTube) {
+      probeTarget = this.forcedProbeUrl ?? await this.deps.refreshYouTube(this.task)
+      this.forcedProbeUrl = null
+      this.task.finalUrl = probeTarget
+    }
+
+    const probe = await probeUrl(probeTarget, {
       headers: this.task.headers,
       timeoutMs: this.config.timeoutMs,
       signal: this.controller.signal
@@ -218,16 +285,22 @@ export class TaskRunner {
     const journal = await readJournal(this.journalPath)
     const partExists = await exists(this.partPath)
 
-    if (journal && partExists && this.task.resumable && journalMatches(journal, {
-      finalUrl: this.task.finalUrl,
-      filename: this.task.filename,
-      size: this.task.size,
-      resumable: this.task.resumable,
-      etag: this.task.etag,
-      lastModified: this.task.lastModified,
-      mimeType: this.task.mimeType,
-      statusCode: 206
-    })) {
+    if (
+      journal &&
+      partExists &&
+      this.task.resumable &&
+      journalSegmentsValid(journal.segments, size) &&
+      journalMatches(journal, {
+        finalUrl: this.task.finalUrl,
+        filename: this.task.filename,
+        size: this.task.size,
+        resumable: this.task.resumable,
+        etag: this.task.etag,
+        lastModified: this.task.lastModified,
+        mimeType: this.task.mimeType,
+        statusCode: 206
+      }, { allowFinalUrlChange: Boolean(this.task.youtube) })
+    ) {
       this.segmenter = Segmenter.restore(journal.segments, size, this.config.minSplitSize)
       this.received = this.segmenter.received
       this.task.received = this.received
@@ -295,6 +368,7 @@ export class TaskRunner {
       limiter: this.deps.limiter,
       timeoutMs: this.config.timeoutMs,
       retryLimit: this.config.retryLimit,
+      expectedSize: this.task.size,
       signal: this.controller.signal,
       onBytes: (count) => {
         this.received += count
@@ -303,11 +377,58 @@ export class TaskRunner {
     })
       .then(() => {
         seg.active = false
+
+        // A successful 200 response is valid for an open-ended stream. Its final
+        // byte is the first trustworthy size we have, so close the segment and
+        // expose that size to the task rather than leaving the pump thinking work
+        // is still outstanding forever.
+        if (seg.end < 0 && this.task.size === null && this.segmenter) {
+          this.segmenter.setSize(seg.position)
+          this.task.size = seg.position
+          this.task.received = this.received
+        }
+
         this.fill()
       })
       .catch(async (err: Error) => {
         seg.active = false
         if (err instanceof AbortedError) return
+
+        if (
+          this.task.youtube &&
+          this.deps.refreshYouTube &&
+          err instanceof HttpStatusError &&
+          [401, 403, 410].includes(err.statusCode)
+        ) {
+          try {
+            if (!this.urlRefreshPromise) {
+              if (this.urlRefreshes >= 1) {
+                if (this.lastRefreshedUrl) {
+                  this.fatal = new UrlRefreshError(this.lastRefreshedUrl)
+                  this.controller.abort()
+                  return
+                }
+                throw new Error('YouTube media URL expired again after a refresh')
+              }
+              this.urlRefreshes++
+              this.urlRefreshPromise = this.deps.refreshYouTube(this.task).then((refreshedUrl) => {
+                if (!/^https?:\/\//i.test(refreshedUrl)) {
+                  throw new Error('YouTube returned an invalid refreshed media URL')
+                }
+                this.lastRefreshedUrl = refreshedUrl
+                return refreshedUrl
+              }).finally(() => {
+                this.urlRefreshPromise = null
+              })
+            }
+            const refreshedUrl = await this.urlRefreshPromise
+            this.fatal = new UrlRefreshError(refreshedUrl)
+            this.controller.abort()
+            return
+          } catch (refreshErr) {
+            err = refreshErr instanceof Error ? refreshErr : new Error(String(refreshErr))
+          }
+        }
 
         // The server is capping parallelism rather than failing. Give back a
         // connection and leave the range for whoever frees up next; the work is
@@ -350,7 +471,10 @@ export class TaskRunner {
 
     const target = await uniquePath(this.task.dir, this.task.filename)
     await rename(this.partPath, target)
-    await removeJournal(this.journalPath)
+    // The payload is already safely at its final name. Journal cleanup is
+    // recovery metadata, so a transient cleanup failure must not turn a finished
+    // download into a visible error.
+    await removeJournal(this.journalPath).catch(() => {})
 
     this.task.filename = basename(target)
     this.task.status = 'done'
@@ -370,31 +494,48 @@ export class TaskRunner {
 
   private async flushJournal(force: boolean): Promise<void> {
     if (!this.segmenter) return
-    if (this.flushing && !force) return
     if (this.task.size === null || !this.task.resumable) return
 
-    this.flushing = true
+    // Never let two journal writers race over the same `.tmp` path. This used to
+    // be possible when the 250 ms ticker started a flush and pause/shutdown forced
+    // another one before the first rename completed.
+    if (this.flushPromise) {
+      await this.flushPromise
+      if (!force) return
+    }
+
     this.bytesSinceFlush = 0
     this.lastFlush = Date.now()
 
-    try {
-      await writeJournal(this.journalPath, {
-        version: JOURNAL_VERSION,
-        url: this.task.url,
-        finalUrl: this.task.finalUrl,
-        filename: this.task.filename,
-        size: this.task.size,
-        etag: this.task.etag,
-        lastModified: this.task.lastModified,
-        segments: segmentsForJournal(this.segmenter.snapshot()),
-        updatedAt: Date.now()
-      })
-    } catch {
+    // The journal may only claim bytes that are actually durable.
+    if (this.fh) {
+      try {
+        await this.fh.sync()
+      } catch {
+        return
+      }
+    }
+
+    const run = writeJournal(this.journalPath, {
+      version: JOURNAL_VERSION,
+      url: this.task.url,
+      finalUrl: this.task.finalUrl,
+      filename: this.task.filename,
+      size: this.task.size,
+      etag: this.task.etag,
+      lastModified: this.task.lastModified,
+      segments: segmentsForJournal(this.segmenter.snapshot()),
+      updatedAt: Date.now()
+    }).catch(() => {
       // A failed flush costs resume granularity, not the download. Losing the
       // whole task because the journal could not be written would be worse.
-    } finally {
-      this.flushing = false
-    }
+    })
+
+    this.flushPromise = run.finally(() => {
+      this.flushPromise = null
+    })
+
+    await this.flushPromise
   }
 
   /**
@@ -421,6 +562,7 @@ export class TaskRunner {
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms))
 }
+
 
 async function exists(path: string): Promise<boolean> {
   try {

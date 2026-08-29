@@ -79,6 +79,8 @@ export interface DownloadTask {
   url: string
   /** The separate audio stream URL to fetch and mux, if any. */
   audioUrl?: string | null
+  /** Stable source identity for expiring signed streams (currently YouTube). */
+  youtube?: { pageUrl: string; videoFormatId: string; audioFormatId?: string | null; role?: 'video' | 'audio' }
   /** Where the redirects actually landed; this is what the workers request. */
   finalUrl: string
   filename: string
@@ -138,6 +140,8 @@ export interface TaskProgress {
 export interface NewDownload {
   url: string
   audioUrl?: string | null
+  /** Stable YouTube format identity used to refresh expiring signed URLs. */
+  youtube?: { pageUrl: string; videoFormatId: string; audioFormatId?: string | null }
   filename?: string
   dir?: string
   categoryId?: string | null
@@ -228,6 +232,8 @@ export interface Queue {
   onComplete: QueueCompletionAction
   /** True while the scheduler (or the user) has this queue running. */
   running: boolean
+  /** One-time schedules latch after they have drained so they cannot rerun every day. */
+  oneTimeCompleted: boolean
 }
 
 /** A pending shutdown/sleep the user can still call off. */
@@ -323,8 +329,31 @@ export interface MediaCandidate {
   discoveredAt: number
 }
 
+/**
+ * One YouTube format as the page's own player response describes it.
+ *
+ * Metadata only, and deliberately so: this crosses from web content into the
+ * app, so it may name a format but never supply a URL to fetch. It exists to
+ * put a quality menu on screen the instant the button is pressed, instead of
+ * after a yt-dlp round trip.
+ */
+export interface PageFormat {
+  itag: number
+  mimeType: string | null
+  bitrate: number | null
+  width: number | null
+  height: number | null
+  fps: number | null
+  contentLength: number | null
+}
+
 export interface MediaVariant {
-  /** The variant playlist URL, or the media URL itself for progressive files. */
+  /**
+   * The variant playlist URL, or the media URL itself for progressive files.
+   *
+   * Empty for a YouTube quality read from the page: those name their format by
+   * itag and have the real, signed URL looked up when the download starts.
+   */
   url: string
   /** The separate audio stream URL, if the stream is demuxed. */
   audioUrl?: string | null
@@ -335,6 +364,8 @@ export interface MediaVariant {
   codecs: string | null
   /** Estimated bytes, when the playlist gives enough to guess. */
   estimatedSize: number | null
+  /** Stable YouTube format identity, used to refresh expiring signed media URLs. */
+  youtube?: { videoFormatId: string; audioFormatId?: string | null }
 }
 
 /* ------------------------------------------------------------------ */
@@ -394,7 +425,7 @@ export interface RendererApi {
   acceptHandoff(id: string, input: NewDownload): Promise<void>
   /** For a media handoff: the quality ladder, fetched on demand. */
   resolveHandoffMedia(id: string): Promise<MediaCandidate>
-  acceptHandoffMedia(id: string, opts: { variantUrl: string; filename: string; dir?: string; categoryId?: string; queueId?: string; audioUrl?: string | null }): Promise<void>
+  acceptHandoffMedia(id: string, opts: { variantUrl: string; filename: string; dir?: string; categoryId?: string; queueId?: string; audioUrl?: string | null; youtube?: { videoFormatId: string; audioFormatId?: string | null } }): Promise<void>
   /** Cancel: drops the request and closes the window. */
   dismissHandoff(id: string): Promise<void>
 
@@ -415,7 +446,7 @@ export interface RendererApi {
   /* media grabber */
   listMedia(): Promise<MediaCandidate[]>
   resolveMedia(id: string): Promise<MediaCandidate>
-  downloadMedia(id: string, opts: { variantUrl: string; filename: string; audioUrl?: string | null }): Promise<DownloadTask>
+  downloadMedia(id: string, opts: { variantUrl: string; filename: string; audioUrl?: string | null; youtube?: { videoFormatId: string; audioFormatId?: string | null } }): Promise<DownloadTask>
   clearMedia(): Promise<void>
   onMediaChanged(cb: (media: MediaCandidate[]) => void): () => void
 

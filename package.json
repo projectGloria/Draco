@@ -7,15 +7,17 @@
   "license": "MIT",
   "scripts": {
     "dev": "electron-vite dev",
-    "start": "electron-vite preview",
+    "start": "npm run build && electron-vite preview",
     "build": "npm run typecheck && electron-vite build",
     "typecheck": "tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.web.json",
+    "test": "node --experimental-strip-types --test tests/*.test.mjs",
     "pack": "npm run build && electron-builder --dir",
     "dist": "npm run build && electron-builder --win",
     "host": "powershell -ExecutionPolicy Bypass -File host/build.ps1",
     "keygen": "node tools/gen-extension-key.mjs",
     "icon": "node tools/gen-icon.mjs",
-    "dl": "node tools/dl.ts"
+    "dl": "node tools/dl.ts",
+    "preview": "electron-vite preview"
   },
   "dependencies": {
     "react": "^19.2.8",

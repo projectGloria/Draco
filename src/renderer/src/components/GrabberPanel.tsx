@@ -76,7 +76,8 @@ function Card({ candidate }: { candidate: MediaCandidate }): React.ReactElement 
       .downloadMedia(candidate.id, {
         variantUrl: variant.url,
         filename: name,
-        audioUrl: variant.audioUrl ?? null
+        audioUrl: variant.audioUrl ?? null,
+        youtube: variant.youtube
       })
       .then(() => toast('success', 'Added', name))
       .catch((err) => reportError('Could not start the download', err))

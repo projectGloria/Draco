@@ -27,6 +27,10 @@ export async function mux(options: MuxOptions): Promise<void> {
 
   const args = [
     '-y',
+    // ffmpeg reads stdin for interactive keys unless told not to. With stdin
+    // left open on a pipe nothing ever writes to, it can sit there waiting -
+    // which shows up as a finished download stuck on "Muxing" forever.
+    '-nostdin',
     '-hide_banner',
     '-loglevel',
     'error',
@@ -64,7 +68,13 @@ function runFfmpeg(
       return
     }
 
-    const child = spawn(ffmpegPath, args, { shell: false, windowsHide: true })
+    // stdin closed and stdout discarded: only stderr is read, so neither of the
+    // other two can fill its pipe buffer and wedge the process.
+    const child = spawn(ffmpegPath, args, {
+      shell: false,
+      windowsHide: true,
+      stdio: ['ignore', 'ignore', 'pipe']
+    })
 
     let stderr = ''
     child.stderr.on('data', (chunk: Buffer) => {

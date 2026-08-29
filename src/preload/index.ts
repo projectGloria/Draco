@@ -56,7 +56,7 @@ const api: RendererApi = {
   acceptHandoff: (id: string, input: NewDownload) =>
     ipcRenderer.invoke('handoff:accept', id, input),
   resolveHandoffMedia: (id: string) => ipcRenderer.invoke('handoff:resolveMedia', id),
-  acceptHandoffMedia: (id: string, opts: { variantUrl: string; filename: string; dir?: string; categoryId?: string; queueId?: string; audioUrl?: string | null }) =>
+  acceptHandoffMedia: (id: string, opts: { variantUrl: string; filename: string; dir?: string; categoryId?: string; queueId?: string; audioUrl?: string | null; youtube?: { videoFormatId: string; audioFormatId?: string | null } }) =>
     ipcRenderer.invoke('handoff:acceptMedia', id, opts),
   dismissHandoff: (id: string) => ipcRenderer.invoke('handoff:dismiss', id),
 
@@ -77,7 +77,7 @@ const api: RendererApi = {
   /* media */
   listMedia: () => ipcRenderer.invoke('media:list'),
   resolveMedia: (id: string) => ipcRenderer.invoke('media:resolve', id),
-  downloadMedia: (id: string, opts: { variantUrl: string; filename: string; audioUrl?: string | null }) =>
+  downloadMedia: (id: string, opts: { variantUrl: string; filename: string; audioUrl?: string | null; youtube?: { videoFormatId: string; audioFormatId?: string | null } }) =>
     ipcRenderer.invoke('media:download', id, opts),
   clearMedia: () => ipcRenderer.invoke('media:clear'),
   onMediaChanged: (cb) => subscribe<MediaCandidate[]>('media:changed', cb),
