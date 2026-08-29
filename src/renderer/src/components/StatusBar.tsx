@@ -1,0 +1,73 @@
+import { useApp } from '../store/app'
+import { formatBytes, formatSpeed } from '../lib/format'
+
+/**
+ * The one-line summary along the bottom: what is running, how fast in total,
+ * and how much is left. Speed is summed from the engine's own per-task figures
+ * rather than measured here, so it agrees with the rows above it.
+ */
+
+export default function StatusBar({
+  onOpenOptions
+}: {
+  onOpenOptions(): void
+}): React.ReactElement {
+  const tasks = useApp((s) => s.tasks)
+  const settings = useApp((s) => s.settings)
+  const integration = useApp((s) => s.integration)
+
+  const active = tasks.filter((t) => t.status === 'downloading')
+  const queued = tasks.filter((t) => t.status === 'queued').length
+  const speed = active.reduce((sum, t) => sum + t.speed, 0)
+
+  const remaining = tasks.reduce((sum, t) => {
+    if (t.status === 'done' || !t.size) return sum
+    return sum + Math.max(0, t.size - t.received)
+  }, 0)
+
+  const bridge = integration?.bridgeListening === true
+  const anyBrowser =
+    integration !== null &&
+    (integration.registered.chrome || integration.registered.edge || integration.registered.brave)
+
+  return (
+    <footer className="h-7 shrink-0 flex items-center gap-4 px-3 border-t border-line bg-white/[0.02] text-[11.5px] text-faint">
+      <span className="tnum">
+        {active.length} active
+        {queued > 0 && <span className="text-faint/70"> · {queued} queued</span>}
+      </span>
+
+      {speed > 0 && (
+        <span className="tnum font-semibold" style={{ color: 'var(--accent)' }}>
+          ↓ {formatSpeed(speed)}
+        </span>
+      )}
+
+      {remaining > 0 && <span className="tnum">{formatBytes(remaining)} remaining</span>}
+
+      <div className="flex-1" />
+
+      {settings.speedLimit && (
+        <span className="tnum" title="Global speed limit, from Options">
+          limit {formatSpeed(settings.speedLimit)}
+        </span>
+      )}
+
+      <button
+        onClick={onOpenOptions}
+        title={
+          bridge && anyBrowser
+            ? 'The browser bridge is listening and at least one browser is registered'
+            : 'Open Options to finish setting up the browser extension'
+        }
+        className="flex items-center gap-1.5 hover:text-ink transition-colors"
+      >
+        <span
+          className="w-1.5 h-1.5 rounded-full"
+          style={{ background: bridge && anyBrowser ? 'var(--color-ok)' : 'var(--color-warn)' }}
+        />
+        Browser
+      </button>
+    </footer>
+  )
+}

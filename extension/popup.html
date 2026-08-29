@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Draco</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        --bg: #0b0e14;
+        --panel: #12151d;
+        --line: #232a37;
+        --text: #e6e9f0;
+        --muted: #8b93a7;
+        --accent: #38bdf8;
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        width: 340px;
+        font: 13px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif;
+        background: var(--bg);
+        color: var(--text);
+      }
+      header {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 12px 14px;
+        border-bottom: 1px solid var(--line);
+      }
+      .mark {
+        width: 22px; height: 22px; border-radius: 6px;
+        background: var(--accent); color: #06121a;
+        display: grid; place-items: center; font-weight: 700; font-size: 12px;
+      }
+      h1 { font-size: 13px; margin: 0; font-weight: 600; letter-spacing: .01em; }
+      #status { margin-left: auto; font-size: 11px; color: var(--muted); }
+      #status.ok { color: #4ade80; }
+      #status.bad { color: #f87171; }
+      section { padding: 12px 14px; }
+      h2 {
+        font-size: 11px; text-transform: uppercase; letter-spacing: .08em;
+        color: var(--muted); margin: 0 0 8px; font-weight: 600;
+      }
+      .row {
+        display: flex; align-items: center; gap: 8px;
+        padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px;
+        background: var(--panel); margin-bottom: 6px; cursor: pointer;
+      }
+      .row:hover { border-color: var(--accent); }
+      .kind {
+        font-size: 10px; text-transform: uppercase; letter-spacing: .06em;
+        padding: 2px 6px; border-radius: 4px; background: #1c2331; color: var(--accent);
+      }
+      .url {
+        flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+        font-size: 12px; color: var(--muted); direction: rtl; text-align: left;
+      }
+      .empty { color: var(--muted); font-size: 12px; }
+      form { display: flex; gap: 6px; }
+      input {
+        flex: 1; background: var(--panel); border: 1px solid var(--line);
+        color: var(--text); border-radius: 8px; padding: 8px 10px; font: inherit;
+      }
+      input:focus { outline: none; border-color: var(--accent); }
+      button {
+        background: var(--accent); color: #06121a; border: 0; border-radius: 8px;
+        padding: 8px 12px; font: 600 13px/1 inherit; cursor: pointer;
+      }
+      button:hover { filter: brightness(1.08); }
+    </style>
+  </head>
+  <body>
+    <header>
+      <span class="mark">D</span>
+      <h1>Draco</h1>
+      <span id="status">checking…</span>
+    </header>
+
+    <section>
+      <h2>Send a link</h2>
+      <form id="add">
+        <input id="url" type="url" placeholder="https://…" required />
+        <button type="submit">Send</button>
+      </form>
+    </section>
+
+    <section>
+      <h2>Media on this page</h2>
+      <div id="media"><p class="empty">Nothing detected yet.</p></div>
+    </section>
+
+    <script src="popup.js"></script>
+  </body>
+</html>

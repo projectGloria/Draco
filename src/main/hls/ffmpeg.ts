@@ -1,0 +1,219 @@
+import { createWriteStream } from 'node:fs'
+import { mkdir, mkdtemp, readdir, rename, rm, stat } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { dirname, join } from 'node:path'
+import { Writable } from 'node:stream'
+import { pipeline } from 'node:stream/promises'
+import { spawn } from 'node:child_process'
+import { getPaths } from '../bootstrap/paths.ts'
+import { logger } from '../log.ts'
+
+const log = logger('ffmpeg')
+
+/**
+ * ffmpeg is fetched on first use rather than bundled: it is 80 MB of binary
+ * that most downloads never need, and shipping it would quadruple the installer
+ * for a feature only the grabber uses.
+ *
+ * It lands in %APPDATA%/Draco/bin, so a reinstall of the app does not mean
+ * fetching it again.
+ */
+
+/*
+ * gyan.dev's "essentials" build is first because it is a quarter of the size and
+ * still contains everything a remux needs. The full GPL build from GitHub is the
+ * fallback: a stable URL worth having, but 170 MB is a lot of transfer to ask a
+ * flaky connection to complete in one piece.
+ */
+const SOURCES = [
+  'https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip',
+  'https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip'
+]
+
+/** Anything smaller is a redirect stub or an error page, not a build archive. */
+const MIN_ZIP_BYTES = 10_000_000
+
+export interface ProvisionProgress {
+  stage: 'downloading' | 'extracting'
+  percent: number | null
+}
+
+let inFlight: Promise<string> | null = null
+
+/**
+ * Returns the path to ffmpeg.exe, fetching it if this is the first time.
+ *
+ * Concurrent callers share one download - two HLS tasks finishing at the same
+ * moment must not race to write the same file.
+ */
+export function ensureFfmpeg(onProgress?: (p: ProvisionProgress) => void): Promise<string> {
+  if (inFlight) return inFlight
+
+  inFlight = provision(onProgress).finally(() => {
+    inFlight = null
+  })
+  return inFlight
+}
+
+async function provision(onProgress?: (p: ProvisionProgress) => void): Promise<string> {
+  const target = getPaths().ffmpegExe
+  if (await isUsable(target)) return target
+
+  await mkdir(dirname(target), { recursive: true })
+
+  let lastError: Error | null = null
+  for (const url of SOURCES) {
+    try {
+      await install(url, target, onProgress)
+      log.info(`installed ffmpeg from ${url}`)
+      return target
+    } catch (err) {
+      lastError = err instanceof Error ? err : new Error(String(err))
+      log.warn(`ffmpeg source failed (${url}): ${lastError.message}`)
+    }
+  }
+
+  throw new Error('Could not obtain ffmpeg: ' + (lastError?.message ?? 'unknown error'))
+}
+
+async function install(
+  url: string,
+  target: string,
+  onProgress?: (p: ProvisionProgress) => void
+): Promise<void> {
+  const work = await mkdtemp(join(tmpdir(), 'draco-ffmpeg-'))
+  const zipPath = join(work, 'build.zip')
+
+  try {
+    await download(url, zipPath, onProgress)
+
+    onProgress?.({ stage: 'extracting', percent: null })
+
+    /*
+     * Extraction uses Windows' own bsdtar (`tar` has shipped in Windows since
+     * 10 1803 and reads zip). Pulling in a zip library for one optional binary
+     * would be a dependency the other 99% of the app never touches.
+     *
+     * The archive is named relatively with `cwd` set rather than passed as an
+     * absolute path: tar reads `host:path` as a remote spec, so a path starting
+     * `C:\` comes back as "Cannot connect to C: resolve failed". A relative
+     * name has no colon in it and no such ambiguity.
+     *
+     * It costs unpacking the whole archive to a temp folder, which is thrown
+     * away immediately afterwards.
+     */
+    await run('tar', ['-xf', 'build.zip'], work)
+
+    const found = await findFile(work, 'ffmpeg.exe')
+    if (!found) throw new Error('The archive contained no ffmpeg.exe')
+
+    // Rename into place last, so a failure never leaves a half-written binary
+    // that later looks installed and dies at spawn time.
+    await rm(target, { force: true })
+    await rename(found, target).catch(async () => {
+      // Across volumes rename fails; fall back to a copy.
+      const { copyFile } = await import('node:fs/promises')
+      await copyFile(found, target)
+    })
+
+    if (!(await isUsable(target))) throw new Error('ffmpeg.exe did not run after extraction')
+  } finally {
+    await rm(work, { recursive: true, force: true }).catch(() => {})
+  }
+}
+
+async function download(
+  url: string,
+  destPath: string,
+  onProgress?: (p: ProvisionProgress) => void
+): Promise<void> {
+  const res = await fetch(url, { redirect: 'follow', headers: { 'user-agent': 'Draco' } })
+  if (!res.ok || !res.body) throw new Error(`HTTP ${res.status} for ${url}`)
+
+  const lengthHeader = res.headers.get('content-length')
+  const total = lengthHeader ? Number(lengthHeader) : null
+  let received = 0
+
+  const file = createWriteStream(destPath)
+  const counter = new Writable({
+    write(chunk: Buffer, _encoding, callback) {
+      received += chunk.length
+      onProgress?.({
+        stage: 'downloading',
+        percent: total ? Math.min(100, (received / total) * 100) : null
+      })
+      file.write(chunk, () => callback())
+    },
+    final(callback) {
+      file.end(() => callback())
+    }
+  })
+
+  await pipeline(res.body as unknown as NodeJS.ReadableStream, counter)
+
+  /*
+   * A stream that ends early does not always reject: the peer can close the
+   * connection cleanly mid-body and `pipeline` resolves on a partial file. That
+   * is how a 170 MB archive arrived as 152 MB and reached tar as "this does not
+   * look like a tar archive" - a confusing error a long way from its cause.
+   * Content-Length is the only thing that catches it.
+   */
+  const written = await stat(destPath)
+  if (total !== null && written.size !== total) {
+    throw new Error(`Download ended early: got ${written.size} of ${total} bytes`)
+  }
+  if (written.size < MIN_ZIP_BYTES) {
+    throw new Error(`Archive is only ${written.size} bytes; the source returned something else`)
+  }
+}
+
+/** Depth-first search for a filename inside an extracted tree. */
+async function findFile(root: string, name: string): Promise<string | null> {
+  const entries = await readdir(root, { withFileTypes: true })
+
+  for (const entry of entries) {
+    const full = join(root, entry.name)
+    if (entry.isDirectory()) {
+      const nested = await findFile(full, name)
+      if (nested) return nested
+    } else if (entry.name.toLowerCase() === name) {
+      return full
+    }
+  }
+  return null
+}
+
+/** A binary that exists but will not report a version is not a binary we can use. */
+async function isUsable(path: string): Promise<boolean> {
+  try {
+    await stat(path)
+  } catch {
+    return false
+  }
+
+  try {
+    await run(path, ['-version'])
+    return true
+  } catch {
+    return false
+  }
+}
+
+function run(command: string, args: string[], cwd?: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    // Argument array with shell:false throughout - none of these paths are
+    // allowed anywhere near a command line the shell gets to parse.
+    const child = spawn(command, args, { shell: false, windowsHide: true, cwd })
+
+    let stderr = ''
+    child.stderr.on('data', (chunk: Buffer) => {
+      stderr = (stderr + chunk.toString('utf8')).slice(-2000)
+    })
+
+    child.on('error', reject)
+    child.on('close', (code) => {
+      if (code === 0) resolve()
+      else reject(new Error(`${command} exited with ${code}: ${stderr.trim()}`))
+    })
+  })
+}

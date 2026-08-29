@@ -1,0 +1,41 @@
+{
+  "name": "draco",
+  "version": "0.1.0",
+  "description": "A personal download manager: dynamic segmented downloads, browser takeover, queues and a scheduler",
+  "main": "./out/main/index.js",
+  "author": "Nihil",
+  "license": "MIT",
+  "scripts": {
+    "dev": "electron-vite dev",
+    "start": "electron-vite preview",
+    "build": "npm run typecheck && electron-vite build",
+    "typecheck": "tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.web.json",
+    "pack": "npm run build && electron-builder --dir",
+    "dist": "npm run build && electron-builder --win",
+    "host": "powershell -ExecutionPolicy Bypass -File host/build.ps1",
+    "keygen": "node tools/gen-extension-key.mjs",
+    "icon": "node tools/gen-icon.mjs",
+    "dl": "node tools/dl.ts"
+  },
+  "dependencies": {
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8",
+    "undici": "^7.16.0",
+    "zustand": "^5.0.15"
+  },
+  "devDependencies": {
+    "@fontsource/inter": "^5.3.0",
+    "@tailwindcss/postcss": "^4.3.3",
+    "@types/node": "^26.2.0",
+    "@types/react": "^19.2.18",
+    "@types/react-dom": "^19.2.4",
+    "@vitejs/plugin-react": "^5.2.0",
+    "electron": "^43.4.1",
+    "electron-builder": "^26.15.3",
+    "electron-vite": "^5.0.0",
+    "postcss": "^8.5.26",
+    "tailwindcss": "^4.3.3",
+    "typescript": "^7.0.2",
+    "vite": "^7.3.6"
+  }
+}

@@ -1,0 +1,119 @@
+import { access, constants } from 'node:fs/promises'
+import { extname, join, basename } from 'node:path'
+
+/**
+ * Filename handling for downloads. Deliberately free of Electron imports so the
+ * engine can be exercised from `node tools/dl.ts` without a build step.
+ */
+
+/** Characters NTFS rejects outright. */
+const ILLEGAL_PATH_CHARS = /[<>:"/\\|?*]/g
+const RESERVED_DEVICE_NAMES = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])$/i
+
+/**
+ * Turns an arbitrary string into a name Windows will actually accept.
+ *
+ * Reserved device names (CON, PRN, ...) fail at open() rather than at write, and
+ * a trailing dot or space is silently trimmed by the OS - which would make the
+ * file we create and the file we later look for disagree.
+ */
+export function sanitizeFilename(name: string, fallback = 'download'): string {
+  // Control characters are filtered by codepoint: putting them in a regex
+  // literal invites exactly the kind of source corruption this avoids.
+  const printable = Array.from(name.trim())
+    .filter((ch) => (ch.codePointAt(0) ?? 0) >= 32)
+    .join('')
+
+  const cleaned = printable
+    .replace(ILLEGAL_PATH_CHARS, '')
+    .replace(/\s+/g, ' ')
+    .replace(/[.\s]+$/, '')
+    .trim()
+
+  if (!cleaned) return fallback
+
+  const ext = extname(cleaned)
+  const stem = ext ? cleaned.slice(0, -ext.length) : cleaned
+
+  // Cap the stem, not the whole name, so a long title never eats the extension.
+  const cappedStem = stem.slice(0, 150).replace(/[.\s]+$/, '') || fallback
+  const safeStem = RESERVED_DEVICE_NAMES.test(cappedStem) ? cappedStem + '_' : cappedStem
+
+  return safeStem + ext.slice(0, 16)
+}
+
+/** Lowercase extension without the dot, or '' when there is none. */
+export function extensionOf(filename: string): string {
+  const ext = extname(filename)
+  return ext ? ext.slice(1).toLowerCase() : ''
+}
+
+/**
+ * Pulls a filename out of a Content-Disposition header.
+ * RFC 5987's `filename*=UTF-8''...` wins over plain `filename=` when both are
+ * present, which is the case whenever the name is not pure ASCII.
+ */
+export function filenameFromDisposition(header: string | undefined): string | null {
+  if (!header) return null
+
+  const extended = /filename\*\s*=\s*([^']*)'([^']*)'([^;]+)/i.exec(header)
+  if (extended) {
+    try {
+      return decodeURIComponent(extended[3].trim())
+    } catch {
+      // A malformed percent-escape should fall through to the plain form
+      // rather than sink the whole download.
+    }
+  }
+
+  const plain = /filename\s*=\s*("([^"]*)"|([^;]+))/i.exec(header)
+  if (plain) {
+    const raw = (plain[2] ?? plain[3] ?? '').trim()
+    if (raw) {
+      try {
+        return decodeURIComponent(raw)
+      } catch {
+        return raw
+      }
+    }
+  }
+
+  return null
+}
+
+/** Last path segment of a URL, percent-decoded, query and fragment stripped. */
+export function filenameFromUrl(url: string): string | null {
+  try {
+    const parsed = new URL(url)
+    const last = basename(parsed.pathname)
+    if (!last) return null
+    try {
+      return decodeURIComponent(last)
+    } catch {
+      return last
+    }
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Finds a path that does not exist yet, appending " (1)", " (2)" and so on
+ * before the extension the way Explorer does.
+ */
+export async function uniquePath(dir: string, filename: string): Promise<string> {
+  const ext = extname(filename)
+  const stem = ext ? filename.slice(0, -ext.length) : filename
+
+  for (let i = 0; i < 1000; i++) {
+    const candidate = join(dir, i === 0 ? filename : `${stem} (${i})${ext}`)
+    try {
+      await access(candidate, constants.F_OK)
+    } catch {
+      return candidate
+    }
+  }
+
+  // Pathological case: a thousand collisions. A timestamp always terminates.
+  return join(dir, `${stem} (${Date.now()})${ext}`)
+}

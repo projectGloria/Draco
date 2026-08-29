@@ -1,0 +1,569 @@
+/**
+ * The in-page half of the integration.
+ *
+ *   1. Intercept clicks on download links, so the browser never starts the
+ *      download and never gets a chance to show its own dialog or shelf.
+ *   2. Pin a small "Download" button to the top-right of every video.
+ *
+ * Both render into *closed* shadow roots, so the page cannot restyle them, read
+ * them, or collide with their class names.
+ */
+
+/* ------------------------------------------------------------------ */
+/* 1. Link interception                                                */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Extensions that mean "a file", not "a page". A click is only taken away from
+ * the browser when it is unambiguous - guessing wrong here breaks navigation,
+ * which is far worse than missing a download.
+ */
+const FILE_EXTENSIONS = new Set([
+  '7z', 'aac', 'ace', 'aiff', 'apk', 'appimage', 'arj', 'avi', 'bin', 'bz2', 'cab', 'chm',
+  'deb', 'dmg', 'doc', 'docx', 'epub', 'exe', 'flac', 'flv', 'gz', 'img', 'iso', 'jar',
+  'lzh', 'm4a', 'm4v', 'mkv', 'mobi', 'mov', 'mp3', 'mp4', 'mpg', 'mpeg', 'msi', 'ogg',
+  'opus', 'pdf', 'pkg', 'ppt', 'pptx', 'psd', 'rar', 'rpm', 'run', 'sh', 'tar', 'tgz',
+  'torrent', 'txz', 'vhd', 'wav', 'webm', 'wma', 'wmv', 'xls', 'xlsx', 'xz', 'zip', 'zst'
+])
+
+function extensionOfPath(url) {
+  try {
+    const match = /\.([a-z0-9]{1,10})$/i.exec(new URL(url, location.href).pathname)
+    return match ? match[1].toLowerCase() : ''
+  } catch {
+    return ''
+  }
+}
+
+/** The anchor a click landed on, looking through shadow boundaries. */
+function anchorFor(event) {
+  for (const node of event.composedPath()) {
+    if (node instanceof HTMLAnchorElement && node.href) return node
+  }
+  return null
+}
+
+addEventListener(
+  'click',
+  (event) => {
+    if (event.defaultPrevented) return
+    // Modified clicks mean "new tab", "save", "select" - all of them the user
+    // asking the browser for something specific. Leave them alone.
+    if (event.button !== 0 || event.ctrlKey || event.shiftKey || event.altKey || event.metaKey) {
+      return
+    }
+
+    const anchor = anchorFor(event)
+    if (!anchor) return
+
+    const url = anchor.href
+    if (!/^https?:/i.test(url)) return
+
+    const named = anchor.hasAttribute('download')
+    if (!named && !FILE_EXTENSIONS.has(extensionOfPath(url))) return
+
+    /*
+     * Stopped here, before the browser does anything at all. That is the only
+     * way to be sure no download shelf or Save As dialog appears - by the time
+     * chrome.downloads fires, the browser has already drawn its own UI.
+     *
+     * If the app turns out not to want it, the navigation is replayed below, so
+     * a link is never silently swallowed.
+     */
+    event.preventDefault()
+    event.stopPropagation()
+
+    const suggested = anchor.getAttribute('download') || ''
+
+    chrome.runtime
+      .sendMessage({ type: 'draco:link-click', url, filename: suggested || undefined })
+      .then((reply) => {
+        if (!reply?.taken) location.href = url
+      })
+      .catch(() => {
+        location.href = url
+      })
+  },
+  true
+)
+
+/* ------------------------------------------------------------------ */
+/* 2. The per-video button                                             */
+/* ------------------------------------------------------------------ */
+
+/** Below this a video is a thumbnail or a tracking pixel, not something to grab. */
+const MIN_VIDEO_W = 140
+const MIN_VIDEO_H = 80
+
+/**
+ * Sites whose players fetch encrypted or separately-muxed adaptive streams.
+ * Grabbing what flies past on the wire yields a video with no audio, or a file
+ * that will not play at all - so the button says so rather than producing one.
+ */
+const ADAPTIVE_SITES =
+  /(^|\.)(youtube\.com|youtu\.be|youtube-nocookie\.com|twitch\.tv|netflix\.com|disneyplus\.com|primevideo\.com|spotify\.com)$/i
+
+const isTopFrame = window.top === window
+const overlays = new Map()
+
+let mediaCount = 0
+let scheduled = false
+let scanScheduled = false
+let pollTimer = null
+
+/** Fullscreen creates a new stacking context; anything outside it is invisible. */
+function overlayRoot() {
+  return document.fullscreenElement ?? document.documentElement
+}
+
+/*
+ * The host element *is* the button.
+ *
+ * The previous shape - a full-size transparent overlay with the button placed
+ * inside by `right: 10px` - put the button in the top-left corner whenever the
+ * host had not been given its width yet, and made the click target depend on
+ * pointer-events passing through two layers. Sizing the host to the button and
+ * computing its corner directly removes both problems: there is one element,
+ * it is exactly where it is drawn, and it receives its own clicks.
+ */
+function createOverlay(video) {
+  const host = document.createElement('div')
+  host.style.cssText =
+    'position:fixed;left:0;top:0;z-index:2147483647;margin:0;padding:0;border:0;display:none'
+
+  const shadow = host.attachShadow({ mode: 'closed' })
+  shadow.innerHTML = `
+    <style>
+      :host { all: initial; }
+      .btn {
+        display: inline-flex; align-items: center; gap: 6px;
+        font: 600 12px/1 system-ui, -apple-system, "Segoe UI", sans-serif;
+        padding: 7px 10px;
+        border-radius: 8px;
+        background: rgba(12, 15, 22, .85);
+        color: #e6e9f0;
+        border: 1px solid rgba(255,255,255,.16);
+        box-shadow: 0 6px 20px rgba(0,0,0,.45);
+        cursor: pointer;
+        white-space: nowrap;
+        user-select: none;
+        opacity: .4;
+        transition: opacity .15s ease, border-color .15s ease, background .15s ease;
+      }
+      .btn:hover { opacity: 1; border-color: #38bdf8; background: rgba(12,15,22,.96); }
+      .btn.hot { opacity: .95; }
+      .btn.ready { border-color: rgba(56,189,248,.55); }
+      .btn.busy { opacity: 1; }
+      .btn.bad { opacity: 1; border-color: rgba(251,191,36,.55); color: #fbbf24; }
+      .btn.done { opacity: 1; border-color: rgba(52,211,153,.55); color: #34d399; }
+      .mark { width: 14px; height: 14px; flex: none; }
+    </style>
+    <div class="btn" role="button" tabindex="0" title="Download with Draco">
+      <svg class="mark" viewBox="0 0 24 24" fill="none" stroke="#38bdf8"
+           stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M12 3.5v11M12 15.5 7.2 10.4M12 15.5l4.8-5.1M4.5 19.5h15" />
+      </svg>
+      <span class="label">Download</span>
+    </div>
+  `
+
+  const entry = {
+    video,
+    host,
+    button: shadow.querySelector('.btn'),
+    label: shadow.querySelector('.label'),
+    hot: false,
+    state: '',
+    resetTimer: null
+  }
+
+  const activate = (event) => {
+    event.preventDefault()
+    event.stopPropagation()
+    void grab(entry)
+  }
+
+  entry.button.addEventListener('click', activate)
+  entry.button.addEventListener('keydown', (event) => {
+    if (event.key === 'Enter' || event.key === ' ') activate(event)
+  })
+  // Players commonly swallow clicks over themselves; taking the press as well
+  // means the button still answers even where `click` never arrives.
+  entry.button.addEventListener('pointerdown', (event) => event.stopPropagation())
+
+  video.addEventListener('mouseenter', () => {
+    entry.hot = true
+    paint(entry)
+  })
+  video.addEventListener('mouseleave', () => {
+    entry.hot = false
+    paint(entry)
+  })
+
+  overlayRoot().appendChild(host)
+
+  if (typeof ResizeObserver === 'function') {
+    entry.observer = new ResizeObserver(schedule)
+    entry.observer.observe(video)
+  }
+
+  overlays.set(video, entry)
+  paint(entry)
+  return entry
+}
+
+function paint(entry) {
+  const classes = ['btn']
+  if (entry.state) classes.push(entry.state)
+  else if (mediaCount > 0) classes.push('ready')
+  if (entry.hot) classes.push('hot')
+  entry.button.className = classes.join(' ')
+}
+
+function setLabel(entry, text, state, title) {
+  entry.label.textContent = text
+  entry.state = state ?? ''
+  entry.button.title = title ?? 'Download with Draco'
+  paint(entry)
+
+  clearTimeout(entry.resetTimer)
+  if (state === 'done' || state === 'bad') {
+    entry.resetTimer = setTimeout(() => {
+      entry.label.textContent = 'Download'
+      entry.state = ''
+      entry.button.title = 'Download with Draco'
+      paint(entry)
+    }, 5000)
+  }
+}
+
+function getYouTubeData() {
+  return chrome.runtime.sendMessage({ type: 'draco:get-yt-data' }).catch(() => null);
+}
+
+function extractYouTubeVariants(data) {
+  if (!data || !data.streamingData) return null;
+  const { formats, adaptiveFormats } = data.streamingData;
+  const variants = [];
+  let hasCiphered = false;
+
+  if (formats) {
+    for (const f of formats) {
+      if (f.url) {
+        variants.push({
+          url: f.url,
+          label: (f.qualityLabel || f.quality) || 'Standard',
+          height: f.height || null,
+          bandwidth: f.bitrate || null,
+          codecs: f.mimeType || null,
+          estimatedSize: f.contentLength ? Number(f.contentLength) : null
+        });
+      } else if (f.signatureCipher) {
+        hasCiphered = true;
+      }
+    }
+  }
+
+  if (adaptiveFormats) {
+    const videos = adaptiveFormats.filter(f => f.mimeType && f.mimeType.startsWith('video/'));
+    const audios = adaptiveFormats.filter(f => f.mimeType && f.mimeType.startsWith('audio/'));
+    
+    audios.sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0));
+    const bestAudio = audios.find(a => a.url);
+
+    for (const v of videos) {
+      if (v.url) {
+        variants.push({
+          url: v.url,
+          audioUrl: bestAudio ? bestAudio.url : null,
+          label: (v.qualityLabel || v.quality) || 'High Quality',
+          height: v.height || null,
+          bandwidth: (v.bitrate || 0) + (bestAudio ? (bestAudio.bitrate || 0) : 0),
+          codecs: v.mimeType,
+          estimatedSize: (v.contentLength ? Number(v.contentLength) : 0) + (bestAudio && bestAudio.contentLength ? Number(bestAudio.contentLength) : 0)
+        });
+      } else if (v.signatureCipher) {
+        hasCiphered = true;
+      }
+    }
+  }
+
+  const unique = new Map();
+  for (const v of variants) {
+    const existing = unique.get(v.label);
+    if (!existing || (v.bandwidth && existing.bandwidth && v.bandwidth > existing.bandwidth)) {
+      unique.set(v.label, v);
+    }
+  }
+
+  const result = Array.from(unique.values()).sort((a, b) => (b.height || 0) - (a.height || 0));
+  
+  if (result.length === 0 && hasCiphered) {
+    return 'ciphered';
+  }
+  
+  return result.length > 0 ? result : null;
+}
+
+async function grab(entry) {
+  setLabel(entry, 'Checking…', 'busy')
+
+  const source = entry.video.currentSrc || entry.video.src || ''
+
+  let ytVariants = null;
+  if (location.hostname.includes('youtube.com') && location.pathname === '/watch') {
+    const ytData = await getYouTubeData();
+    ytVariants = extractYouTubeVariants(ytData);
+    if (ytVariants === 'ciphered') {
+      setLabel(entry, 'Ciphered Video', 'bad', 'This is a protected video (e.g. music video) that uses a rolling cipher. Draco cannot natively extract it yet.');
+      return;
+    }
+  }
+
+  let reply
+  try {
+    reply = await chrome.runtime.sendMessage({
+      type: 'draco:grab-best',
+      videoSrc: /^https?:/i.test(source) ? source : '',
+      adaptive: source.startsWith('blob:') || ADAPTIVE_SITES.test(location.hostname),
+      ytVariants
+    })
+  } catch (err) {
+    reply = { ok: false, error: String(err?.message ?? err) }
+  }
+
+  if (reply?.ok) {
+    setLabel(entry, 'Opened in Draco', 'done')
+    return
+  }
+
+  if (reply?.reason === 'adaptive') {
+    setLabel(
+      entry,
+      'Adaptive stream',
+      'bad',
+      'This site streams video and audio separately behind signed URLs. ' +
+        'Downloading it needs a site-specific extractor, which Draco does not have.'
+    )
+    return
+  }
+
+  if (reply?.reason === 'none') {
+    setLabel(
+      entry,
+      'Nothing to grab',
+      'bad',
+      'No downloadable stream has been seen on this page yet. Start playback and try again.'
+    )
+    return
+  }
+
+  setLabel(entry, 'Draco unreachable', 'bad', reply?.error ?? 'Could not reach the Draco app.')
+}
+
+/* ------------------------------------------------------------------ */
+/* Positioning                                                         */
+/* ------------------------------------------------------------------ */
+
+function schedule() {
+  if (scheduled) return
+  scheduled = true
+  requestAnimationFrame(() => {
+    scheduled = false
+    layout()
+  })
+}
+
+function layout() {
+  const root = overlayRoot()
+
+  for (const [video, entry] of overlays) {
+    if (!video.isConnected) {
+      destroy(entry)
+      overlays.delete(video)
+      continue
+    }
+
+    const rect = video.getBoundingClientRect()
+    const hidden =
+      rect.width < MIN_VIDEO_W ||
+      rect.height < MIN_VIDEO_H ||
+      rect.bottom <= 0 ||
+      rect.top >= innerHeight ||
+      rect.right <= 0 ||
+      rect.left >= innerWidth
+
+    if (hidden) {
+      entry.host.style.display = 'none'
+      continue
+    }
+
+    // Entering or leaving fullscreen changes which element the overlay has to
+    // live inside; re-parenting is cheap and only happens when it really did.
+    if (entry.host.parentNode !== root) root.appendChild(entry.host)
+
+    // Made measurable before being measured: a display:none element has no size,
+    // and placing the corner needs the button's real width.
+    entry.host.style.display = 'block'
+
+    const width = entry.host.offsetWidth || 110
+    const height = entry.host.offsetHeight || 30
+
+    const left = Math.min(
+      Math.max(4, rect.right - width - 12),
+      Math.max(4, innerWidth - width - 4)
+    )
+    const top = Math.min(Math.max(4, rect.top + 12), Math.max(4, innerHeight - height - 4))
+
+    entry.host.style.left = Math.round(left) + 'px'
+    entry.host.style.top = Math.round(top) + 'px'
+  }
+
+  if (overlays.size > 0 && !pollTimer) {
+    // A safety net for layout the observers cannot see - a player animating its
+    // own size, a sticky header collapsing. Cheap, and only while a video exists.
+    pollTimer = setInterval(schedule, 500)
+  } else if (overlays.size === 0 && pollTimer) {
+    clearInterval(pollTimer)
+    pollTimer = null
+  }
+}
+
+function destroy(entry) {
+  clearTimeout(entry.resetTimer)
+  entry.observer?.disconnect()
+  entry.host.remove()
+}
+
+function scan() {
+  for (const video of document.querySelectorAll('video')) {
+    if (!overlays.has(video)) createOverlay(video)
+  }
+  schedule()
+}
+
+/* ------------------------------------------------------------------ */
+/* 3. The corner panel, for media with no video element                */
+/* ------------------------------------------------------------------ */
+
+let panelHost = null
+let panelShadow = null
+
+function ensurePanel() {
+  if (panelHost) return
+
+  panelHost = document.createElement('div')
+  panelHost.style.cssText =
+    'position:fixed;right:18px;bottom:18px;z-index:2147483647;margin:0;padding:0;border:0'
+
+  panelShadow = panelHost.attachShadow({ mode: 'closed' })
+  panelShadow.innerHTML = `
+    <style>
+      :host { all: initial; }
+      .card {
+        font: 500 13px/1.35 system-ui, -apple-system, "Segoe UI", sans-serif;
+        display: flex; align-items: center; gap: 10px;
+        padding: 10px 12px; border-radius: 10px;
+        background: #12151d; color: #e6e9f0;
+        border: 1px solid #2a3040;
+        box-shadow: 0 10px 30px rgba(0,0,0,.45);
+        cursor: pointer; user-select: none;
+      }
+      .card:hover { border-color: #38bdf8; }
+      .dot {
+        width: 20px; height: 20px; border-radius: 6px;
+        background: #38bdf8; color: #06121a;
+        display: grid; place-items: center; font-weight: 700; font-size: 11px;
+      }
+      .close { margin-left: 4px; opacity: .5; font-size: 15px; line-height: 1; padding: 0 2px; }
+      .close:hover { opacity: 1; }
+    </style>
+    <div class="card">
+      <span class="dot">D</span>
+      <span class="label">Media detected</span>
+      <span class="close" title="Hide">&times;</span>
+    </div>
+  `
+
+  panelShadow.querySelector('.card').addEventListener('click', async (event) => {
+    if (event.target.classList.contains('close')) {
+      event.stopPropagation()
+      removePanel()
+      return
+    }
+
+    const reply = await chrome.runtime
+      .sendMessage({ type: 'draco:grab-best', videoSrc: '', adaptive: false })
+      .catch(() => null)
+
+    panelShadow.querySelector('.label').textContent = reply?.ok
+      ? 'Opened in Draco'
+      : 'Nothing Draco can grab'
+    setTimeout(removePanel, 2500)
+  })
+
+  document.documentElement.appendChild(panelHost)
+}
+
+function removePanel() {
+  panelHost?.remove()
+  panelHost = null
+  panelShadow = null
+}
+
+function updatePanel() {
+  // Only in the top frame, and only when there is no video to hang a button on
+  // - otherwise the page gets a button *and* a panel saying the same thing.
+  if (!isTopFrame) return
+
+  if (mediaCount > 0 && overlays.size === 0) {
+    ensurePanel()
+    panelShadow.querySelector('.label').textContent =
+      mediaCount === 1 ? 'Download this media' : `${mediaCount} media streams`
+  } else {
+    removePanel()
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* Wiring                                                              */
+/* ------------------------------------------------------------------ */
+
+chrome.runtime.onMessage.addListener((message) => {
+  if (message?.type !== 'draco:media-count') return
+  mediaCount = message.count ?? 0
+
+  for (const entry of overlays.values()) paint(entry)
+  updatePanel()
+})
+
+/**
+ * Videos appear late on nearly every site worth downloading from, so the DOM has
+ * to be watched - but the sites that matter most also mutate constantly, and a
+ * querySelectorAll on every mutation batch is a real cost on a page like
+ * YouTube. One scan per frame at most.
+ */
+new MutationObserver(() => {
+  if (scanScheduled) return
+  scanScheduled = true
+  requestAnimationFrame(() => {
+    scanScheduled = false
+    scan()
+    updatePanel()
+  })
+}).observe(document.documentElement, { childList: true, subtree: true })
+
+addEventListener('scroll', schedule, { capture: true, passive: true })
+addEventListener('resize', schedule, { passive: true })
+document.addEventListener('fullscreenchange', schedule)
+
+chrome.runtime
+  .sendMessage({ type: 'draco:list-media' })
+  .then((reply) => {
+    mediaCount = reply?.media?.length ?? 0
+  })
+  .catch(() => {})
+  .finally(() => {
+    scan()
+    updatePanel()
+  })

@@ -1,0 +1,306 @@
+// Command draco-host is the native-messaging bridge between the browser
+// extension and the Draco desktop app.
+//
+// It exists because Chrome hands its host process the stdio pair directly, and
+// an Electron GUI-subsystem executable is not a reliable owner of that pair.
+// This is a plain console binary instead: it reads Chrome's length-prefixed
+// frames from stdin, relays them to Draco over a named pipe, and writes the
+// reply back to stdout.
+//
+// Two rules matter more than anything else here:
+//
+//   - Nothing may ever be written to stdout except a protocol frame. stdout is
+//     the channel; a stray fmt.Println would corrupt the stream and the
+//     extension would see garbage.
+//   - The app may not be running. Chrome starts this host on demand, so a cold
+//     start has to launch Draco and wait for its pipe to appear.
+//
+// Deliberately stdlib-only, so `go build` works with no module downloads.
+package main
+
+import (
+	"encoding/binary"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"time"
+)
+
+const (
+	pipePath = `\\.\pipe\draco`
+
+	// Chrome's own limit on a single native message.
+	maxFrame = 64 * 1024 * 1024
+
+	// How long to keep trying after launching the app. A cold Electron start
+	// on a slow disk is comfortably under this.
+	coldStartBudget = 15 * time.Second
+)
+
+// hostConfig is written by the app next to the native-messaging manifest, so
+// the host can find the executable regardless of where it was installed.
+type hostConfig struct {
+	AppPath string   `json:"appPath"`
+	AppArgs []string `json:"appArgs"`
+}
+
+var logFile *os.File
+
+func main() {
+	openLog()
+	defer closeLog()
+
+	logf("host started (pid %d)", os.Getpid())
+
+	conn := &connection{}
+	defer conn.close()
+
+	for {
+		msg, err := readFrame(os.Stdin)
+		if errors.Is(err, io.EOF) {
+			logf("browser closed the port; exiting")
+			return
+		}
+		if err != nil {
+			logf("failed to read frame: %v", err)
+			return
+		}
+
+		reply, err := conn.forward(msg)
+		if err != nil {
+			logf("relay failed: %v", err)
+			// Answer anyway. A silent host makes the extension hang, and the
+			// extension needs a definite "not taken" so it can let the browser
+			// keep the download rather than cancelling it into nothing.
+			reply = errorReply(err)
+		}
+
+		if err := writeFrame(os.Stdout, reply); err != nil {
+			logf("failed to write reply: %v", err)
+			return
+		}
+	}
+}
+
+/* ------------------------------------------------------------------ */
+/* Framing                                                             */
+/* ------------------------------------------------------------------ */
+
+func readFrame(r io.Reader) ([]byte, error) {
+	var header [4]byte
+	if _, err := io.ReadFull(r, header[:]); err != nil {
+		return nil, err
+	}
+
+	length := binary.LittleEndian.Uint32(header[:])
+	if length > maxFrame {
+		return nil, fmt.Errorf("frame of %d bytes exceeds the limit", length)
+	}
+
+	body := make([]byte, length)
+	if _, err := io.ReadFull(r, body); err != nil {
+		return nil, err
+	}
+	return body, nil
+}
+
+func writeFrame(w io.Writer, body []byte) error {
+	var header [4]byte
+	binary.LittleEndian.PutUint32(header[:], uint32(len(body)))
+	if _, err := w.Write(header[:]); err != nil {
+		return err
+	}
+	_, err := w.Write(body)
+	return err
+}
+
+func errorReply(err error) []byte {
+	payload, mErr := json.Marshal(map[string]any{
+		"ok":    false,
+		"taken": false,
+		"error": err.Error(),
+	})
+	if mErr != nil {
+		return []byte(`{"ok":false,"taken":false,"error":"internal"}`)
+	}
+	return payload
+}
+
+/* ------------------------------------------------------------------ */
+/* The pipe to Draco                                                   */
+/* ------------------------------------------------------------------ */
+
+type connection struct {
+	pipe *os.File
+}
+
+func (c *connection) close() {
+	if c.pipe != nil {
+		c.pipe.Close()
+		c.pipe = nil
+	}
+}
+
+// forward sends one frame and returns the reply, reconnecting - and starting
+// the app if necessary - when the pipe is not there.
+func (c *connection) forward(msg []byte) ([]byte, error) {
+	if reply, err := c.attempt(msg); err == nil {
+		return reply, nil
+	} else {
+		logf("first attempt failed (%v); reconnecting", err)
+		c.close()
+	}
+
+	if err := c.dialOrLaunch(); err != nil {
+		return nil, err
+	}
+	return c.attempt(msg)
+}
+
+func (c *connection) attempt(msg []byte) ([]byte, error) {
+	if c.pipe == nil {
+		if err := c.dial(); err != nil {
+			return nil, err
+		}
+	}
+
+	if err := writeFrame(c.pipe, msg); err != nil {
+		return nil, err
+	}
+	return readFrame(c.pipe)
+}
+
+// dial opens the named pipe. A named pipe on Windows behaves enough like a file
+// that the standard library can open it directly, which keeps this binary free
+// of third-party dependencies.
+func (c *connection) dial() error {
+	pipe, err := os.OpenFile(pipePath, os.O_RDWR, 0)
+	if err != nil {
+		return err
+	}
+	c.pipe = pipe
+	return nil
+}
+
+// dialOrLaunch retries the pipe, starting Draco if it does not answer.
+func (c *connection) dialOrLaunch() error {
+	if err := c.dial(); err == nil {
+		return nil
+	}
+
+	if err := launchApp(); err != nil {
+		logf("could not launch the app: %v", err)
+		// Keep retrying regardless: the app may simply be mid-startup, in which
+		// case the pipe will appear without any help from us.
+	}
+
+	deadline := time.Now().Add(coldStartBudget)
+	delay := 150 * time.Millisecond
+
+	for time.Now().Before(deadline) {
+		time.Sleep(delay)
+		if err := c.dial(); err == nil {
+			logf("connected after cold start")
+			return nil
+		}
+		if delay < 1*time.Second {
+			delay *= 2
+		}
+	}
+
+	return errors.New("Draco is not running and did not start in time")
+}
+
+func launchApp() error {
+	cfg, err := appConfig()
+	if err != nil {
+		// Fallback to old behavior if config isn't found
+		path, err := appPath()
+		if err != nil {
+			return err
+		}
+		cfg = hostConfig{AppPath: path}
+	}
+
+	logf("launching %s %v", cfg.AppPath, cfg.AppArgs)
+	cmd := exec.Command(cfg.AppPath, cfg.AppArgs...)
+	// Detach: the app must outlive this host process, which Chrome kills as
+	// soon as the extension's port closes.
+	cmd.Stdin = nil
+	cmd.Stdout = nil
+	cmd.Stderr = nil
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	return cmd.Process.Release()
+}
+
+// appConfig reads the location the app recorded for itself.
+func appConfig() (hostConfig, error) {
+	if dir, err := os.UserConfigDir(); err == nil {
+		raw, err := os.ReadFile(filepath.Join(dir, "Draco", "host-config.json"))
+		if err == nil {
+			var cfg hostConfig
+			if json.Unmarshal(raw, &cfg) == nil && cfg.AppPath != "" {
+				if _, err := os.Stat(cfg.AppPath); err == nil {
+					return cfg, nil
+				}
+			}
+		}
+	}
+	return hostConfig{}, errors.New("could not find app path")
+}
+
+// appPath reads the location the app recorded for itself, falling back to a
+// sibling executable for the portable layout.
+func appPath() (string, error) {
+	self, err := os.Executable()
+	if err != nil {
+		return "", err
+	}
+
+	// Packaged layout: <install>/resources/draco-host.exe next to <install>/Draco.exe
+	candidate := filepath.Join(filepath.Dir(filepath.Dir(self)), "Draco.exe")
+	if _, err := os.Stat(candidate); err == nil {
+		return candidate, nil
+	}
+
+	return "", errors.New("could not locate Draco.exe")
+}
+
+/* ------------------------------------------------------------------ */
+/* Logging - never to stdout                                           */
+/* ------------------------------------------------------------------ */
+
+func openLog() {
+	dir, err := os.UserConfigDir()
+	if err != nil {
+		return
+	}
+	logDir := filepath.Join(dir, "Draco", "logs")
+	if err := os.MkdirAll(logDir, 0o755); err != nil {
+		return
+	}
+	logFile, _ = os.OpenFile(
+		filepath.Join(logDir, "host.log"),
+		os.O_APPEND|os.O_CREATE|os.O_WRONLY,
+		0o644,
+	)
+}
+
+func closeLog() {
+	if logFile != nil {
+		logFile.Close()
+	}
+}
+
+func logf(format string, args ...any) {
+	if logFile == nil {
+		return
+	}
+	fmt.Fprintf(logFile, "%s %s\n", time.Now().Format(time.RFC3339), fmt.Sprintf(format, args...))
+}

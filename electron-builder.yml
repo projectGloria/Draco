@@ -1,0 +1,53 @@
+appId: com.nihil.draco
+productName: Draco
+copyright: Copyright © 2026
+
+directories:
+  output: dist
+  buildResources: resources
+
+files:
+  - out/**/*
+  - package.json
+
+extraResources:
+  # The tray reads this at runtime, so it has to sit outside the asar.
+  - from: resources/icon.ico
+    to: icon.ico
+  # Chrome launches the host itself, so it must be a real file on disk that the
+  # native-messaging manifest can point at - not an asar entry.
+  - from: host/draco-host.exe
+    to: draco-host.exe
+  # The user points chrome://extensions -> Load unpacked at this folder, so it
+  # has to be a browsable directory rather than bundled source.
+  #
+  # key.pem is excluded deliberately: it is the private key the extension's
+  # pinned ID is derived from, it is never needed at runtime, and shipping it
+  # inside the installer would put it on any machine the app is copied to.
+  - from: extension
+    to: extension
+    filter:
+      - '**/*'
+      - '!key.pem'
+
+win:
+  target:
+    - target: nsis
+      arch: [x64]
+    - target: portable
+      arch: [x64]
+  artifactName: ${productName}-${version}-${arch}.${ext}
+
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: Draco
+  # Unfinished downloads and their journals live in %APPDATA%; wiping them on
+  # uninstall would throw away partial multi-GB files a reinstall could resume.
+  deleteAppDataOnUninstall: false
+
+portable:
+  artifactName: ${productName}-${version}-portable.${ext}

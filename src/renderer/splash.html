@@ -1,0 +1,202 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:"
+    />
+    <title>Starting Draco…</title>
+    <style>
+      /*
+       * The splash is deliberately dependency-free and inline-styled: it has to
+       * paint on the first frame, before Tailwind, React or the font files are
+       * anywhere near ready.
+       */
+      * { margin: 0; padding: 0; box-sizing: border-box; }
+
+      :root {
+        --bg-1: #12151f;
+        --bg-2: #06070b;
+        --text: #eef0f6;
+        --muted: #8b93a7;
+        --accent: #38bdf8;
+        --accent-2: #6366f1;
+        --accent-soft: rgba(56, 189, 248, 0.16);
+        --line: rgba(255, 255, 255, 0.08);
+        --ok: #34d399;
+        --err: #f87171;
+      }
+
+      html, body { height: 100%; overflow: hidden; }
+
+      body {
+        font-family: "Segoe UI Variable Display", "Segoe UI", system-ui, sans-serif;
+        color: var(--text);
+        user-select: none;
+        -webkit-user-select: none;
+      }
+
+      .card {
+        position: relative;
+        width: 100%;
+        height: 100%;
+        padding: 24px 26px;
+        display: flex;
+        flex-direction: column;
+        background:
+          radial-gradient(120% 90% at 12% 0%, rgba(56, 189, 248, 0.16) 0%, transparent 58%),
+          linear-gradient(160deg, var(--bg-1) 0%, var(--bg-2) 100%);
+        border: 1px solid var(--line);
+        -webkit-app-region: drag;
+        animation: rise 360ms cubic-bezier(0.22, 1, 0.36, 1) both;
+      }
+
+      @keyframes rise {
+        from { opacity: 0; transform: translateY(8px) scale(0.985); }
+        to   { opacity: 1; transform: none; }
+      }
+
+      body.leaving .card { animation: fade 240ms ease forwards; }
+      @keyframes fade { to { opacity: 0; transform: scale(0.99); } }
+
+      header { display: flex; align-items: center; gap: 12px; }
+
+      .mark {
+        width: 34px; height: 34px; flex: none;
+        display: grid; place-items: center;
+        filter: drop-shadow(0 0 10px rgba(56, 189, 248, 0.5));
+      }
+      .mark svg { width: 30px; height: 30px; }
+
+      h1 { font-size: 17px; font-weight: 700; letter-spacing: 0.4px; }
+      .tag { font-size: 11.5px; color: var(--muted); margin-top: 2px; }
+
+      .steps {
+        margin-top: 18px; flex: 1; min-height: 0;
+        display: flex; flex-direction: column; gap: 2px;
+      }
+
+      .step {
+        display: flex; align-items: center; gap: 10px;
+        font-size: 12.5px; color: var(--muted); padding: 4px 0;
+        transition: color 160ms ease;
+      }
+      .step[data-status="running"] { color: var(--text); }
+      .step[data-status="done"]    { color: #9aa3b6; }
+      .step[data-status="failed"]  { color: var(--err); }
+
+      .dot {
+        width: 15px; height: 15px; flex: none; border-radius: 50%;
+        border: 1.5px solid rgba(255, 255, 255, 0.16);
+        display: grid; place-items: center; position: relative;
+      }
+      .step[data-status="running"] .dot {
+        border-color: var(--accent); border-top-color: transparent;
+        animation: spin 720ms linear infinite;
+      }
+      @keyframes spin { to { transform: rotate(360deg); } }
+
+      .step[data-status="done"] .dot { border-color: transparent; background: var(--accent-soft); }
+      .step[data-status="done"] .dot::after {
+        content: ""; width: 7px; height: 4px;
+        border-left: 1.6px solid var(--ok); border-bottom: 1.6px solid var(--ok);
+        transform: rotate(-45deg) translate(0.5px, -1px);
+      }
+      .step[data-status="failed"] .dot { border-color: var(--err); }
+      .step[data-status="failed"] .dot::after { content: "!"; font-size: 10px; color: var(--err); }
+
+      .label { flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+      .detail {
+        font-size: 11px; color: #6d7488;
+        font-variant-numeric: tabular-nums; white-space: nowrap;
+      }
+
+      footer { margin-top: 14px; }
+
+      .bar { height: 4px; border-radius: 99px; background: rgba(255, 255, 255, 0.07); overflow: hidden; }
+      .fill {
+        height: 100%; width: 0%; border-radius: 99px;
+        background: linear-gradient(135deg, var(--accent), var(--accent-2));
+        transition: width 220ms cubic-bezier(0.4, 0, 0.2, 1);
+      }
+      .status {
+        margin-top: 9px; font-size: 11.5px; color: var(--muted);
+        display: flex; justify-content: space-between;
+        font-variant-numeric: tabular-nums;
+      }
+
+      .error {
+        display: none; margin-top: 12px; padding: 10px 12px; border-radius: 10px;
+        background: rgba(248, 113, 113, 0.09); border: 1px solid rgba(248, 113, 113, 0.22);
+        font-size: 11.5px; line-height: 1.45; color: #ffb3b3;
+        max-height: 70px; overflow-y: auto;
+      }
+      body.failed .error { display: block; }
+      body.failed .steps { flex: 0; }
+
+      .actions { display: none; gap: 8px; margin-top: 12px; -webkit-app-region: no-drag; }
+      body.failed .actions { display: flex; }
+
+      button {
+        font: inherit; font-size: 12px; padding: 7px 14px; border-radius: 8px;
+        border: 1px solid var(--line); background: rgba(255, 255, 255, 0.05);
+        color: var(--text); cursor: pointer;
+        transition: background 140ms ease, border-color 140ms ease;
+      }
+      button:hover { background: rgba(255, 255, 255, 0.1); }
+      button.primary {
+        background: linear-gradient(135deg, var(--accent), var(--accent-2));
+        border-color: transparent; color: #fff; font-weight: 600;
+      }
+      button.primary:hover { filter: brightness(1.12); }
+      button[hidden] { display: none; }
+    </style>
+  </head>
+  <body>
+    <div class="card">
+      <header>
+        <div class="mark">
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <defs>
+              <linearGradient id="splashMark" x1="0" y1="0" x2="1" y2="1">
+                <stop offset="0" stop-color="#38bdf8" />
+                <stop offset="1" stop-color="#6366f1" />
+              </linearGradient>
+            </defs>
+            <path
+              d="M12 2.4 L12 13 M12 15.6 L6.4 9.4 M12 15.6 L17.6 9.4 M4.2 18.8 L19.8 18.8"
+              fill="none"
+              stroke="url(#splashMark)"
+              stroke-width="2.1"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+            />
+          </svg>
+        </div>
+        <div>
+          <h1>Draco</h1>
+          <div class="tag">Getting things ready…</div>
+        </div>
+      </header>
+
+      <div class="steps" id="steps"></div>
+
+      <div class="error" id="error"></div>
+      <div class="actions">
+        <button class="primary" id="retry">Try again</button>
+        <button id="continue">Continue anyway</button>
+      </div>
+
+      <footer>
+        <div class="bar"><div class="fill" id="fill"></div></div>
+        <div class="status">
+          <span id="current">Starting…</span>
+          <span id="pct">0%</span>
+        </div>
+      </footer>
+    </div>
+
+    <script type="module" src="./splash/main.ts"></script>
+  </body>
+</html>

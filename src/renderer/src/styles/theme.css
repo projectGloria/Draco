@@ -1,0 +1,289 @@
+@import 'tailwindcss';
+
+/*
+ * Draco: a near-black ground with two raised surface steps, tuned for a dense
+ * table rather than for cards. Row height, tabular figures and hairline column
+ * rules are the things that make a list of downloads readable at a glance -
+ * IDM's information density, without IDM's 1999 chrome.
+ *
+ * `--accent` is set at runtime on :root from settings, so anything tinted by it
+ * uses inline styles or var() rather than a Tailwind colour class.
+ */
+@theme {
+  --color-abyss: #06070b;
+  --color-ground: #0b0e15;
+  --color-surface: #12151f;
+  --color-raised: #171b28;
+  --color-line: rgba(255, 255, 255, 0.07);
+  --color-line-strong: rgba(255, 255, 255, 0.13);
+  --color-ink: #eef0f6;
+  --color-muted: #8b93a7;
+  --color-faint: #5b6274;
+  --color-ok: #34d399;
+  --color-warn: #fbbf24;
+  --color-err: #f87171;
+
+  --radius-card: 12px;
+
+  --font-sans: 'Inter', 'Segoe UI Variable Text', 'Segoe UI', system-ui, sans-serif;
+  --font-display: 'Inter', 'Segoe UI Variable Display', 'Segoe UI', system-ui, sans-serif;
+}
+
+:root {
+  --accent: #38bdf8;
+  --accent-2: #6366f1;
+  --accent-soft: rgba(56, 189, 248, 0.12);
+  --accent-line: rgba(56, 189, 248, 0.35);
+  --grad: linear-gradient(135deg, var(--accent), var(--accent-2));
+
+  /* One place to change the table's rhythm. */
+  --row-h: 30px;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background: var(--color-ground);
+  color: var(--color-ink);
+  font-family: var(--font-sans);
+  font-size: 13px;
+  overflow: hidden;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-font-smoothing: antialiased;
+}
+
+input,
+textarea {
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+/* Every number in this app sits in a column. None of them may jitter. */
+.tnum {
+  font-variant-numeric: tabular-nums;
+}
+
+::-webkit-scrollbar {
+  width: 9px;
+  height: 9px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.09);
+  border-radius: 99px;
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.18);
+  background-clip: content-box;
+}
+
+@utility drag {
+  -webkit-app-region: drag;
+}
+@utility no-drag {
+  -webkit-app-region: no-drag;
+}
+
+@utility app-bg {
+  position: relative;
+  background: var(--color-ground);
+  isolation: isolate;
+}
+
+@utility bloom {
+  position: absolute;
+  border-radius: 50%;
+  filter: blur(120px);
+  pointer-events: none;
+  z-index: -1;
+}
+
+@utility surface-card {
+  background: var(--color-surface);
+  border: 1px solid var(--color-line);
+}
+
+@utility focus-ring {
+  outline: none;
+  box-shadow:
+    0 0 0 1px var(--accent-line),
+    0 0 0 3px var(--accent-soft);
+}
+
+/*
+ * Form controls. Written once here instead of as a class soup repeated in nine
+ * dialogs - the dialogs differ in what they ask for, not in how a text field
+ * should look.
+ */
+.field {
+  width: 100%;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid var(--color-line);
+  border-radius: 8px;
+  padding: 7px 10px;
+  color: var(--color-ink);
+  font: inherit;
+  transition:
+    border-color 140ms ease,
+    box-shadow 140ms ease;
+}
+.field:focus {
+  outline: none;
+  border-color: var(--accent-line);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+.field::placeholder {
+  color: var(--color-faint);
+}
+select.field {
+  cursor: pointer;
+}
+select.field option {
+  background: var(--color-raised);
+  color: var(--color-ink);
+}
+
+.label {
+  display: block;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.3px;
+  text-transform: uppercase;
+  color: var(--color-faint);
+  margin-bottom: 5px;
+}
+
+/*
+ * The column divider is a 7px hit area over a 1px line. A resize handle you
+ * have to aim for is a resize handle nobody uses.
+ */
+.col-grip {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  right: -3px;
+  width: 7px;
+  cursor: col-resize;
+  z-index: 2;
+}
+.col-grip::after {
+  content: '';
+  position: absolute;
+  top: 6px;
+  bottom: 6px;
+  left: 3px;
+  width: 1px;
+  background: var(--color-line);
+}
+.col-grip:hover::after,
+.col-grip.active::after {
+  background: var(--accent);
+  top: 0;
+  bottom: 0;
+}
+
+/* Motion: short, interruptible, and off entirely if the OS asked. */
+
+@keyframes fade-up {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+@utility fade-up {
+  animation: fade-up 240ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+@keyframes pop-in {
+  from {
+    opacity: 0;
+    transform: scale(0.96) translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+@utility pop-in {
+  animation: pop-in 200ms cubic-bezier(0.34, 1.4, 0.64, 1) both;
+}
+
+/* The sheen that travels along a live progress bar. */
+@keyframes shimmer {
+  0% {
+    transform: translateX(-100%);
+  }
+  100% {
+    transform: translateX(300%);
+  }
+}
+@utility shimmer {
+  animation: shimmer 1.6s linear infinite;
+}
+
+/* A bar with no known total still has to look like it is doing something. */
+@keyframes indeterminate {
+  0% {
+    transform: translateX(-100%) scaleX(0.35);
+  }
+  100% {
+    transform: translateX(320%) scaleX(0.35);
+  }
+}
+@utility indeterminate {
+  animation: indeterminate 1.4s ease-in-out infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+@utility spin-slow {
+  animation: spin 900ms linear infinite;
+}
+
+@keyframes toast-in {
+  from {
+    opacity: 0;
+    transform: translateX(30px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+@keyframes toast-out {
+  to {
+    opacity: 0;
+    transform: translateX(30px);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
