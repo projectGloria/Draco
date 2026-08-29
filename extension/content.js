@@ -3,7 +3,8 @@
  *
  *   1. Intercept clicks on download links, so the browser never starts the
  *      download and never gets a chance to show its own dialog or shelf.
- *   2. Pin a small "Download" button to the top-right of every video.
+ *   2. Pin a small "Download" button just outside the top-left corner of a
+ *      video the page is there to play.
  *
  * Both render into *closed* shadow roots, so the page cannot restyle them, read
  * them, or collide with their class names.
@@ -106,6 +107,32 @@ const ADAPTIVE_SITES =
 const isTopFrame = window.top === window
 const overlays = new Map()
 
+const YOUTUBE_HOSTS = /(^|\.)(youtube\.com|youtube-nocookie\.com|youtu\.be)$/i
+
+/**
+ * Whether this page is one someone is watching something on.
+ *
+ * YouTube's homepage, search results, subscriptions and channel pages are full
+ * of `<video>` elements - every thumbnail plays a preview when the pointer
+ * crosses it - and a Download button on each of them is noise attached to
+ * something nobody meant to download. A button belongs on the page you opened
+ * to watch one video.
+ *
+ * Only YouTube is filtered, because only YouTube plays this much video nobody
+ * asked for; everywhere else a frame large enough to earn a button is one the
+ * page is deliberately showing. `/embed/` keeps its button: that frame *is* a
+ * video someone put on a page to be watched.
+ */
+function pageWantsButtons() {
+  if (!YOUTUBE_HOSTS.test(location.hostname)) return true
+  if (/(^|\.)youtu\.be$/i.test(location.hostname)) return true
+
+  return (
+    /^\/watch$/i.test(location.pathname) ||
+    /^\/(shorts|embed|live)\//i.test(location.pathname)
+  )
+}
+
 /**
  * Videos Draco has already taken, and whether anything on this page has been.
  *
@@ -122,6 +149,26 @@ const overlays = new Map()
 let handled = new WeakSet()
 let takenOver = false
 let pageKey = location.href
+
+/**
+ * Where the button sits relative to the corner it is anchored to.
+ *
+ * Nudged by dragging it and remembered across pages, because the one spot that
+ * is out of the way is a property of the person's screen and habits, not of any
+ * particular video. Zero means the anchor itself: just outside the frame's
+ * top-left corner.
+ */
+let offset = { x: 0, y: 0 }
+const OFFSET_KEY = 'draco:button-offset'
+
+/** A press has to move this far before it is a drag rather than a click. */
+const DRAG_SLOP = 4
+
+/** Set when a drag has just ended, so its trailing click does not download. */
+let suppressClickUntil = 0
+
+/** How far outside the frame the button sits. */
+const GAP = 8
 
 let mediaCount = 0
 let scheduled = false
@@ -164,7 +211,11 @@ function createOverlay(video) {
         cursor: pointer;
         white-space: nowrap;
         user-select: none;
-        opacity: .4;
+        /* Outside the picture now, so it no longer has to stay out of the way
+           of it - at .4 against a page background it just looked broken. */
+        opacity: .8;
+        cursor: grab;
+        touch-action: none;
         transition: opacity .15s ease, border-color .15s ease, background .15s ease;
       }
       .btn:hover { opacity: 1; border-color: #38bdf8; background: rgba(12,15,22,.96); }
@@ -197,6 +248,8 @@ function createOverlay(video) {
   const activate = (event) => {
     event.preventDefault()
     event.stopPropagation()
+    // The click that ends a drag is the browser's doing, not the user's.
+    if (Date.now() < suppressClickUntil) return
     void grab(entry)
   }
 
@@ -204,9 +257,79 @@ function createOverlay(video) {
   entry.button.addEventListener('keydown', (event) => {
     if (event.key === 'Enter' || event.key === ' ') activate(event)
   })
-  // Players commonly swallow clicks over themselves; taking the press as well
-  // means the button still answers even where `click` never arrives.
-  entry.button.addEventListener('pointerdown', (event) => event.stopPropagation())
+
+  /*
+   * Dragging.
+   *
+   * The pointer is captured on the button, so a fast drag cannot outrun it and
+   * leave the button stuck to the cursor - and every move keeps arriving even
+   * once the pointer is over the player, which would otherwise swallow them.
+   * Position is written through `offset` and applied by `layout`, so a dragged
+   * button still tracks its video when the page scrolls or the player resizes.
+   */
+  let drag = null
+
+  // The press is taken as well as the click: players commonly swallow clicks
+  // over themselves, so the button would otherwise never answer near one - and
+  // stopping it here is also what keeps a drag from reaching whatever is
+  // underneath the button when it has been moved over the page.
+  entry.button.addEventListener('pointerdown', (event) => {
+    event.stopPropagation()
+    if (event.button !== 0) return
+
+    drag = {
+      id: event.pointerId,
+      x: event.clientX,
+      y: event.clientY,
+      fromX: offset.x,
+      fromY: offset.y,
+      moved: false
+    }
+    try {
+      entry.button.setPointerCapture(event.pointerId)
+    } catch {
+      // Capture is an optimisation, not a requirement.
+    }
+  })
+
+  entry.button.addEventListener('pointermove', (event) => {
+    if (!drag || event.pointerId !== drag.id) return
+
+    const dx = event.clientX - drag.x
+    const dy = event.clientY - drag.y
+    if (!drag.moved && Math.abs(dx) + Math.abs(dy) < DRAG_SLOP) return
+
+    if (!drag.moved) {
+      drag.moved = true
+      entry.button.style.cursor = 'grabbing'
+    }
+
+    offset = { x: drag.fromX + dx, y: drag.fromY + dy }
+    // Batched to one placement per frame rather than one per move event.
+    schedule()
+  })
+
+  const endDrag = (event) => {
+    if (!drag || event.pointerId !== drag.id) return
+    const moved = drag.moved
+    drag = null
+
+    entry.button.style.cursor = ''
+    try {
+      entry.button.releasePointerCapture(event.pointerId)
+    } catch {
+      // Already released with the pointer.
+    }
+
+    if (!moved) return
+    // Long enough to cover the click the release is about to produce, short
+    // enough that it can never eat a press the user meant.
+    suppressClickUntil = Date.now() + 300
+    saveOffset()
+  }
+
+  entry.button.addEventListener('pointerup', endDrag)
+  entry.button.addEventListener('pointercancel', endDrag)
 
   video.addEventListener('mouseenter', () => {
     entry.hot = true
@@ -397,11 +520,21 @@ function layout() {
     const width = entry.host.offsetWidth || 110
     const height = entry.host.offsetHeight || 30
 
-    const left = Math.min(
-      Math.max(4, rect.right - width - 12),
-      Math.max(4, innerWidth - width - 4)
-    )
-    const top = Math.min(Math.max(4, rect.top + 12), Math.max(4, innerHeight - height - 4))
+    /*
+     * Just outside the frame's top-left corner, not on top of it.
+     *
+     * Over the picture the button covered the thing it was offering to
+     * download and competed with the player's own controls for the same
+     * pixels. Above the frame where there is room for it, below where there is
+     * not - both are outside - and only pinned inside the viewport when the
+     * video is taller than the window and there is nowhere outside left.
+     */
+    let left = rect.left
+    let top = rect.top - height - GAP
+    if (top < 4) top = rect.bottom + GAP
+
+    left = Math.min(Math.max(4, left + offset.x), Math.max(4, innerWidth - width - 4))
+    top = Math.min(Math.max(4, top + offset.y), Math.max(4, innerHeight - height - 4))
 
     entry.host.style.left = Math.round(left) + 'px'
     entry.host.style.top = Math.round(top) + 'px'
@@ -440,6 +573,10 @@ function checkNavigation() {
   // The overlays go with the old page. Rebuilding them is what returns a button
   // to a reused video element, and `destroy` also cancels the retire timer of
   // anything that was mid-retirement when the navigation happened.
+  clearOverlays()
+}
+
+function clearOverlays() {
   for (const [video, entry] of overlays) {
     destroy(entry)
     overlays.delete(video)
@@ -448,6 +585,11 @@ function checkNavigation() {
 
 function scan() {
   checkNavigation()
+
+  if (!pageWantsButtons()) {
+    clearOverlays()
+    return
+  }
 
   for (const video of document.querySelectorAll('video')) {
     if (!overlays.has(video) && !handled.has(video)) createOverlay(video)
@@ -532,6 +674,12 @@ function updatePanel() {
   // The page has already been handed over; the retired button must not come
   // back as a panel saying the same thing.
   if (takenOver) return
+  // And a page that is not for watching does not get the panel either, or a
+  // YouTube homepage would answer a removed button with a corner card.
+  if (!pageWantsButtons()) {
+    removePanel()
+    return
+  }
 
   if (mediaCount > 0 && overlays.size === 0) {
     ensurePanel()
@@ -573,6 +721,32 @@ new MutationObserver(() => {
 addEventListener('scroll', schedule, { capture: true, passive: true })
 addEventListener('resize', schedule, { passive: true })
 document.addEventListener('fullscreenchange', schedule)
+
+function saveOffset() {
+  try {
+    void chrome.storage?.local?.set({ [OFFSET_KEY]: offset })
+  } catch {
+    // Remembering where the button was put is a convenience, not something to
+    // fail a page over.
+  }
+}
+
+function loadOffset() {
+  try {
+    return Promise.resolve(chrome.storage?.local?.get(OFFSET_KEY))
+      .then((stored) => {
+        const saved = stored?.[OFFSET_KEY]
+        if (saved && Number.isFinite(saved.x) && Number.isFinite(saved.y)) {
+          offset = { x: saved.x, y: saved.y }
+        }
+      })
+      .catch(() => {})
+  } catch {
+    return Promise.resolve()
+  }
+}
+
+void loadOffset().then(schedule)
 
 chrome.runtime
   .sendMessage({ type: 'draco:list-media' })

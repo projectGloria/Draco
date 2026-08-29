@@ -334,10 +334,26 @@ function sanitizeVariants(input: unknown): MediaVariant[] {
       bandwidth: typeof raw.bandwidth === 'number' && Number.isSafeInteger(raw.bandwidth) && raw.bandwidth >= 0 ? raw.bandwidth : null,
       codecs: typeof raw.codecs === 'string' ? raw.codecs.slice(0, 1000) : null,
       estimatedSize: safeNonNegativeInt(raw.estimatedSize),
+      container: safeContainer(raw.container),
       ...(youtube ? { youtube } : {})
     })
   }
   return out
+}
+
+/**
+ * The container a variant will be saved as, or null.
+ *
+ * Kept across a reload rather than recomputed: a page-derived YouTube variant
+ * has no URL to infer one from, so dropping it here would leave every rung of a
+ * restored ladder claiming `.mp4` - including the ones that will actually be
+ * muxed into `.webm` or `.mkv`, which is precisely the disagreement between the
+ * label and the file that this field exists to prevent.
+ */
+function safeContainer(value: unknown): string | null {
+  if (typeof value !== 'string') return null
+  const text = value.trim().toLowerCase()
+  return /^[a-z0-9]{1,8}$/.test(text) ? text : null
 }
 
 export function lowerList(value: unknown): string[] {

@@ -14,7 +14,7 @@ record a decision rather than describe the code.
 ## Commands
 
 ```bash
-npm run dev          # electron-vite dev (main + preload + 3 renderer entries, HMR)
+npm run dev          # electron-vite dev (main + preload + 4 renderer entries, HMR)
 npm run build        # typecheck, then electron-vite build -> out/
 npm run typecheck    # tsc --noEmit over tsconfig.node.json and tsconfig.web.json
 npm test             # node --experimental-strip-types --test tests/*.test.mjs
@@ -88,6 +88,31 @@ the key casually; `tools/gen-extension-key.mjs` deliberately reuses an existing
 Chrome runs the old service worker until the extension is reloaded at
 `chrome://extensions`, so changes to `extension/` need that reload before they
 take effect — otherwise main silently sees the old message shape.
+
+### The in-page button (`extension/content.js`)
+
+Everything here renders into *closed* shadow roots, so a page cannot restyle,
+read or collide with it.
+
+- Link clicks are taken on the `click` capture phase, **before** the browser does
+  anything: by the time `chrome.downloads` fires, the download shelf has already
+  been drawn. If Draco declines the job the navigation is replayed, so a link is
+  never silently swallowed.
+- A button is only put on a video the page exists to play (`pageWantsButtons`).
+  On a YouTube host that means `/watch`, `/shorts/`, `/live/` or `/embed/` -
+  YouTube's homepage, search and channel pages are wall-to-wall `<video>`,
+  because every thumbnail plays a preview on hover. Other sites are unfiltered.
+- The button sits *outside* the frame's top-left corner (below it when there is
+  no room above) and can be dragged. The drag is stored as an offset from that
+  anchor, not as a position, so a moved button still tracks its video when the
+  page scrolls; it is persisted in `chrome.storage.local`.
+- A successful handoff **retires** the button for that video: a second press
+  could only produce a second copy. `checkNavigation` is what un-retires it, and
+  it is not optional - YouTube is an SPA that reuses the very same `<video>`
+  element for the next video, so without it the button never returns.
+- Layout runs from one `requestAnimationFrame` per mutation batch plus a 500 ms
+  poll that only exists while a button does; a `querySelectorAll` per mutation is
+  a real cost on a page like YouTube.
 
 ### The download engine (`src/main/engine`)
 
@@ -245,9 +270,10 @@ by `node --test`. When logic inside such a file is worth testing, split it out a
 its own Electron-free module — that is why `store-sanitize.ts` and
 `youtube-ladder.ts` exist.
 
-**Line endings are mixed.** Six files are CRLF and the rest are LF:
-`electron.vite.config.ts`, `src/main/windows.ts`, `src/renderer/src/App.tsx`,
-and `components/{DownloadTable,OptionsDialog,TaskDetailDialog}.tsx`. Exact-string
+**Line endings are mixed.** Seven files are CRLF and the rest are LF:
+`electron.vite.config.ts`, `extension/manifest.json`, `src/main/windows.ts`,
+`src/renderer/src/App.tsx`, and
+`components/{DownloadTable,OptionsDialog,TaskDetailDialog}.tsx`. Exact-string
 edits written with LF silently fail to match in those files, and rewriting one
 wholesale churns every line. Match the file's existing endings.
 

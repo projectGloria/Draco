@@ -66,3 +66,25 @@ test('a YouTube quality read from the page survives a restart without a URL', ()
   assert.equal(candidate.variants[0].url, '')
   assert.equal(candidate.variants[0].youtube.videoFormatId, '248')
 })
+
+test('a restored quality still knows the container it will be saved as', () => {
+  const [candidate] = sanitizeMedia([
+    {
+      id: 'm2',
+      pageUrl: 'https://www.youtube.com/watch?v=abc',
+      mediaUrl: 'https://www.youtube.com/watch?v=abc',
+      type: 'file',
+      variants: [
+        // A page-derived variant has no URL to infer a container from, so the
+        // stored one is the only thing standing between the label and a lie.
+        { url: '', label: '4K', container: 'MKV', youtube: { videoFormatId: '313' } },
+        { url: 'https://cdn.test/a.mp4', label: '720p', container: 'exe; rm -rf' },
+        { url: 'https://cdn.test/b.mp4', label: '480p' }
+      ]
+    }
+  ])
+
+  assert.equal(candidate.variants[0].container, 'mkv')
+  assert.equal(candidate.variants[1].container, null)
+  assert.equal(candidate.variants[2].container, null)
+})
