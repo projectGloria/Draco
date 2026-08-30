@@ -163,7 +163,7 @@ let pageKey = location.href
 let primedVideoId = null
 let primingVideoId = null
 let primeRetryTimer = null
-let primeRetryDelay = 1500
+let primeRetryDelay = 800
 
 /**
  * Where the button sits relative to the corner it is anchored to.
@@ -348,6 +348,10 @@ function createOverlay(video) {
   video.addEventListener('mouseenter', () => {
     entry.hot = true
     paint(entry)
+    // Hovering the player is a strong signal a click on the download button
+    // is coming. Cheap to call - primeYouTubeIfNeeded no-ops once a video is
+    // already primed or an attempt is already in flight.
+    primeYouTubeIfNeeded()
   })
   video.addEventListener('mouseleave', () => {
     entry.hot = false
@@ -595,7 +599,7 @@ function checkNavigation() {
   clearTimeout(primeRetryTimer)
   primeRetryTimer = null
   primingVideoId = null
-  primeRetryDelay = 1500
+  primeRetryDelay = 800
 
   // The overlays go with the old page. Rebuilding them is what returns a button
   // to a reused video element, and `destroy` also cancels the retire timer of
@@ -622,7 +626,11 @@ function scan() {
   for (const video of videos) {
     if (!overlays.has(video) && !handled.has(video)) createOverlay(video)
   }
-  if (videos.length > 0) primeYouTubeIfNeeded()
+  // Priming only needs the video id out of the URL, not a mounted <video>
+  // element, so it starts the moment a watch page shows up in a scan - which
+  // on an SPA nav is well before the player itself remounts. Waiting on the
+  // element was giving away the head start this exists to buy.
+  primeYouTubeIfNeeded()
   schedule()
 }
 
@@ -664,7 +672,7 @@ function primeYouTubeIfNeeded() {
 
       if (reply?.ok && reply?.primed) {
         primedVideoId = videoId
-        primeRetryDelay = 1500
+        primeRetryDelay = 800
         console.debug('[Draco] YouTube download links are ready')
       } else {
         scheduleYouTubePrimeRetry(videoId)

@@ -5,7 +5,8 @@ import type {
   MediaVariant,
   ProbeResult,
   Queue,
-  Settings
+  Settings,
+  YouTubePrimeState
 } from '@shared/types'
 import { formatBytes, hostOf } from '../lib/format'
 import { applyAccent } from '../store/app'
@@ -262,6 +263,7 @@ function MediaBody({
   const [categoryId, setCategoryId] = useState('')
   const [queueId, setQueueId] = useState('')
   const [busy, setBusy] = useState(false)
+  const [linkStatus, setLinkStatus] = useState<YouTubePrimeState | null>(null)
 
   useEffect(() => {
     let cancelled = false
@@ -286,6 +288,35 @@ function MediaBody({
   }, [request])
 
   const variant = variants?.[chosen] ?? null
+  // The page ladder can carry a cipher-only entry (no usable URL yet) even
+  // when it showed up instantly. Whether Start Download is actually instant
+  // depends on whether the background yt-dlp priming finished in time - this
+  // used to be invisible; now it's shown rather than guessed at.
+  const linkPending = Boolean(variant && !variant.url)
+
+  useEffect(() => {
+    if (!linkPending) {
+      setLinkStatus(null)
+      return
+    }
+
+    let cancelled = false
+    const poll = (): void => {
+      window.api
+        .getYouTubePrimeStatus(request.pageUrl ?? request.url)
+        .then((status) => {
+          if (!cancelled) setLinkStatus(status)
+        })
+        .catch(() => {})
+    }
+
+    poll()
+    const timer = setInterval(poll, 500)
+    return () => {
+      cancelled = true
+      clearInterval(timer)
+    }
+  }, [linkPending, request.pageUrl, request.url])
 
   async function accept(): Promise<void> {
     if (!variant) return
@@ -344,6 +375,8 @@ function MediaBody({
           )}
         </Field>
 
+        {linkPending && <LinkStatusNote status={linkStatus} />}
+
         <Field label="File name">
           <input
             value={filename}
@@ -395,11 +428,41 @@ function MediaBody({
       <Footer>
         <GhostButton onClick={onCancel}>Cancel</GhostButton>
         <PrimaryButton onClick={() => void accept()} disabled={busy || !variant}>
-          Start download
+          {busy && linkPending && linkStatus?.state !== 'ready' ? 'Preparing link…' : 'Start download'}
         </PrimaryButton>
       </Footer>
     </>
   )
+}
+
+/**
+ * What used to be an unexplained freeze after clicking Start Download.
+ *
+ * The quality ladder can appear instantly straight from the page while the
+ * actual signed URL is still being worked out in the background (YouTube
+ * ciphers most direct links). This says so, honestly, instead of letting the
+ * button look broken for however long that background lookup takes.
+ */
+function LinkStatusNote({ status }: { status: YouTubePrimeState | null }): React.ReactElement {
+  if (!status || status.state === 'idle' || status.state === 'pending') {
+    const elapsed = status?.state === 'pending' ? Math.max(0, Date.now() - status.startedAt) : 0
+    return (
+      <p className="text-[11px] text-faint leading-relaxed">
+        Preparing the direct link in the background{elapsed > 1000 ? ` (${Math.round(elapsed / 1000)}s)` : ''} —
+        picking a quality now is fine, this usually finishes before you do.
+      </p>
+    )
+  }
+
+  if (status.state === 'failed') {
+    return (
+      <p className="text-[11px] text-warn leading-relaxed">
+        Background link preparation failed ({status.error}). Starting the download will retry it.
+      </p>
+    )
+  }
+
+  return <></>
 }
 
 /* ------------------------------------------------------------------ */

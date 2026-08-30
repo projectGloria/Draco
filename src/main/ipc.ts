@@ -26,6 +26,7 @@ import { probeUrl } from './engine/probe.ts'
 import { resolveVariants } from './hls/playlist.ts'
 import { checkForUpdates } from './update.ts'
 import { chosenYouTubeUrls } from './youtube-url.ts'
+import { getYouTubePrimeStatus } from './youtube.ts'
 import { iconForExtension, iconForSite } from './icons.ts'
 import { logger } from './log.ts'
 import type { Scheduler } from './queue/scheduler.ts'
@@ -295,6 +296,11 @@ export function registerIpc(ctx: AppContext): void {
     if (!request?.mediaId) throw new Error('That media request has expired')
     return resolveCandidate(ctx, request.mediaId)
   })
+
+  // Lets the handoff popup show honest status ("still preparing the direct
+  // link") instead of silently freezing on Start Download if the page-load
+  // priming has not finished yet. Cheap synchronous lookup, safe to poll.
+  handle('youtube:primeStatus', async (pageUrl: string) => getYouTubePrimeStatus(pageUrl))
 
   handle('handoff:acceptMedia', async (
     id: string,

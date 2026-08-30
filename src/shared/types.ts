@@ -417,6 +417,13 @@ export interface MediaVariant {
   youtube?: { videoFormatId: string; audioFormatId?: string | null }
 }
 
+/** Status of the background yt-dlp lookup that resolves a YouTube video's direct links. */
+export type YouTubePrimeState =
+  | { state: 'idle' }
+  | { state: 'pending'; startedAt: number }
+  | { state: 'ready'; tookMs: number }
+  | { state: 'failed'; tookMs: number; error: string }
+
 /* ------------------------------------------------------------------ */
 /* Browser integration status                                          */
 /* ------------------------------------------------------------------ */
@@ -515,6 +522,8 @@ export interface RendererApi {
   /** For a media handoff: the quality ladder, fetched on demand. */
   resolveHandoffMedia(id: string): Promise<MediaCandidate>
   acceptHandoffMedia(id: string, opts: { variantUrl: string; filename: string; dir?: string; categoryId?: string; queueId?: string; audioUrl?: string | null; youtube?: { videoFormatId: string; audioFormatId?: string | null } }): Promise<void>
+  /** Whether yt-dlp's background priming for this YouTube video has finished. Safe to poll. */
+  getYouTubePrimeStatus(pageUrl: string): Promise<YouTubePrimeState>
   /** Cancel: drops the request and closes the window. */
   dismissHandoff(id: string): Promise<void>
 

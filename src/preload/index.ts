@@ -59,6 +59,7 @@ const api: RendererApi = {
   acceptHandoffMedia: (id: string, opts: { variantUrl: string; filename: string; dir?: string; categoryId?: string; queueId?: string; audioUrl?: string | null; youtube?: { videoFormatId: string; audioFormatId?: string | null } }) =>
     ipcRenderer.invoke('handoff:acceptMedia', id, opts),
   dismissHandoff: (id: string) => ipcRenderer.invoke('handoff:dismiss', id),
+  getYouTubePrimeStatus: (pageUrl: string) => ipcRenderer.invoke('youtube:primeStatus', pageUrl),
 
   /* categories */
   listCategories: () => ipcRenderer.invoke('categories:list'),

@@ -53,19 +53,33 @@ export function resolveYouTubeInstant(
   }
 }
 
+/** Strips the browser session cookie from a header set, keeping referer/UA. */
+function withoutCookie(headers: RequestHeaders | undefined): RequestHeaders | undefined {
+  if (!headers?.cookie) return headers
+  const { cookie: _cookie, ...rest } = headers
+  return Object.keys(rest).length > 0 ? rest : undefined
+}
+
 /** Fills the shared yt-dlp cache before the user asks to download. */
 export async function primeYouTube(
   pageUrl: string,
   headers: RequestHeaders | undefined
 ): Promise<void> {
-  await loadInfo(pageUrl, headers)
+  // The browser cookie is attached to every handoff by default, but in
+  // practice YouTube's cookie-authenticated response consistently omits a
+  // usable URL for the itags the page ladder actually offers (observed on
+  // every video, every format - not an edge case). Priming with the cookie
+  // attached was warming a cache entry that got discarded and re-fetched from
+  // scratch the moment the user clicked Download. Priming anonymously means
+  // the cache this fills is the one `refreshYouTubeFormat` actually reuses.
+  await loadInfo(pageUrl, withoutCookie(headers))
 }
 
 export async function resolveYouTube(
   pageUrl: string,
   headers: RequestHeaders | undefined
 ): Promise<{ id: string; title: string; variants: MediaVariant[] }> {
-  const info = await loadInfo(pageUrl, headers)
+  const info = await loadInfo(pageUrl, withoutCookie(headers))
   const variants = buildVariants(formatsFromYtDlp(Array.isArray(info.formats) ? info.formats : []))
 
   if (variants.length === 0) {
@@ -93,23 +107,21 @@ export async function refreshYouTubeFormat(
   // wants the cache: `primeYouTube` filled it while the window was open, and
   // insisting on a fresh lookup there is six seconds spent to learn the same
   // thing twice - once per stream, for a video and audio pair.
-  let info = await loadInfo(pageUrl, headers, force)
+  //
+  // The primary attempt goes out anonymously (same as `primeYouTube`) so a
+  // warm prime actually gets reused here instead of being thrown away - see
+  // the comment on `primeYouTube` for why cookies are not the default.
+  let info = await loadInfo(pageUrl, withoutCookie(headers), force)
   // The same guard the ladder applies, repeated at the point of use: this is
   // the only place a YouTube download URL comes from, and what reaches the
   // engine must be a file it can fetch rather than an HLS or DASH manifest.
   let format = selectDirectYtFormat(info.formats ?? [], formatId)
   if (!format?.url && headers?.cookie) {
-    // Some YouTube sessions accept playback in Chrome but cause the extractor
-    // client to receive only a low-quality progressive fallback. Retrying
-    // without the browser cookie preserves the requested quality whenever the
-    // public extractor response has the normal adaptive stream list.
-    log.warn(`YouTube format ${formatId} was unavailable with browser cookies; retrying without them`)
-    const { cookie: _cookie, ...headersWithoutCookie } = headers
-    info = await loadInfo(
-      pageUrl,
-      Object.keys(headersWithoutCookie).length > 0 ? headersWithoutCookie : undefined,
-      true
-    )
+    // The real fallback case now: a video that genuinely needs the signed-in
+    // session (age-gated, private, members-only) and only reveals this format
+    // to an authenticated request.
+    log.warn(`YouTube format ${formatId} was unavailable anonymously; retrying with the browser session`)
+    info = await loadInfo(pageUrl, headers, true)
     format = selectDirectYtFormat(info.formats ?? [], formatId)
   }
   if (!format?.url) {
@@ -151,6 +163,28 @@ const INFO_TTL_MS = 5 * 60_000
 const INFO_CACHE_MAX = 8
 
 /**
+ * Lightweight, synchronously-readable status for whatever `loadInfo` is doing
+ * for a given video - kept separate from `infoCache` so a UI can poll "is the
+ * link ready yet" without touching the cached promise itself.
+ *
+ * This exists to answer a question that came up in practice: priming is meant
+ * to hide the ~6s yt-dlp cost by starting the moment the video page loads, but
+ * whether that actually finishes before the user presses Download was pure
+ * guesswork before this. Now both the popup and the log file can see it.
+ */
+export type YouTubePrimeState =
+  | { state: 'idle' }
+  | { state: 'pending'; startedAt: number }
+  | { state: 'ready'; tookMs: number }
+  | { state: 'failed'; tookMs: number; error: string }
+
+const primeStatus = new Map<string, YouTubePrimeState>()
+
+export function getYouTubePrimeStatus(pageUrl: string): YouTubePrimeState {
+  return primeStatus.get(extractYouTubeId(pageUrl)) ?? { state: 'idle' }
+}
+
+/**
  * One yt-dlp lookup, shared.
  *
  * The call costs about six seconds, nearly all of it yt-dlp's own startup and
@@ -175,10 +209,28 @@ async function loadInfo(
     }
   }
 
+  const startedAt = now
+  primeStatus.set(key, { state: 'pending', startedAt })
+  log.info(`YouTube extraction started for ${key}${force ? ' (forced)' : ''}`)
+
   const promise = (async () => {
     const executable = await ensureYtDlp()
     return dumpJson(executable, pageUrl, headers)
   })()
+
+  promise.then(
+    () => {
+      const tookMs = Date.now() - startedAt
+      primeStatus.set(key, { state: 'ready', tookMs })
+      log.info(`YouTube extraction finished for ${key} in ${tookMs}ms`)
+    },
+    (err: unknown) => {
+      const tookMs = Date.now() - startedAt
+      const error = err instanceof Error ? err.message : String(err)
+      primeStatus.set(key, { state: 'failed', tookMs, error })
+      log.warn(`YouTube extraction failed for ${key} after ${tookMs}ms: ${error}`)
+    }
+  )
 
   // A failed lookup is not worth keeping: caching the rejection would make one
   // bad moment stick to the video for the rest of the TTL.
