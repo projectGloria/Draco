@@ -1,4 +1,4 @@
-import { open, mkdir, rename, rm, stat, type FileHandle } from 'node:fs/promises'
+import { open, rename, rm, stat, type FileHandle } from 'node:fs/promises'
 import { basename, join } from 'node:path'
 import type { DownloadTask, Segment } from '../../shared/types.ts'
 import { journalMatches, journalSegmentsValid, readJournal, removeJournal, segmentsForJournal, writeJournal, JOURNAL_VERSION } from './journal.ts'
@@ -8,6 +8,7 @@ import { buildHeaders, probeUrl } from './probe.ts'
 import { Segmenter } from './segmenter.ts'
 import { AbortedError, HttpStatusError, NotResumableError, ServerBusyError, runSegment } from './worker.ts'
 import { preparedYouTubeUrl } from '../youtube-url.ts'
+import { ensureDownloadDirectory } from '../destination-path.ts'
 
 /**
  * Drives one download: probe, resume-or-start, keep the connection pool fed,
@@ -290,7 +291,7 @@ export class TaskRunner {
     // MIME type, neither of which was known before the probe.
     await this.deps.onProbed?.(this.task)
 
-    await mkdir(this.task.dir, { recursive: true })
+    this.task.dir = await ensureDownloadDirectory(this.task.dir)
 
     const restored = await this.restoreOrReset(probe.size)
 

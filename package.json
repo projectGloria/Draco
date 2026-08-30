@@ -15,6 +15,14 @@
     ],
     "extraResources": [
       {
+        "from": "resources/icon.ico",
+        "to": "icon.ico"
+      },
+      {
+        "from": "resources/icon.png",
+        "to": "icon.png"
+      },
+      {
         "from": "extension",
         "to": "extension",
         "filter": [
@@ -53,7 +61,7 @@
     "dist": "npm run extension:firefox && npm run build && electron-builder --win",
     "host": "powershell -ExecutionPolicy Bypass -File host/build.ps1",
     "keygen": "node tools/gen-extension-key.mjs",
-    "icon": "node tools/gen-icon.mjs",
+    "icon": "python tools/gen-icon.py",
     "dl": "node tools/dl.ts",
     "preview": "electron-vite preview"
   },

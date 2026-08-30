@@ -1,6 +1,8 @@
-import { app, BrowserWindow, shell } from 'electron'
+import { app, BrowserWindow, nativeImage, shell } from 'electron'
 import { join } from 'node:path'
 import { existsSync } from 'node:fs'
+import type { DownloadTask } from '../shared/types.ts'
+import { iconForSite } from './icons.ts'
 
 function getIconPath(): string {
   const packaged = join(process.resourcesPath, 'icon.ico')
@@ -196,6 +198,7 @@ export function handoffIdForWebContents(id: number): string | null {
  * and the person is still in the browser.
  */
 const progressWindows = new Map<string, BrowserWindow>()
+const progressWindowIconOrigins = new Map<string, string>()
 let handoffCounter = 0
 let progressCounter = 0
 
@@ -209,7 +212,7 @@ export function createProgressWindow(taskId: string): BrowserWindow {
 
   const window = new BrowserWindow({
     width: 470,
-    height: 264,
+    height: 300,
     resizable: false,
     // Minimisable, unlike the confirm window: that one asks a question and is
     // gone, this one may sit there for an hour and has to be got out of the way
@@ -241,7 +244,10 @@ export function createProgressWindow(taskId: string): BrowserWindow {
   if (target.url) void window.loadURL(target.url)
   else void window.loadFile(target.file!, { search: target.query.replace(/^\?/, '') })
 
-  window.on('closed', () => progressWindows.delete(taskId))
+  window.on('closed', () => {
+    progressWindows.delete(taskId)
+    progressWindowIconOrigins.delete(taskId)
+  })
   progressWindows.set(taskId, window)
   return window
 }
@@ -250,6 +256,60 @@ export function closeProgressWindow(taskId: string): void {
   const window = progressWindows.get(taskId)
   if (window && !window.isDestroyed()) window.close()
   progressWindows.delete(taskId)
+}
+
+/** Keeps Windows' taskbar hover text and progress indicator useful while the
+ * frameless per-download window is minimized. */
+export function updateProgressWindow(task: DownloadTask): void {
+  const window = progressWindows.get(task.id)
+  if (!window || window.isDestroyed()) return
+
+  const knownPercent = task.size && task.size > 0
+    ? Math.max(0, Math.min(100, Math.floor((task.received / task.size) * 100)))
+    : null
+  const label = task.filename || 'Preparing download'
+  const state = task.status === 'done'
+    ? 'Complete'
+    : task.status === 'paused'
+      ? knownPercent === null ? 'Paused' : `Paused · ${knownPercent}%`
+      : task.status === 'error' || task.status === 'missing'
+        ? 'Failed'
+        : knownPercent === null
+          ? 'Downloading'
+          : `${knownPercent}%`
+
+  window.setTitle(`${state} · ${label} — Draco`)
+  updateProgressWindowSiteIcon(window, task)
+
+  if (task.status === 'done') {
+    window.setProgressBar(-1)
+  } else if (task.status === 'error' || task.status === 'missing') {
+    window.setProgressBar(knownPercent === null ? 1 : knownPercent / 100, { mode: 'error' })
+  } else if (task.status === 'paused') {
+    window.setProgressBar(knownPercent === null ? 1 : knownPercent / 100, { mode: 'paused' })
+  } else if (task.status === 'downloading' || task.status === 'probing' || task.status === 'queued') {
+    window.setProgressBar(knownPercent === null ? 2 : knownPercent / 100, { mode: 'normal' })
+  } else {
+    window.setProgressBar(-1)
+  }
+}
+
+function updateProgressWindowSiteIcon(window: BrowserWindow, task: DownloadTask): void {
+  const sourceUrl = task.sourceUrl ?? task.youtube?.pageUrl ?? task.url
+  let origin: string
+  try {
+    origin = new URL(sourceUrl).origin
+  } catch {
+    return
+  }
+  if (progressWindowIconOrigins.get(task.id) === origin) return
+  progressWindowIconOrigins.set(task.id, origin)
+
+  void iconForSite(sourceUrl).then((dataUrl) => {
+    if (!dataUrl || window.isDestroyed() || progressWindowIconOrigins.get(task.id) !== origin) return
+    const image = nativeImage.createFromDataURL(dataUrl)
+    if (!image.isEmpty()) window.setIcon(image)
+  })
 }
 
 /** Brings the window back from the tray or a minimised state. */

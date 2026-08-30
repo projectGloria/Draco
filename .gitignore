@@ -3,6 +3,8 @@ out/
 dist/
 release/
 *.tsbuildinfo
+__pycache__/
+*.pyc
 # The extension's private key pins its ID. It is generated once, locally, and
 # must never be committed - anyone holding it can impersonate the extension.
 extension/key.pem

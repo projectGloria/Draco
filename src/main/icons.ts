@@ -1,5 +1,6 @@
 import { app } from 'electron'
-import { mkdir, open } from 'node:fs/promises'
+import { createHash } from 'node:crypto'
+import { mkdir, open, readFile, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { getPaths } from './bootstrap/paths.ts'
 import { logger } from './log.ts'
@@ -101,7 +102,14 @@ export async function iconForSite(url: string): Promise<string | null> {
   const existing = siteIconWork.get(origin)
   if (existing) return existing
 
-  const work = fetchFavicon(origin).catch((err: unknown) => {
+  const work = (async () => {
+    const saved = await readCachedFavicon(origin)
+    if (saved) return saved
+
+    const fetched = await fetchFavicon(origin)
+    if (fetched) await writeCachedFavicon(origin, fetched)
+    return fetched
+  })().catch((err: unknown) => {
     log.warn(`no favicon for ${origin}: ${String(err)}`)
     return null
   })
@@ -111,6 +119,32 @@ export async function iconForSite(url: string): Promise<string | null> {
   siteIconWork.delete(origin)
   siteIcons.set(origin, result)
   return result
+}
+
+function faviconCachePath(origin: string): string {
+  const key = createHash('sha256').update(origin).digest('hex')
+  return join(getPaths().iconCache, 'sites', `${key}.json`)
+}
+
+async function readCachedFavicon(origin: string): Promise<string | null> {
+  try {
+    const parsed = JSON.parse(await readFile(faviconCachePath(origin), 'utf8')) as {
+      origin?: unknown
+      dataUrl?: unknown
+    }
+    if (parsed.origin !== origin || typeof parsed.dataUrl !== 'string') return null
+    if (!/^data:image\/[a-z0-9.+-]+;base64,/i.test(parsed.dataUrl)) return null
+    if (parsed.dataUrl.length > FAVICON_MAX_BYTES * 2) return null
+    return parsed.dataUrl
+  } catch {
+    return null
+  }
+}
+
+async function writeCachedFavicon(origin: string, dataUrl: string): Promise<void> {
+  const path = faviconCachePath(origin)
+  await mkdir(join(getPaths().iconCache, 'sites'), { recursive: true })
+  await writeFile(path, JSON.stringify({ origin, dataUrl }), 'utf8')
 }
 
 async function fetchFavicon(origin: string): Promise<string | null> {

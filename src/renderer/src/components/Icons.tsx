@@ -1,3 +1,5 @@
+import appIcon from '../../../../resources/icon.png'
+
 /**
  * Every glyph in the app, as inline SVG.
  *
@@ -32,24 +34,7 @@ function Svg({
 }
 
 export function BrandMark({ className }: GlyphProps): React.ReactElement {
-  return (
-    <svg viewBox="0 0 24 24" className={className ?? 'w-5 h-5'} aria-hidden="true">
-      <defs>
-        <linearGradient id="dracoMark" x1="0" y1="0" x2="1" y2="1">
-          <stop offset="0" stopColor="var(--accent)" />
-          <stop offset="1" stopColor="var(--accent-2)" />
-        </linearGradient>
-      </defs>
-      <path
-        d="M12 2.4 L12 13 M12 15.6 L6.4 9.4 M12 15.6 L17.6 9.4 M4.2 18.8 L19.8 18.8"
-        fill="none"
-        stroke="url(#dracoMark)"
-        strokeWidth={2.1}
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      />
-    </svg>
-  )
+  return <img src={appIcon} alt="" draggable={false} className={(className ?? 'w-5 h-5') + ' object-contain'} />
 }
 
 /* Window controls. Drawn on the pixel grid at 10px, hence the flat paths. */

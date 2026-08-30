@@ -175,6 +175,10 @@ let primeRetryDelay = 800
  */
 let offset = { x: 0, y: 0 }
 const OFFSET_KEY = 'draco:button-offset'
+let buttonWidth = 144
+const SIZE_KEY = 'draco:button-width'
+const MIN_BUTTON_WIDTH = 96
+const MAX_BUTTON_WIDTH = 320
 
 /** A press has to move this far before it is a drag rather than a click. */
 const DRAG_SLOP = 4
@@ -186,6 +190,8 @@ let suppressClickUntil = 0
 const GAP = 8
 
 let mediaCount = 0
+let dracoState = { running: false, paused: false, active: false, excluded: false }
+let dismissedPageKey = null
 let scheduled = false
 let scanScheduled = false
 
@@ -213,39 +219,55 @@ function createOverlay(video) {
   shadow.innerHTML = `
     <style>
       :host { all: initial; }
+      .control {
+        position: relative;
+        display: inline-block;
+        margin: 0; padding: 0; border: 0;
+        background: transparent;
+      }
       .btn {
-        display: inline-flex; align-items: center; gap: 6px;
+        display: block;
         font: 600 12px/1 system-ui, -apple-system, "Segoe UI", sans-serif;
-        padding: 7px 10px;
-        border-radius: 8px;
-        background: rgba(12, 15, 22, .85);
+        margin: 0; padding: 0; border: 0; border-radius: 0;
+        background: none;
         color: #e6e9f0;
-        border: 1px solid rgba(255,255,255,.16);
-        box-shadow: 0 6px 20px rgba(0,0,0,.45);
-        cursor: pointer;
         white-space: nowrap;
         user-select: none;
-        /* Outside the picture now, so it no longer has to stay out of the way
-           of it - at .4 against a page background it just looked broken. */
-        opacity: .8;
         cursor: grab;
         touch-action: none;
-        transition: opacity .15s ease, border-color .15s ease, background .15s ease;
       }
-      .btn:hover { opacity: 1; border-color: #38bdf8; background: rgba(12,15,22,.96); }
-      .btn.hot { opacity: .95; }
-      .btn.ready { border-color: rgba(56,189,248,.55); }
-      .btn.busy { opacity: 1; }
-      .btn.bad { opacity: 1; border-color: rgba(251,191,36,.55); color: #fbbf24; }
-      .btn.done { opacity: 1; border-color: rgba(52,211,153,.55); color: #34d399; }
-      .mark { width: 14px; height: 14px; flex: none; }
+      .btn:focus-visible { outline: 1px dotted rgba(255,255,255,.8); outline-offset: 2px; }
+      .btn.hot, .btn.ready { color: #f8fafc; }
+      .btn.bad { color: #fbbf24; }
+      .btn.done { color: #34d399; }
+      .art { width: 144px; height: auto; display: block; object-fit: contain; pointer-events: none; }
+      .art[hidden], .label[hidden] { display: none; }
+      .label { display: block; padding: 7px 9px; text-shadow: 0 1px 3px #000; }
+      .close {
+        position: absolute; right: -17px; top: -3px;
+        width: 16px; height: 16px; margin: 0; padding: 0; border: 0;
+        background: none; color: rgba(255,255,255,.7); cursor: pointer;
+        font: 500 15px/16px system-ui, sans-serif;
+        opacity: 0; transition: opacity .12s ease, color .12s ease;
+      }
+      .control:hover .close, .close:focus-visible { opacity: 1; }
+      .close:hover, .close:focus-visible {
+        outline: none; color: #fff;
+      }
+      .resize {
+        position: absolute; right: 0; bottom: 0;
+        width: 14px; height: 14px;
+        cursor: nwse-resize; touch-action: none;
+        background: transparent;
+      }
     </style>
-    <div class="btn" role="button" tabindex="0" title="Download with Draco">
-      <svg class="mark" viewBox="0 0 24 24" fill="none" stroke="#38bdf8"
-           stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-        <path d="M12 3.5v11M12 15.5 7.2 10.4M12 15.5l4.8-5.1M4.5 19.5h15" />
-      </svg>
-      <span class="label">Download</span>
+    <div class="control">
+      <div class="btn" role="button" tabindex="0" title="Download with Draco">
+        <img class="art" src="${chrome.runtime.getURL('downloadButton.png')}" alt="Download with Draco" />
+        <span class="label" hidden>Download</span>
+      </div>
+      <button class="close" type="button" title="Hide on this page" aria-label="Hide Draco download button">&times;</button>
+      <span class="resize" role="separator" aria-label="Resize Draco download button" title="Drag to resize"></span>
     </div>
   `
 
@@ -253,11 +275,15 @@ function createOverlay(video) {
     video,
     host,
     button: shadow.querySelector('.btn'),
+    art: shadow.querySelector('.art'),
     label: shadow.querySelector('.label'),
+    resizeHandle: shadow.querySelector('.resize'),
     hot: false,
     state: '',
     resetTimer: null
   }
+
+  entry.art.style.width = buttonWidth + 'px'
 
   const activate = (event) => {
     event.preventDefault()
@@ -270,6 +296,13 @@ function createOverlay(video) {
   entry.button.addEventListener('click', activate)
   entry.button.addEventListener('keydown', (event) => {
     if (event.key === 'Enter' || event.key === ' ') activate(event)
+  })
+  shadow.querySelector('.close').addEventListener('click', (event) => {
+    event.preventDefault()
+    event.stopPropagation()
+    dismissedPageKey = pageKey
+    clearOverlays()
+    removePanel()
   })
 
   /*
@@ -345,6 +378,42 @@ function createOverlay(video) {
   entry.button.addEventListener('pointerup', endDrag)
   entry.button.addEventListener('pointercancel', endDrag)
 
+  let resize = null
+  entry.resizeHandle.addEventListener('pointerdown', (event) => {
+    event.preventDefault()
+    event.stopPropagation()
+    if (event.button !== 0) return
+    resize = { id: event.pointerId, x: event.clientX, fromWidth: buttonWidth }
+    try {
+      entry.resizeHandle.setPointerCapture(event.pointerId)
+    } catch {
+      // Capture is an optimisation, not a requirement.
+    }
+  })
+  entry.resizeHandle.addEventListener('pointermove', (event) => {
+    if (!resize || event.pointerId !== resize.id) return
+    buttonWidth = Math.min(
+      MAX_BUTTON_WIDTH,
+      Math.max(MIN_BUTTON_WIDTH, Math.round(resize.fromWidth + event.clientX - resize.x))
+    )
+    for (const item of overlays.values()) item.art.style.width = buttonWidth + 'px'
+    entry.art.style.width = buttonWidth + 'px'
+    schedule()
+  })
+  const endResize = (event) => {
+    if (!resize || event.pointerId !== resize.id) return
+    resize = null
+    suppressClickUntil = Date.now() + 300
+    try {
+      entry.resizeHandle.releasePointerCapture(event.pointerId)
+    } catch {
+      // Already released with the pointer.
+    }
+    saveButtonWidth()
+  }
+  entry.resizeHandle.addEventListener('pointerup', endResize)
+  entry.resizeHandle.addEventListener('pointercancel', endResize)
+
   video.addEventListener('mouseenter', () => {
     entry.hot = true
     paint(entry)
@@ -397,6 +466,9 @@ function retire(entry) {
 
 function setLabel(entry, text, state, title) {
   entry.label.textContent = text
+  const idle = text === 'Download' && !state
+  entry.art.hidden = !idle
+  entry.label.hidden = idle
   entry.state = state ?? ''
   entry.button.title = title ?? 'Download with Draco'
   paint(entry)
@@ -405,6 +477,8 @@ function setLabel(entry, text, state, title) {
   if (state === 'done' || state === 'bad') {
     entry.resetTimer = setTimeout(() => {
       entry.label.textContent = 'Download'
+      entry.art.hidden = false
+      entry.label.hidden = true
       entry.state = ''
       entry.button.title = 'Download with Draco'
       paint(entry)
@@ -600,6 +674,7 @@ function checkNavigation() {
   primeRetryTimer = null
   primingVideoId = null
   primeRetryDelay = 800
+  dismissedPageKey = null
 
   // The overlays go with the old page. Rebuilding them is what returns a button
   // to a reused video element, and `destroy` also cancels the retire timer of
@@ -617,7 +692,7 @@ function clearOverlays() {
 function scan() {
   checkNavigation()
 
-  if (!pageWantsButtons()) {
+  if (!dracoState.active || dismissedPageKey === pageKey || !pageWantsButtons()) {
     clearOverlays()
     return
   }
@@ -758,6 +833,10 @@ function updatePanel() {
   // Only in the top frame, and only when there is no video to hang a button on
   // - otherwise the page gets a button *and* a panel saying the same thing.
   if (!isTopFrame) return
+  if (!dracoState.active || dismissedPageKey === pageKey) {
+    removePanel()
+    return
+  }
   // The page has already been handed over; the retired button must not come
   // back as a panel saying the same thing.
   if (takenOver) return
@@ -782,6 +861,12 @@ function updatePanel() {
 /* ------------------------------------------------------------------ */
 
 chrome.runtime.onMessage.addListener((message) => {
+  if (message?.type === 'draco:state-changed') {
+    dracoState = message.state ?? dracoState
+    scan()
+    updatePanel()
+    return
+  }
   if (message?.type !== 'draco:media-count') return
   mediaCount = message.count ?? 0
 
@@ -818,13 +903,25 @@ function saveOffset() {
   }
 }
 
-function loadOffset() {
+function saveButtonWidth() {
   try {
-    return Promise.resolve(chrome.storage?.local?.get(OFFSET_KEY))
+    void chrome.storage?.local?.set({ [SIZE_KEY]: buttonWidth })
+  } catch {
+    // Remembering the button size is optional.
+  }
+}
+
+function loadPlacement() {
+  try {
+    return Promise.resolve(chrome.storage?.local?.get([OFFSET_KEY, SIZE_KEY]))
       .then((stored) => {
         const saved = stored?.[OFFSET_KEY]
         if (saved && Number.isFinite(saved.x) && Number.isFinite(saved.y)) {
           offset = { x: saved.x, y: saved.y }
+        }
+        const savedWidth = stored?.[SIZE_KEY]
+        if (Number.isFinite(savedWidth)) {
+          buttonWidth = Math.min(MAX_BUTTON_WIDTH, Math.max(MIN_BUTTON_WIDTH, savedWidth))
         }
       })
       .catch(() => {})
@@ -833,15 +930,33 @@ function loadOffset() {
   }
 }
 
-void loadOffset().then(schedule)
+void loadPlacement().then(() => {
+  for (const entry of overlays.values()) entry.art.style.width = buttonWidth + 'px'
+  schedule()
+})
 
-chrome.runtime
-  .sendMessage({ type: 'draco:list-media' })
-  .then((reply) => {
+async function refreshDracoState(force = false) {
+  const state = await chrome.runtime
+    .sendMessage({ type: 'draco:page-state', force })
+    .catch(() => null)
+  if (state) dracoState = state
+  scan()
+  updatePanel()
+}
+
+void Promise.all([
+  chrome.runtime.sendMessage({ type: 'draco:list-media' }).then((reply) => {
     mediaCount = reply?.media?.length ?? 0
-  })
-  .catch(() => {})
-  .finally(() => {
-    scan()
-    updatePanel()
-  })
+  }).catch(() => {}),
+  refreshDracoState(true)
+]).finally(() => {
+  scan()
+  updatePanel()
+})
+
+// A content script can outlive the app. A lightweight native-host probe keeps
+// stale controls from remaining visible after Draco exits and makes them appear
+// when it is started without requiring a page reload.
+setInterval(() => {
+  if (document.visibilityState === 'visible') void refreshDracoState(true)
+}, 5000)

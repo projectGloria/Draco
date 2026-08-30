@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react'
 import type { DownloadTask, Settings } from '@shared/types'
 import { formatBytes, formatEta, formatPercent, formatSpeed, hostOf, percent } from '../lib/format'
 import { applyAccent } from '../store/app'
-import FileIcon from './FileIcon'
+import { SiteIcon } from './FileIcon'
 import { CloseGlyph, FolderIcon, MinimizeGlyph, PauseIcon, PlayIcon } from './Icons'
 import { GhostButton, PrimaryButton } from './Dialog'
 import ProgressBar from './ProgressBar'
@@ -75,6 +75,21 @@ export default function ProgressWindow({ id }: { id: string }): React.ReactEleme
 
   const done = task?.status === 'done'
 
+  useEffect(() => {
+    if (!task) return
+    const progress = task.size && task.size > 0
+      ? `${Math.floor(Math.min(1, task.received / task.size) * 100)}%`
+      : null
+    const value = task.status === 'done'
+      ? 'Complete'
+      : task.status === 'paused'
+        ? progress ? `Paused · ${progress}` : 'Paused'
+        : task.status === 'error' || task.status === 'missing'
+          ? 'Failed'
+          : progress ?? 'Downloading'
+    document.title = `${value} · ${task.filename || 'Preparing download'} — Draco`
+  }, [task])
+
   return (
     <div className="app-bg h-full flex flex-col overflow-hidden border border-line-strong">
       <span
@@ -83,11 +98,7 @@ export default function ProgressWindow({ id }: { id: string }): React.ReactEleme
       />
 
       <header className="drag h-9 shrink-0 flex items-center gap-2.5 pl-3 pr-1 border-b border-line bg-white/[0.02]">
-        <FileIcon
-          name={task?.filename ?? ''}
-          className="w-4 h-4"
-          color={done ? 'var(--color-ok)' : 'var(--accent)'}
-        />
+        <SiteIcon url={task?.sourceUrl ?? task?.youtube?.pageUrl ?? task?.url} className="w-4 h-4" />
         <span className="font-display text-[12.5px] font-bold tracking-[0.3px]">
           {done ? 'Download complete' : 'Downloading'}
         </span>
@@ -134,7 +145,7 @@ function Body({ task, onClose }: { task: DownloadTask; onClose(): void }): React
 
   return (
     <>
-      <div className="flex-1 min-h-0 overflow-y-auto px-5 py-3.5 space-y-3">
+      <div className="flex-1 min-h-0 overflow-hidden px-5 py-3.5 space-y-3">
         <div className="min-w-0">
           <div className="text-[12.5px] font-semibold truncate" title={task.filename}>
             {task.filename || 'Waiting for a name…'}
@@ -163,7 +174,10 @@ function Body({ task, onClose }: { task: DownloadTask; onClose(): void }): React
         </div>
 
         {failed && task.error ? (
-          <div className="rounded-lg px-3 py-2 text-[11.5px] leading-relaxed border border-[rgba(248,113,113,0.25)] bg-[rgba(248,113,113,0.08)] text-err">
+          <div
+            className="max-h-11 overflow-hidden rounded-lg px-3 py-2 text-[11.5px] leading-relaxed border border-[rgba(248,113,113,0.25)] bg-[rgba(248,113,113,0.08)] text-err"
+            title={task.error}
+          >
             {task.error}
           </div>
         ) : (

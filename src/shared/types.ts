@@ -84,6 +84,8 @@ export interface DownloadTask {
   id: string
   /** What the user or the browser handed us. */
   url: string
+  /** Page/origin the download was discovered on, used for its persisted favicon. */
+  sourceUrl?: string
   /** The separate audio stream URL to fetch and mux, if any. */
   audioUrl?: string | null
   /** Stable source identity for expiring signed streams (currently YouTube). */
@@ -152,6 +154,7 @@ export interface TaskProgress {
 /** What Add URL and the browser handoff both submit. */
 export interface NewDownload {
   url: string
+  sourceUrl?: string
   audioUrl?: string | null
   /** Stable YouTube format identity used to refresh expiring signed URLs. */
   youtube?: { pageUrl: string; videoFormatId: string; audioFormatId?: string | null }

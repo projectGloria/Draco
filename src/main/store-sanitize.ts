@@ -18,6 +18,7 @@ import type {
 } from '@shared/types'
 import { sanitizeFilename, filenameFromUrl } from './engine/naming.ts'
 import { toFolderName } from './store-sanitize-path.ts'
+import { safeDownloadDirectory } from './destination-path.ts'
 
 export const COLUMN_IDS: ColumnId[] = [
   'name', 'size', 'progress', 'status', 'eta', 'speed', 'queue', 'added', 'description'
@@ -102,7 +103,7 @@ export function sanitizeSettings(input: unknown, base: Settings, defaultColumns:
     ...base,
     language: source.language === 'en' || source.language === 'tr' ? source.language : 'system',
     theme: source.theme === 'light' || source.theme === 'system' ? source.theme : 'dark',
-    downloadDir: typeof source.downloadDir === 'string' && source.downloadDir.trim() ? source.downloadDir.trim() : base.downloadDir,
+    downloadDir: safeDownloadDirectory(source.downloadDir, base.downloadDir),
     maxConcurrentTasks: clamp(source.maxConcurrentTasks, 1, 20, base.maxConcurrentTasks),
     maxConnectionsPerTask: clamp(source.maxConnectionsPerTask, 1, 16, base.maxConnectionsPerTask),
     minSplitSize: clamp(source.minSplitSize, 64 * 1024, 256 * 1024 * 1024, base.minSplitSize),
@@ -243,12 +244,13 @@ export function sanitizeTasks(input: unknown, defaultDir: string): DownloadTask[
     out.push({
       id,
       url,
+      sourceUrl: validUrl(raw.sourceUrl) ?? youtube?.pageUrl ?? url,
       audioUrl,
       ...(youtube ? { youtube } : {}),
       finalUrl,
       filename,
       filenameLocked: raw.filenameLocked === true,
-      dir: typeof raw.dir === 'string' && raw.dir.trim() ? raw.dir : defaultDir,
+      dir: safeDownloadDirectory(raw.dir, defaultDir),
       categoryId: typeof raw.categoryId === 'string' ? raw.categoryId : null,
       queueId: typeof raw.queueId === 'string' ? raw.queueId : null,
       queueRetryCount: clamp(raw.queueRetryCount, 0, 20, 0),

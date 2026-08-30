@@ -47,7 +47,8 @@ import {
   createSplashWindow,
   send,
   sendSplash,
-  showMainWindow
+  showMainWindow,
+  updateProgressWindow
 } from './windows.ts'
 
 import { DashRunner } from './hls/dash.ts'
@@ -155,6 +156,7 @@ async function main(): Promise<void> {
       // Broadcast rather than sent: each open progress window is watching the
       // same feed for the one task it is about.
       broadcast('tasks:changed', tasks)
+      for (const task of tasks) updateProgressWindow(task)
 
       let newlyDone = 0
       let hasActive = false
@@ -182,7 +184,13 @@ async function main(): Promise<void> {
         powerSaveBlockerId = null
       }
     },
-    onProgress: (updates) => broadcast('tasks:progress', updates),
+    onProgress: (updates) => {
+      broadcast('tasks:progress', updates)
+      for (const update of updates) {
+        const task = manager.get(update.id)
+        if (task) updateProgressWindow(task)
+      }
+    },
     onQuotaState: persistQuotaState,
     onProbed: (task) => refileTask(task),
     createHlsRunner: (task, context) =>

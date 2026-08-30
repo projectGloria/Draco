@@ -12,3 +12,10 @@ test('site category rules take precedence over extension categories', () => {
     { dir: 'C:\\Downloads\\Portal', categoryId: 'site' }
   )
 })
+
+test('uncategorised downloads normalize a bare drive to its root', () => {
+  assert.deepEqual(directoryFor('D:', [], 'file.bin', null, null), {
+    dir: 'D:\\',
+    categoryId: null
+  })
+})

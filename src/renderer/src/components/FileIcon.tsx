@@ -1,5 +1,5 @@
 import { useFileIcon, useSiteIcon } from '../lib/icons'
-import { DownloadIcon, VideoIcon } from './Icons'
+import { DownloadIcon } from './Icons'
 
 /**
  * The icon a file is shown with.
@@ -50,6 +50,6 @@ export function SiteIcon({
 }): React.ReactElement {
   const icon = useSiteIcon(url)
 
-  if (!icon) return <VideoIcon className={className} />
+  if (!icon) return <DownloadIcon className={className} />
   return <img src={icon} alt="" draggable={false} className={className + ' object-contain'} />
 }

@@ -19,6 +19,7 @@ import { getPaths } from './bootstrap/paths.ts'
 import { checkRegistered, ensureRegistered, readExtensionId } from './bridge/integration.ts'
 import type { PipeServer } from './bridge/pipe-server.ts'
 import { directoryFor } from './categories.ts'
+import { normalizeDownloadDirectory } from './destination-path.ts'
 import { createTask, filenameForKind, kindForUrl, validateUrl } from './engine/create.ts'
 import { sanitizeFilename, uniquePath } from './engine/naming.ts'
 import type { DownloadManager } from './engine/manager.ts'
@@ -42,7 +43,8 @@ import {
   broadcast,
   closeHandoffWindow,
   createProgressWindow,
-  getMainWindow
+  getMainWindow,
+  updateProgressWindow
 } from './windows.ts'
 
 const log = logger('ipc')
@@ -81,7 +83,7 @@ export function placeTask(input: NewDownload): DownloadTask {
 
   const filename = chosenName ?? ''
   const { dir, categoryId } = input.dir
-    ? { dir: input.dir, categoryId: input.categoryId ?? null }
+    ? { dir: normalizeDownloadDirectory(input.dir), categoryId: input.categoryId ?? null }
     : directoryFor(
         settings.downloadDir,
         categories,
@@ -93,6 +95,7 @@ export function placeTask(input: NewDownload): DownloadTask {
 
   return createTask({
     url,
+    sourceUrl: input.sourceUrl,
     dir,
     audioUrl: input.audioUrl,
     youtube: input.youtube ? { ...input.youtube } : undefined,
@@ -135,6 +138,7 @@ function announce(task: DownloadTask): void {
   if (!getSettings().showProgressWindow) return
   log.info(`progress window for ${task.filename || task.url}`)
   createProgressWindow(task.id)
+  updateProgressWindow(task)
 }
 
 export function registerIpc(ctx: AppContext): void {
@@ -282,6 +286,7 @@ export function registerIpc(ctx: AppContext): void {
     const task = placeTask({
       ...input,
       url: request.url,
+      sourceUrl: request.pageUrl ?? request.headers.referer,
       headers: request.headers
     })
 
@@ -322,6 +327,7 @@ export function registerIpc(ctx: AppContext): void {
 
     const task = placeTask({
       url: urls.url,
+      sourceUrl: candidate.pageUrl,
       audioUrl: urls.audioUrl,
       youtube: opts.youtube ? { pageUrl: candidate.pageUrl, videoFormatId: opts.youtube.videoFormatId, audioFormatId: opts.youtube.audioFormatId ?? null } : undefined,
       filename: opts.filename,
@@ -370,6 +376,9 @@ export function registerIpc(ctx: AppContext): void {
   handle('settings:get', () => getSettings())
 
   handle('settings:save', async (patch: Partial<Settings>) => {
+    if (patch.downloadDir !== undefined) {
+      patch = { ...patch, downloadDir: normalizeDownloadDirectory(patch.downloadDir) }
+    }
     const next = await saveSettings(patch)
     ctx.manager.applySettings()
     if (patch.watchClipboard !== undefined) {
@@ -385,7 +394,7 @@ export function registerIpc(ctx: AppContext): void {
       properties: ['openDirectory', 'createDirectory'],
       defaultPath: current || getSettings().downloadDir
     })
-    return result.canceled ? null : result.filePaths[0]
+    return result.canceled ? null : normalizeDownloadDirectory(result.filePaths[0])
   })
 
   handle('integration:get', async (): Promise<IntegrationStatus> => {
@@ -541,6 +550,7 @@ export function handoffToTask(
 ): DownloadTask {
   const task = placeTask({
     url: message.url,
+    sourceUrl: message.referer,
     filename: message.filename,
     headers: {
       referer: message.referer,

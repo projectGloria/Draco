@@ -10,6 +10,7 @@ import { TaskRunner } from './task.ts'
 import { logger } from '../log.ts'
 import { downloadSubtitles } from '../media/subtitles.ts'
 import { scanFile } from '../security/scanner.ts'
+import { normalizeDownloadDirectory } from '../destination-path.ts'
 
 const log = logger('manager')
 
@@ -107,6 +108,7 @@ export class DownloadManager {
   /** Adopts tasks restored from disk. Anything caught mid-flight comes back paused. */
   async load(tasks: DownloadTask[]): Promise<void> {
     for (const task of tasks) {
+      task.dir = normalizeDownloadDirectory(task.dir)
       if (task.status === 'downloading' || task.status === 'probing' || task.status === 'queued') {
         task.status = 'paused'
         task.speed = 0
@@ -169,6 +171,7 @@ export class DownloadManager {
   /* ---------------------------------------------------------------- */
 
   add(task: DownloadTask, autoStart = true): DownloadTask {
+    task.dir = normalizeDownloadDirectory(task.dir)
     log.info(`Added task ${task.id} (${task.filename}) - autoStart: ${autoStart}`)
     this.tasks.set(task.id, task)
     task.status = autoStart ? 'queued' : 'paused'

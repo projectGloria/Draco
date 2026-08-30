@@ -77,7 +77,11 @@ func main() {
 			return
 		}
 
-		if err := conn.write(msg); err != nil {
+		// Health/configuration checks are passive. Chrome starts this small host
+		// in order to perform them, but they must not in turn start the Electron
+		// app merely because a page containing a video was opened.
+		allowLaunch := shouldLaunchForMessage(msg)
+		if err := conn.write(msg, allowLaunch); err != nil {
 			logf("relay failed: %v", err)
 			if err := writeFrame(os.Stdout, errorReply(err)); err != nil {
 				logf("failed to write relay error to stdout: %v", err)
@@ -168,6 +172,25 @@ func errorReply(err error) []byte {
 	return payload
 }
 
+func messageType(body []byte) string {
+	var envelope struct {
+		Type string `json:"type"`
+	}
+	if json.Unmarshal(body, &envelope) != nil {
+		return ""
+	}
+	return envelope.Type
+}
+
+func shouldLaunchForMessage(body []byte) bool {
+	switch messageType(body) {
+	case "download", "media", "youtube":
+		return true
+	default:
+		return false
+	}
+}
+
 /* ------------------------------------------------------------------ */
 /* The pipe to Draco                                                   */
 /* ------------------------------------------------------------------ */
@@ -186,7 +209,7 @@ func (c *connection) close() {
 	}
 }
 
-func (c *connection) getPipe() (*os.File, error) {
+func (c *connection) getPipe(allowLaunch bool) (*os.File, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -194,14 +217,20 @@ func (c *connection) getPipe() (*os.File, error) {
 		return c.pipe, nil
 	}
 
-	if err := c.dialOrLaunchLocked(); err != nil {
+	if err := c.dialLocked(); err == nil {
+		return c.pipe, nil
+	}
+	if !allowLaunch {
+		return nil, errors.New("Draco is not running")
+	}
+	if err := c.launchAndDialLocked(); err != nil {
 		return nil, err
 	}
 	return c.pipe, nil
 }
 
-func (c *connection) write(msg []byte) error {
-	p, err := c.getPipe()
+func (c *connection) write(msg []byte, allowLaunch bool) error {
+	p, err := c.getPipe(allowLaunch)
 	if err != nil {
 		return err
 	}
@@ -214,7 +243,7 @@ func (c *connection) write(msg []byte) error {
 }
 
 func (c *connection) read() ([]byte, error) {
-	p, err := c.getPipe()
+	p, err := c.getPipe(false)
 	if err != nil {
 		return nil, err
 	}
@@ -236,12 +265,8 @@ func (c *connection) dialLocked() error {
 	return nil
 }
 
-// dialOrLaunch retries the pipe, starting Draco if it does not answer.
-func (c *connection) dialOrLaunchLocked() error {
-	if err := c.dialLocked(); err == nil {
-		return nil
-	}
-
+// launchAndDial retries the pipe after starting Draco.
+func (c *connection) launchAndDialLocked() error {
 	if err := launchApp(); err != nil {
 		logf("could not launch the app: %v", err)
 		// Keep retrying regardless: the app may simply be mid-startup, in which

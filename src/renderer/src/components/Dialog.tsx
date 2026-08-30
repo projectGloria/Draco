@@ -12,6 +12,7 @@ export default function Dialog({
   subtitle,
   width = 520,
   onClose,
+  showClose = true,
   footer,
   children
 }: {
@@ -19,6 +20,7 @@ export default function Dialog({
   subtitle?: string
   width?: number
   onClose(): void
+  showClose?: boolean
   footer?: React.ReactNode
   children: React.ReactNode
 }): React.ReactElement {
@@ -70,14 +72,16 @@ export default function Dialog({
               </p>
             )}
           </div>
-          <button
-            onClick={onClose}
-            aria-label="Close"
-            className="w-7 h-7 -mr-1 rounded-lg grid place-items-center text-faint
-                       hover:bg-white/[0.07] hover:text-ink transition-colors shrink-0"
-          >
-            <CloseGlyph />
-          </button>
+          {showClose && (
+            <button
+              onClick={onClose}
+              aria-label="Close"
+              className="w-7 h-7 -mr-1 rounded-lg grid place-items-center text-faint
+                         hover:bg-white/[0.07] hover:text-ink transition-colors shrink-0"
+            >
+              <CloseGlyph />
+            </button>
+          )}
         </div>
 
         <div className="px-5 py-4 overflow-y-auto min-h-0">{children}</div>

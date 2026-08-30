@@ -24,6 +24,131 @@ let config = {
 let configFetchedAt = 0
 const CONFIG_TTL_MS = 60_000
 
+const PREFS_KEY = 'dracoPrefs'
+const APP_STATUS_TTL_MS = 4_000
+let prefs = { paused: false, excludedChannelIds: [], excludedVideoIds: [] }
+let appStatus = { running: false, version: null, checkedAt: 0 }
+
+const prefsReady = chrome.storage.local.get(PREFS_KEY).then((stored) => {
+  const saved = stored[PREFS_KEY] || {}
+  prefs = {
+    paused: saved.paused === true,
+    excludedChannelIds: Array.isArray(saved.excludedChannelIds)
+      ? [...new Set(saved.excludedChannelIds.filter((id) => typeof id === 'string'))].slice(0, 1000)
+      : [],
+    excludedVideoIds: Array.isArray(saved.excludedVideoIds)
+      ? [...new Set(saved.excludedVideoIds.filter((id) => typeof id === 'string'))].slice(0, 5000)
+      : []
+  }
+})
+
+async function savePrefs(next) {
+  await prefsReady
+  prefs = next
+  await chrome.storage.local.set({ [PREFS_KEY]: prefs })
+  await refreshAllTabs()
+}
+
+async function probeApp(force = false) {
+  if (!force && Date.now() - appStatus.checkedAt < APP_STATUS_TTL_MS) return appStatus
+  const reply = await callHost({ type: 'ping' })
+  const next = {
+    running: reply?.ok === true,
+    version: reply?.ok && typeof reply.version === 'string' ? reply.version : null,
+    checkedAt: Date.now()
+  }
+  const changed = next.running !== appStatus.running || next.version !== appStatus.version
+  appStatus = next
+  if (changed) void refreshAllTabs()
+  return appStatus
+}
+
+async function pageIdentity(tab) {
+  if (!tab?.url) return { videoId: null, channelId: null }
+  const urlVideoId = youtubeVideoId(tab.url)
+  if (!urlVideoId || typeof tab.id !== 'number') return { videoId: null, channelId: null }
+
+  let channelId = null
+  try {
+    const [result] = await chrome.scripting.executeScript({
+      target: { tabId: tab.id },
+      world: 'MAIN',
+      func: () => {
+        try {
+          const player = document.querySelector('#movie_player')
+          const live = player && typeof player.getPlayerResponse === 'function'
+            ? player.getPlayerResponse()
+            : window.ytInitialPlayerResponse
+          return live?.videoDetails?.channelId || null
+        } catch {
+          return null
+        }
+      }
+    })
+    channelId = typeof result?.result === 'string' ? result.result : null
+  } catch {}
+
+  return { videoId: `youtube:${urlVideoId}`, channelId: channelId ? `youtube:${channelId}` : null }
+}
+
+async function stateForTab(tab, forceProbe = false) {
+  await prefsReady
+  const [status, identity] = await Promise.all([probeApp(forceProbe), pageIdentity(tab)])
+  const excludedVideo = Boolean(identity.videoId && prefs.excludedVideoIds.includes(identity.videoId))
+  const excludedChannel = Boolean(identity.channelId && prefs.excludedChannelIds.includes(identity.channelId))
+  const excluded = excludedVideo || excludedChannel
+  return {
+    running: status.running,
+    version: status.version,
+    paused: prefs.paused,
+    active: status.running && !prefs.paused && !excluded,
+    excluded,
+    excludedVideo,
+    excludedChannel,
+    videoId: identity.videoId,
+    channelId: identity.channelId
+  }
+}
+
+async function setTabIndicator(tab) {
+  if (typeof tab?.id !== 'number') return
+  const state = await stateForTab(tab)
+  const status = state.running && !state.paused ? 'active' : 'inactive'
+  const iconState = state.excluded ? `${status}-excluded` : status
+  const iconPath = Object.fromEntries(
+    [16, 32, 48, 128].map((size) => [size, `status-icons/${iconState}-${size}.png`])
+  )
+  const title = state.excluded
+    ? 'Draco — excluded on this page'
+    : state.paused
+      ? 'Draco — paused'
+      : state.running
+        ? 'Draco — active'
+        : 'Draco — app offline'
+  await Promise.all([
+    chrome.action.setBadgeText({ tabId: tab.id, text: '' }),
+    chrome.action.setIcon({ tabId: tab.id, path: iconPath }),
+    chrome.action.setTitle({ tabId: tab.id, title })
+  ]).catch(() => {})
+  chrome.tabs.sendMessage(tab.id, { type: 'draco:state-changed', state }).catch(() => {})
+}
+
+async function refreshAllTabs() {
+  const tabs = await chrome.tabs.query({}).catch(() => [])
+  await Promise.all(tabs.map((tab) => setTabIndicator(tab)))
+}
+
+chrome.storage.onChanged.addListener((changes, area) => {
+  if (area !== 'local' || !changes[PREFS_KEY]?.newValue) return
+  const saved = changes[PREFS_KEY].newValue
+  prefs = {
+    paused: saved.paused === true,
+    excludedChannelIds: Array.isArray(saved.excludedChannelIds) ? saved.excludedChannelIds : [],
+    excludedVideoIds: Array.isArray(saved.excludedVideoIds) ? saved.excludedVideoIds : []
+  }
+  void refreshAllTabs()
+})
+
 /** Media seen per tab, so the badge and popup can show what is grabbable. */
 async function getMedia(tabId) {
   if (tabId == null || tabId < 0) return []
@@ -195,12 +320,15 @@ chrome.downloads.onCreated.addListener(async (item) => {
   if (item.finalUrl && await checkAndConsumePassThrough(item.finalUrl)) return
   if (item.url && await checkAndConsumePassThrough(item.url)) return
 
+  const sourceTab = item.tabId >= 0 ? await chrome.tabs.get(item.tabId).catch(() => null) : null
+  if (!(await stateForTab(sourceTab)).active) return
+
   const url = item.finalUrl || item.url
   const rules = await refreshConfig()
   if (!shouldTakeOver(item, rules)) return
   const [cookie, tab] = await Promise.all([
     cookieHeaderFor(url),
-    item.tabId >= 0 ? chrome.tabs.get(item.tabId).catch(() => null) : Promise.resolve(null)
+    Promise.resolve(sourceTab)
   ])
 
   try {
@@ -284,9 +412,14 @@ function youtubeVideoId(url) {
 const youtubePrimeRequests = new Map()
 
 /** Warms links from tab navigation even if the content script has not loaded yet. */
-function primeYouTubeUrl(url) {
+async function primeYouTubeUrl(url) {
   const videoId = youtubeVideoId(url)
-  if (!videoId) return Promise.resolve({ ok: false, primed: false })
+  if (!videoId) return { ok: false, primed: false }
+  await prefsReady
+  if (prefs.paused || prefs.excludedVideoIds.includes(`youtube:${videoId}`)) {
+    return { ok: false, primed: false, reason: 'disabled' }
+  }
+  if (!(await probeApp()).running) return { ok: false, primed: false, reason: 'offline' }
 
   const active = youtubePrimeRequests.get(videoId)
   if (active) return active
@@ -473,6 +606,10 @@ async function sendUrls(urls, referer) {
 }
 
 chrome.contextMenus.onClicked.addListener(async (info, tab) => {
+  if (!(await stateForTab(tab, true)).active) {
+    notify('Draco is offline, paused, or excluded on this page')
+    return
+  }
   const referer = tab?.url
 
   if (info.menuItemId === 'draco-link' && info.linkUrl) {
@@ -547,8 +684,6 @@ async function remember(tabId, mediaUrl, kind) {
     const bounded = list.slice(-40)
     await setMedia(tabId, bounded)
 
-    chrome.action.setBadgeText({ tabId, text: String(bounded.length) })
-    chrome.action.setBadgeBackgroundColor({ tabId, color: '#38bdf8' })
     chrome.tabs.sendMessage(tabId, { type: 'draco:media-count', count: bounded.length }).catch(() => {})
   }).catch(() => {})
   tabLocks.set(tabId, p)
@@ -614,14 +749,16 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
 
   const url = changeInfo.url || tab.url
   if (url && youtubeVideoId(url)) void primeYouTubeUrl(url)
+  void setTabIndicator(tab)
+})
+
+chrome.tabs.onActivated.addListener(({ tabId }) => {
+  void chrome.tabs.get(tabId).then((tab) => setTabIndicator(tab)).catch(() => {})
 })
 
 // Reloading the extension should prepare a YouTube tab that is already open;
 // requiring another refresh here is both surprising and easy to miss in tests.
-void chrome.tabs
-  .query({})
-  .then((tabs) => Promise.all(tabs.map((tab) => (tab.url ? primeYouTubeUrl(tab.url) : null))))
-  .catch(() => {})
+void prefsReady.then(() => refreshAllTabs()).catch(() => {})
 
 /* ------------------------------------------------------------------ */
 /* Messages from the popup and content script                          */
@@ -629,7 +766,45 @@ void chrome.tabs
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   ;(async () => {
+    const messageTab = sender.tab ?? (
+      typeof message?.tabId === 'number'
+        ? await chrome.tabs.get(message.tabId).catch(() => null)
+        : null
+    )
+
     switch (message?.type) {
+      case 'draco:page-state': {
+        const state = await stateForTab(messageTab, message.force === true)
+        if (messageTab) void setTabIndicator(messageTab)
+        sendResponse(state)
+        return
+      }
+
+      case 'draco:set-paused': {
+        await prefsReady
+        await savePrefs({ ...prefs, paused: message.paused === true })
+        sendResponse(await stateForTab(messageTab, true))
+        return
+      }
+
+      case 'draco:set-exclusion': {
+        await prefsReady
+        const state = await stateForTab(messageTab)
+        const kind = message.kind === 'channel' ? 'channel' : 'video'
+        const id = kind === 'channel' ? state.channelId : state.videoId
+        if (!id) {
+          sendResponse({ ok: false, error: `No ${kind} identity is available on this page` })
+          return
+        }
+        const key = kind === 'channel' ? 'excludedChannelIds' : 'excludedVideoIds'
+        const values = new Set(prefs[key])
+        if (message.excluded === false) values.delete(id)
+        else values.add(id)
+        await savePrefs({ ...prefs, [key]: [...values] })
+        sendResponse({ ok: true, state: await stateForTab(messageTab) })
+        return
+      }
+
       case 'draco:list-media': {
         const tabId = message.tabId ?? sender.tab?.id
         const list = await getMedia(tabId)
@@ -639,6 +814,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
       case 'draco:resolve-youtube': {
         const tab = sender.tab
+        if (!(await stateForTab(tab)).active) {
+          sendResponse({ ok: false, error: 'Draco is offline, paused, or excluded on this page' })
+          return
+        }
         if (!tab?.url) {
           sendResponse({ ok: false, error: 'No active YouTube page' })
           return
@@ -663,6 +842,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
       case 'draco:prime-youtube': {
         const tab = sender.tab
+        if (!(await stateForTab(tab)).active) {
+          sendResponse({ ok: false, primed: false, reason: 'disabled' })
+          return
+        }
         if (!tab?.url || !isYouTubePage(tab.url)) {
           sendResponse({ ok: false, primed: false })
           return
@@ -675,6 +858,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
       case 'draco:grab-best': {
         const tab = sender.tab
+        if (!(await stateForTab(tab)).active) {
+          sendResponse({ ok: false, error: 'Draco is offline, paused, or excluded on this page' })
+          return
+        }
         const list = await getMedia(tab?.id)
 
         // The page's own <video src> is the most reliable thing there is when
@@ -718,6 +905,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
       case 'draco:send-media': {
         const tab = sender.tab ?? (message.tabId ? await chrome.tabs.get(message.tabId) : null)
+        if (!(await stateForTab(tab)).active) {
+          sendResponse({ ok: false, error: 'Draco is offline, paused, or excluded on this page' })
+          return
+        }
         const cookie = await cookieHeaderFor(message.mediaUrl)
         const reply = await callHost({
           type: 'media',
@@ -734,6 +925,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       }
 
       case 'draco:link-click': {
+        if (!(await stateForTab(sender.tab)).active) {
+          await addPassThrough(message.url)
+          sendResponse({ taken: false })
+          return
+        }
         const rules = await refreshConfig()
         const url = message.url
 
@@ -773,14 +969,18 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       }
 
       case 'draco:send-url': {
+        if (!(await stateForTab(messageTab)).active) {
+          sendResponse({ ok: false, error: 'Draco is unavailable' })
+          return
+        }
         await sendUrls([message.url], message.referer)
         sendResponse({ ok: true })
         return
       }
 
       case 'draco:status': {
-        const reply = await callHost({ type: 'ping' })
-        sendResponse(reply)
+        const state = await stateForTab(messageTab, true)
+        sendResponse({ ok: state.running, ...state })
         return
       }
 
@@ -797,7 +997,7 @@ function notify(message) {
   chrome.notifications
     ?.create({
       type: 'basic',
-      iconUrl: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==',
+      iconUrl: chrome.runtime.getURL('icon.png'),
       title: 'Draco',
       message
     })

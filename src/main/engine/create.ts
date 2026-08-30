@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import type { DownloadTask, NewDownload, RequestHeaders, SubtitleTrack, TaskKind } from '../../shared/types.ts'
 import { filenameFromUrl, sanitizeFilename } from './naming.ts'
+import { normalizeDownloadDirectory } from '../destination-path.ts'
 
 /**
  * Builds a task record. The filename here is only a placeholder - the probe
@@ -8,6 +9,7 @@ import { filenameFromUrl, sanitizeFilename } from './naming.ts'
  */
 export function createTask(input: {
   url: string
+  sourceUrl?: string
   dir: string
   filename?: string
   categoryId?: string | null
@@ -29,6 +31,7 @@ export function createTask(input: {
   return {
     id: randomUUID(),
     url: input.url,
+    sourceUrl: input.sourceUrl,
     audioUrl: input.audioUrl ?? null,
     youtube: input.youtube ? { ...input.youtube, role: 'video' } : undefined,
     finalUrl: input.url,
@@ -36,7 +39,7 @@ export function createTask(input: {
     // Only a name the caller chose is authoritative; one guessed from the URL
     // should give way to whatever the server actually calls the file.
     filenameLocked: Boolean(input.filename),
-    dir: input.dir,
+    dir: normalizeDownloadDirectory(input.dir),
     categoryId: input.categoryId ?? null,
     queueId: input.queueId ?? null,
     queueRetryCount: 0,
@@ -131,6 +134,6 @@ export function normalizeNewDownload(input: NewDownload, defaultDir: string): Ne
   return {
     ...input,
     url: validateUrl(input.url),
-    dir: input.dir || defaultDir
+    dir: normalizeDownloadDirectory(input.dir || defaultDir)
   }
 }

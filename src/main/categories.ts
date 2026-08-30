@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto'
 import { join } from 'node:path'
 import type { Category } from '@shared/types'
 import { extensionOf } from './engine/naming.ts'
+import { normalizeDownloadDirectory } from './destination-path.ts'
 
 /**
  * IDM's category model: a finished file is filed into a subfolder chosen by its
@@ -103,6 +104,7 @@ export function directoryFor(
   explicitCategoryId: string | null,
   sourceUrl?: string
 ): { dir: string; categoryId: string | null } {
+  downloadDir = normalizeDownloadDirectory(downloadDir)
   if (explicitCategoryId) {
     const explicit = categories.find((c) => c.id === explicitCategoryId)
     if (explicit) return { dir: join(downloadDir, explicit.folder), categoryId: explicit.id }

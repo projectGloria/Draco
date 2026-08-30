@@ -7,9 +7,10 @@ const target = join(root, 'extension-firefox')
 
 await rm(target, { recursive: true, force: true })
 await mkdir(target, { recursive: true })
-for (const name of ['background.js', 'content.js', 'popup.html', 'popup.js', 'icon.png']) {
+for (const name of ['background.js', 'content.js', 'popup.html', 'popup.js', 'icon.png', 'downloadButton.png']) {
   await cp(join(source, name), join(target, name))
 }
+await cp(join(source, 'status-icons'), join(target, 'status-icons'), { recursive: true })
 
 const manifest = JSON.parse(await readFile(join(source, 'manifest.json'), 'utf8'))
 delete manifest.key

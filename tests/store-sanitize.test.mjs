@@ -16,7 +16,7 @@ function defaults() {
 
 test('persistence sanitizers survive hostile and malformed records', () => {
   const settings = sanitizeSettings({ downloadDir: 42, maxConcurrentTasks: 999, accent: 'red', sortColumn: 'evil' }, defaults(), () => defaults().columns)
-  assert.equal(settings.downloadDir, 'C:/Downloads')
+  assert.equal(settings.downloadDir, 'C:\\Downloads')
   assert.equal(settings.maxConcurrentTasks, 20)
   assert.equal(settings.accent, '#38bdf8')
   assert.equal(settings.sortColumn, 'added')

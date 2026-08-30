@@ -16,13 +16,20 @@ export interface TrayHandlers {
 }
 
 function icon(): Electron.NativeImage {
-  const packaged = join(process.resourcesPath, 'icon.ico')
-  const dev = join(app.getAppPath(), 'resources', 'icon.ico')
-  const path = existsSync(packaged) ? packaged : dev
+  const candidates = [
+    join(process.resourcesPath, 'icon.ico'),
+    join(app.getAppPath(), 'resources', 'icon.ico'),
+    join(process.resourcesPath, 'icon.png'),
+    join(app.getAppPath(), 'resources', 'icon.png')
+  ]
 
-  // An empty image still yields a working tray entry, which is better than
-  // throwing during startup because an icon has not been generated yet.
-  return existsSync(path) ? nativeImage.createFromPath(path) : nativeImage.createEmpty()
+  for (const path of candidates) {
+    if (!existsSync(path)) continue
+    const image = nativeImage.createFromPath(path)
+    if (!image.isEmpty()) return image
+  }
+
+  return nativeImage.createEmpty()
 }
 
 export function createTray(handlers: TrayHandlers): Tray {

@@ -14,6 +14,8 @@ extraResources:
   # The tray reads this at runtime, so it has to sit outside the asar.
   - from: resources/icon.ico
     to: icon.ico
+  - from: resources/icon.png
+    to: icon.png
   # Chrome launches the host itself, so it must be a real file on disk that the
   # native-messaging manifest can point at - not an asar entry.
   - from: host/draco-host.exe
@@ -31,6 +33,7 @@ extraResources:
       - '!key.pem'
 
 win:
+  icon: resources/icon.ico
   target:
     - target: nsis
       arch: [x64]

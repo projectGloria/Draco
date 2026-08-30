@@ -23,6 +23,7 @@ export default function App(): React.ReactElement {
   const settings = useApp((s) => s.settings)
   const sidebar = useApp((s) => s.sidebar)
   const selection = useApp((s) => s.selection)
+  const setSelection = useApp((s) => s.setSelection)
   const pending = useApp((s) => s.pending)
 
   const [search, setSearch] = useState('')
@@ -82,6 +83,7 @@ export default function App(): React.ReactElement {
   const requestDelete = useCallback((ids: string[]): void => {
     const targets = ids.map((id) => tasks.find((t) => t.id === id)).filter((t) => t != null)
     if (targets.length === 0) return
+    setSelection([])
 
     const finished = targets.filter((t) => t?.status === 'done')
 
@@ -109,7 +111,7 @@ export default function App(): React.ReactElement {
       checkbox: finished.length > 0 ? 'Also delete the downloaded files' : undefined,
       onConfirm: remove
     })
-  }, [tasks, settings.confirmDelete])
+  }, [tasks, settings.confirmDelete, setSelection])
 
   const actions: ToolbarActions = useMemo(() => ({
     onAdd: () => setAddOpen(true),

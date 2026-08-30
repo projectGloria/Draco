@@ -12,7 +12,7 @@ import { formatBytes, hostOf } from '../lib/format'
 import { applyAccent } from '../store/app'
 import { BrandMark, CloseGlyph, FolderIcon } from './Icons'
 import { GhostButton, PrimaryButton } from './Dialog'
-import FileIcon, { SiteIcon } from './FileIcon'
+import { SiteIcon } from './FileIcon'
 
 /**
  * IDM's download dialog, as its own window.
@@ -172,7 +172,7 @@ function FileBody({
         <Source
           url={request.url}
           title={request.pageTitle}
-          icon={<FileIcon name={filename} className="w-4 h-4" color="var(--accent)" />}
+          icon={<SiteIcon url={request.pageUrl ?? request.url} className="w-4 h-4" />}
         />
 
         <Field label="File name">
