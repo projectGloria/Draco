@@ -6,6 +6,7 @@ import { AlertIcon } from './Icons'
 
 const WORDS: Record<PendingAction['action'], string> = {
   none: '',
+  run: 'Draco will run the configured program',
   exit: 'Draco will quit',
   sleep: 'This computer will sleep',
   hibernate: 'This computer will hibernate',

@@ -7,3 +7,4 @@ release/
 # must never be committed - anyone holding it can impersonate the extension.
 extension/key.pem
 host/draco-host.exe
+extension-firefox/

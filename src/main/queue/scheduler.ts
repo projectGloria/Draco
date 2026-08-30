@@ -80,16 +80,27 @@ export class Scheduler {
       id: typeof queue.id === 'string' && queue.id ? queue.id.slice(0, 128) : randomUUID(),
       name: typeof queue.name === 'string' ? queue.name.trim().slice(0, 60) || 'Queue' : 'Queue',
       maxConcurrent: Math.min(20, Math.max(1, Math.round(Number(queue.maxConcurrent)) || 1)),
+      retryLimit: Math.min(20, Math.max(0, Math.round(Number(queue.retryLimit)) || 0)),
+      retryDelaySeconds: Math.min(86_400, Math.max(0, Math.round(Number(queue.retryDelaySeconds)) || 0)),
       taskIds: Array.isArray(queue.taskIds) ? [...new Set(queue.taskIds.filter((id): id is string => typeof id === 'string').map((id) => id.slice(0, 256)))] : [],
       days: Array.isArray(queue.days) ? [...new Set(queue.days.filter((d) => Number.isInteger(d) && d >= 0 && d <= 6))] : [],
       mode: queue.mode === 'onetime' || queue.mode === 'periodic' ? queue.mode : 'manual',
       startTime: normalizeTime(queue.startTime),
       stopTime: normalizeTime(queue.stopTime),
-      onComplete: queue.onComplete === 'exit' || queue.onComplete === 'sleep' || queue.onComplete === 'hibernate' || queue.onComplete === 'shutdown'
+      onComplete: queue.onComplete === 'run' || queue.onComplete === 'exit' || queue.onComplete === 'sleep' || queue.onComplete === 'hibernate' || queue.onComplete === 'shutdown'
         ? queue.onComplete
         : 'none',
+      completionProgram: typeof queue.completionProgram === 'string' && queue.completionProgram.trim()
+        ? queue.completionProgram.trim().slice(0, 1000)
+        : null,
+      completionArgs: Array.isArray(queue.completionArgs)
+        ? queue.completionArgs.filter((arg): arg is string => typeof arg === 'string').slice(0, 20).map((arg) => arg.slice(0, 500))
+        : [],
       running: queue.running === true,
-      oneTimeCompleted: queue.oneTimeCompleted === true
+      oneTimeCompleted: queue.oneTimeCompleted === true,
+      lastResult: queue.lastResult === 'completed' || queue.lastResult === 'completed-with-errors'
+        ? queue.lastResult
+        : 'idle'
     }
 
     const index = this.queues.findIndex((q) => q.id === normalized.id)
@@ -116,11 +127,27 @@ export class Scheduler {
     await this.persist()
   }
 
+  /** Keeps queue ordering in step when a task is moved from the main table. */
+  async syncTaskQueue(taskId: string, previousQueueId: string | null, nextQueueId: string | null): Promise<void> {
+    if (nextQueueId && !this.queues.some((queue) => queue.id === nextQueueId)) {
+      throw new Error('That queue no longer exists')
+    }
+    for (const queue of this.queues) {
+      if (queue.id === previousQueueId || queue.id !== nextQueueId) {
+        queue.taskIds = queue.taskIds.filter((id) => id !== taskId)
+      }
+    }
+    const target = this.queues.find((queue) => queue.id === nextQueueId)
+    if (target && !target.taskIds.includes(taskId)) target.taskIds.push(taskId)
+    await this.persist()
+  }
+
   async startQueue(id: string): Promise<void> {
     const queue = this.queues.find((q) => q.id === id)
     if (!queue) return
     if (this.pending?.queueId === id) this.cancelPending()
     queue.running = true
+    queue.lastResult = 'idle'
     // An explicit Start means "run this once more" for one-time queues.
     if (queue.mode === 'onetime') queue.oneTimeCompleted = false
     await this.persist()
@@ -148,6 +175,8 @@ export class Scheduler {
   /* ---------------------------------------------------------------- */
 
   private tick(): void {
+    const before = JSON.stringify(this.queues)
+    this.synchronizeMembership()
     const now = new Date()
 
     for (const queue of this.queues) {
@@ -166,7 +195,8 @@ export class Scheduler {
       if (queue.running && !(queue.mode === 'onetime' && queue.oneTimeCompleted)) this.feed(queue)
     }
 
-    this.deps.onQueues(this.queues)
+    if (JSON.stringify(this.queues) !== before) void this.persist()
+    else this.deps.onQueues(this.queues)
   }
 
   /** Promotes this queue's tasks in order, up to its own concurrency limit. */
@@ -181,28 +211,46 @@ export class Scheduler {
 
     let room = queue.maxConcurrent - active
     const startable: string[] = []
+    let retryMetadataChanged = false
 
+    const now = Date.now()
     for (const task of tasks) {
       if (room <= 0) break
-      if (task.status === 'paused' || task.status === 'error') {
+      if (task.status === 'paused') {
         startable.push(task.id)
         room--
+      } else if (task.status === 'error' && task.queueRetryCount < queue.retryLimit) {
+        if (task.nextQueueAttemptAt === null) {
+          task.nextQueueAttemptAt = now + queue.retryDelaySeconds * 1000
+          retryMetadataChanged = true
+        }
+        if (now >= task.nextQueueAttemptAt) {
+          task.queueRetryCount++
+          task.nextQueueAttemptAt = null
+          retryMetadataChanged = true
+          startable.push(task.id)
+          room--
+        }
       }
     }
 
-    if (startable.length > 0) this.deps.manager.start(startable)
+    if (retryMetadataChanged) this.deps.manager.notifyTaskMetadataChanged()
+    if (startable.length > 0) this.deps.manager.start(startable, true)
 
     // Drained: everything in the queue reached a terminal state. A pending
     // action is cancelled automatically when the queue is no longer drained,
     // e.g. when the user resumes/adds work during the grace period.
-    const finished = tasks.length > 0 && tasks.every((t) => t.status === 'done')
+    const exhausted = (task: (typeof tasks)[number]): boolean =>
+      task.status === 'error' && task.queueRetryCount >= queue.retryLimit
+    const finished = tasks.length > 0 && tasks.every((t) => t.status === 'done' || exhausted(t))
     if (!finished && existingPending) this.cancelPending()
     if (finished) {
       // A one-time queue is consumed once it drains, even when no completion
       // action is configured. Otherwise it would re-enter its time window forever.
       if (queue.mode === 'onetime') queue.oneTimeCompleted = true
       queue.running = false
-      if (queue.onComplete !== 'none') this.scheduleAction(queue.id, queue.onComplete)
+      queue.lastResult = tasks.some(exhausted) ? 'completed-with-errors' : 'completed'
+      if (queue.onComplete !== 'none') this.scheduleAction(queue)
     }
   }
 
@@ -221,6 +269,17 @@ export class Scheduler {
     return ordered
   }
 
+  private synchronizeMembership(): void {
+    const tasks = this.deps.manager.list()
+    const ids = new Set(tasks.map((task) => task.id))
+    for (const queue of this.queues) {
+      queue.taskIds = queue.taskIds.filter((id) => ids.has(id) && tasks.find((task) => task.id === id)?.queueId === queue.id)
+      for (const task of tasks) {
+        if (task.queueId === queue.id && !queue.taskIds.includes(task.id)) queue.taskIds.push(task.id)
+      }
+    }
+  }
+
   private inWindow(queue: Queue, now: Date): boolean {
     return isInQueueWindow(queue, now)
   }
@@ -229,19 +288,19 @@ export class Scheduler {
   /* Completion actions                                                */
   /* ---------------------------------------------------------------- */
 
-  private scheduleAction(queueId: string, action: QueueCompletionAction): void {
+  private scheduleAction(queue: Queue): void {
     if (this.pending) return
 
-    this.pending = { action, queueId, firesAt: Date.now() + ACTION_DELAY_MS }
+    this.pending = { action: queue.onComplete, queueId: queue.id, firesAt: Date.now() + ACTION_DELAY_MS }
     this.deps.onPending(this.pending)
-    log.info(`scheduled ${action} in ${ACTION_DELAY_MS / 1000}s`)
+    log.info(`scheduled ${queue.onComplete} in ${ACTION_DELAY_MS / 1000}s`)
 
     this.pendingTimer = setTimeout(() => {
       this.pendingTimer = null
       const fired = this.pending
       this.pending = null
       this.deps.onPending(null)
-      if (fired) runAction(fired.action, this.deps.onExitRequested)
+      if (fired) runAction(fired.action, this.deps.onExitRequested, queue.completionProgram, queue.completionArgs)
     }, ACTION_DELAY_MS)
   }
 
@@ -256,8 +315,23 @@ export class Scheduler {
  * command string here would put a queue name one quote away from arbitrary
  * execution.
  */
-function runAction(action: QueueCompletionAction, onExitRequested: () => void): void {
+function runAction(
+  action: QueueCompletionAction,
+  onExitRequested: () => void,
+  completionProgram: string | null,
+  completionArgs: string[]
+): void {
   switch (action) {
+    case 'run':
+      if (completionProgram) {
+        spawn(completionProgram, completionArgs, {
+          shell: false,
+          detached: true,
+          windowsHide: true,
+          stdio: 'ignore'
+        }).unref()
+      }
+      break
     case 'shutdown':
       spawn('shutdown', ['/s', '/t', '0'], { shell: false, detached: true }).unref()
       break

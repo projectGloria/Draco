@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto'
-import type { DownloadTask, NewDownload, RequestHeaders, TaskKind } from '../../shared/types.ts'
+import type { DownloadTask, NewDownload, RequestHeaders, SubtitleTrack, TaskKind } from '../../shared/types.ts'
 import { filenameFromUrl, sanitizeFilename } from './naming.ts'
 
 /**
@@ -13,6 +13,7 @@ export function createTask(input: {
   categoryId?: string | null
   queueId?: string | null
   headers?: RequestHeaders
+  subtitles?: SubtitleTrack[]
   description?: string
   kind?: TaskKind
   audioUrl?: string | null
@@ -38,11 +39,14 @@ export function createTask(input: {
     dir: input.dir,
     categoryId: input.categoryId ?? null,
     queueId: input.queueId ?? null,
+    queueRetryCount: 0,
+    nextQueueAttemptAt: null,
     kind,
     size: null,
     received: 0,
     status: 'queued',
     resumable: false,
+    singleConnectionFallback: false,
     segments: [],
     connections: 1,
     speed: 0,
@@ -55,6 +59,7 @@ export function createTask(input: {
     etag: null,
     lastModified: null,
     headers: input.headers ?? {},
+    subtitles: input.subtitles?.map((track) => ({ ...track })) ?? [],
     mimeType: null,
     description: input.description ?? ''
   }
@@ -94,8 +99,13 @@ export function kindForUrl(url: string, contentType?: string | null): TaskKind {
     return 'hls'
   }
 
+  if (contentType && contentType.includes('application/dash+xml')) return 'dash'
+
   try {
-    return /\.(m3u8|m3u)$/i.test(new URL(url).pathname) ? 'hls' : 'file'
+    const pathname = new URL(url).pathname
+    if (/\.(m3u8|m3u)$/i.test(pathname)) return 'hls'
+    if (/\.mpd$/i.test(pathname)) return 'dash'
+    return 'file'
   } catch {
     return 'file'
   }
@@ -109,9 +119,9 @@ export function kindForUrl(url: string, contentType?: string | null): TaskKind {
  * good name into `video 1080p.mp4.mp4.mp4`.
  */
 export function filenameForKind(filename: string, kind: TaskKind): string {
-  if (kind !== 'hls') return filename
+  if (kind === 'file') return filename
 
-  const base = filename.replace(/\.(m3u8|m3u)$/i, '')
+  const base = filename.replace(kind === 'hls' ? /\.(m3u8|m3u)$/i : /\.mpd$/i, '')
   // A container the mux can actually produce is left alone; anything else -
   // including no extension at all - becomes the mp4 it is about to be.
   return /\.(mp4|mkv|mov|m4v|webm|ts)$/i.test(base) ? base : base + '.mp4'

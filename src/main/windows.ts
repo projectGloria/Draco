@@ -1,5 +1,12 @@
-import { BrowserWindow, shell } from 'electron'
+import { app, BrowserWindow, shell } from 'electron'
 import { join } from 'node:path'
+import { existsSync } from 'node:fs'
+
+function getIconPath(): string {
+  const packaged = join(process.resourcesPath, 'icon.ico')
+  const dev = join(app.getAppPath(), 'resources', 'icon.ico')
+  return existsSync(packaged) ? packaged : dev
+}
 
 /**
  * Window creation. The renderer runs with no Node integration and context
@@ -28,6 +35,7 @@ export function createSplashWindow(): BrowserWindow {
     resizable: false,
     show: true,
     backgroundColor: '#0b0e14',
+    icon: getIconPath(),
     webPreferences: { preload, sandbox: false, contextIsolation: true }
   })
 
@@ -61,6 +69,7 @@ export function createMainWindow(startMinimized: boolean): BrowserWindow {
     frame: false,
     backgroundColor: '#0b0e14',
     titleBarStyle: 'hidden',
+    icon: getIconPath(),
     webPreferences: { preload, sandbox: false, contextIsolation: true }
   })
 
@@ -128,9 +137,10 @@ export function createHandoffWindow(requestId: string): BrowserWindow {
     maximizable: false,
     fullscreenable: false,
     frame: false,
-    show: false,
+    show: true,
     alwaysOnTop: true,
     backgroundColor: '#0b0e14',
+    icon: getIconPath(),
     // Stacked slightly so a burst of downloads does not hide them all behind
     // one another in exactly the same spot.
     x: undefined,
@@ -138,16 +148,11 @@ export function createHandoffWindow(requestId: string): BrowserWindow {
     webPreferences: { preload, sandbox: false, contextIsolation: true }
   })
 
-  const offset = handoffWindows.size * 26
+  const offset = (handoffCounter++ % 10) * 26
   if (offset > 0) {
     const [x, y] = window.getPosition()
     window.setPosition(x + offset, y + offset)
   }
-
-  window.once('ready-to-show', () => {
-    window.show()
-    window.focus()
-  })
 
   window.webContents.setWindowOpenHandler(({ url }) => {
     void shell.openExternal(url)
@@ -191,6 +196,8 @@ export function handoffIdForWebContents(id: number): string | null {
  * and the person is still in the browser.
  */
 const progressWindows = new Map<string, BrowserWindow>()
+let handoffCounter = 0
+let progressCounter = 0
 
 export function createProgressWindow(taskId: string): BrowserWindow {
   const existing = progressWindows.get(taskId)
@@ -211,32 +218,19 @@ export function createProgressWindow(taskId: string): BrowserWindow {
     maximizable: false,
     fullscreenable: false,
     frame: false,
-    show: false,
+    show: true,
     backgroundColor: '#0b0e14',
+    icon: getIconPath(),
     webPreferences: { preload, sandbox: false, contextIsolation: true }
   })
 
   // Same reason the confirm windows stagger: a handful of downloads started in
   // a row must not stack into one apparent window.
-  const offset = progressWindows.size * 26
+  const offset = (progressCounter++ % 10) * 26
   if (offset > 0) {
     const [x, y] = window.getPosition()
     window.setPosition(x + offset, y + offset)
   }
-
-  /*
-   * Shown, not shown-inactive.
-   *
-   * `showInactive` puts the window behind whatever is in front - and what is in
-   * front here is the browser, because the confirm window that was just clicked
-   * has closed and given focus back to it. The window was being created and
-   * then never seen, which is worse than the moment of focus it costs. IDM's
-   * progress window comes to the front too.
-   */
-  window.once('ready-to-show', () => {
-    window.show()
-    window.focus()
-  })
 
   window.webContents.setWindowOpenHandler(({ url }) => {
     void shell.openExternal(url)

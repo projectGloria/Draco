@@ -33,18 +33,38 @@ if (urls.length === 0) {
   process.exit(1)
 }
 
+function parseNum(val: string | undefined, def: number): number {
+  if (!val) return def
+  const n = Number(val)
+  if (Number.isNaN(n)) {
+    console.error(`Invalid numeric flag: ${val}`)
+    process.exit(1)
+  }
+  return n
+}
+
 const settings: EngineSettings = {
-  maxConcurrentTasks: Number(flags.get('tasks') ?? 3),
-  maxConnectionsPerTask: Number(flags.get('conn') ?? 8),
-  minSplitSize: Number(flags.get('min-split') ?? 1024 * 1024),
+  maxConcurrentTasks: parseNum(flags.get('tasks'), 3),
+  maxConnectionsPerTask: parseNum(flags.get('conn'), 8),
+  minSplitSize: parseNum(flags.get('min-split'), 1024 * 1024),
   retryLimit: 5,
   timeoutMs: 30_000,
-  speedLimit: flags.has('limit') ? Number(flags.get('limit')) : null
+  speedLimit: flags.has('limit') ? parseNum(flags.get('limit'), 0) : null,
+  proxyUrl: null,
+  hostConnectionLimits: [],
+  quotaBytes: null,
+  quotaWindowMinutes: 60,
+  antivirusProgram: null,
+  antivirusArgs: ['{file}'],
+  antivirusTimeoutSeconds: 120
 }
 
 const dir = flags.get('dir') || process.cwd()
 /** Test affordance: take the graceful pause path after N seconds. */
-const stopAfter = flags.has('stop-after') ? Number(flags.get('stop-after')) : null
+const stopAfter = flags.has('stop-after') ? parseNum(flags.get('stop-after'), 0) : null
+
+let latest: DownloadTask[] = []
+let lastLineCount = 0
 
 const manager = new DownloadManager({
   getSettings: () => settings,
@@ -53,9 +73,6 @@ const manager = new DownloadManager({
   },
   onProgress: () => render()
 })
-
-let latest: DownloadTask[] = []
-let lastLineCount = 0
 
 const tasks = urls.map((url) => createTask({ url: validateUrl(url), dir }))
 for (const task of tasks) manager.add(task)
@@ -107,11 +124,12 @@ function render(): void {
       const total = seg.end < 0 ? 0 : seg.end - seg.start + 1
       const done = seg.position - seg.start
       const frac = total > 0 ? done / total : 0
+      const rem = Segmenter.remaining(seg)
       lines.push(
         `    seg${String(i).padStart(2)} ${bar(frac, 16)} ` +
           `${String(Math.round(frac * 100)).padStart(3)}%  ` +
           `${seg.start}-${seg.end < 0 ? '?' : seg.end}  ` +
-          `left ${bytes(Segmenter.remaining(seg) === Infinity ? null : Segmenter.remaining(seg))}` +
+          `left ${bytes(rem === Infinity ? null : rem)}` +
           `${seg.active ? '  <' : ''}`
       )
     }

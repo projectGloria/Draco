@@ -6,10 +6,19 @@
  * pulling the next chunk from the stream, backpressure propagates down to the
  * socket on its own - there is no separate throttling machinery.
  */
+export interface QuotaState {
+  used: number
+  startedAt: number
+}
+
 export class RateLimiter {
   private bytesPerSecond = Infinity
   private tokens = Infinity
   private lastRefill = Date.now()
+  private quotaBytes = Infinity
+  private quotaWindowMs = 60 * 60_000
+  private quotaUsed = 0
+  private quotaStartedAt = Date.now()
 
   constructor(bytesPerSecond: number | null = null) {
     this.setLimit(bytesPerSecond)
@@ -26,6 +35,35 @@ export class RateLimiter {
 
   get limit(): number | null {
     return this.bytesPerSecond === Infinity ? null : this.bytesPerSecond
+  }
+
+  setQuota(bytes: number | null, windowMs: number): void {
+    const nextBytes = bytes && bytes > 0 ? bytes : Infinity
+    const nextWindow = Math.max(1, windowMs)
+    if (nextBytes === this.quotaBytes && nextWindow === this.quotaWindowMs) return
+    this.quotaBytes = nextBytes
+    this.quotaWindowMs = nextWindow
+    this.quotaUsed = 0
+    this.quotaStartedAt = Date.now()
+  }
+
+  get quotaRemaining(): number | null {
+    this.refillQuota()
+    return this.quotaBytes === Infinity ? null : Math.max(0, this.quotaBytes - this.quotaUsed)
+  }
+
+  get quotaState(): QuotaState {
+    this.refillQuota()
+    return { used: this.quotaUsed, startedAt: this.quotaStartedAt }
+  }
+
+  restoreQuota(state: QuotaState | null): void {
+    if (!state) return
+    if (!Number.isSafeInteger(state.used) || state.used < 0) return
+    if (!Number.isFinite(state.startedAt) || state.startedAt < 0 || state.startedAt > Date.now()) return
+    this.quotaUsed = state.used
+    this.quotaStartedAt = state.startedAt
+    this.refillQuota()
   }
 
   private refill(): void {
@@ -46,17 +84,37 @@ export class RateLimiter {
    * `signal` lets pause/stop abort a long wait immediately.
    */
   async consume(bytes: number, signal?: AbortSignal): Promise<void> {
-    if (this.bytesPerSecond === Infinity || bytes <= 0) return
+    if (bytes <= 0) return
     if (signal?.aborted) throw new Error('aborted')
 
-    this.refill()
-    this.tokens -= bytes
-
-    while (this.tokens < 0) {
-      const waitMs = Math.ceil((-this.tokens / this.bytesPerSecond) * 1000)
-      await delay(Math.min(Math.max(waitMs, 5), 250), signal)
+    if (this.bytesPerSecond !== Infinity) {
       this.refill()
+      this.tokens -= bytes
+
+      while (this.tokens < 0) {
+        const waitMs = Math.ceil((-this.tokens / this.bytesPerSecond) * 1000)
+        await delay(Math.min(Math.max(waitMs, 5), 250), signal)
+        this.refill()
+      }
     }
+
+    if (this.quotaBytes !== Infinity) {
+      this.refillQuota()
+      this.quotaUsed += bytes
+      while (this.quotaUsed > this.quotaBytes) {
+        const waitMs = this.quotaStartedAt + this.quotaWindowMs - Date.now()
+        await delay(Math.min(Math.max(waitMs, 5), 250), signal)
+        this.refillQuota()
+      }
+    }
+  }
+
+  private refillQuota(): void {
+    const now = Date.now()
+    if (now - this.quotaStartedAt < this.quotaWindowMs) return
+    const windows = Math.floor((now - this.quotaStartedAt) / this.quotaWindowMs)
+    this.quotaStartedAt += windows * this.quotaWindowMs
+    this.quotaUsed = 0
   }
 }
 

@@ -12,6 +12,7 @@ import type {
   Segment,
   Settings,
   SortDirection,
+  SubtitleTrack,
   TaskKind,
   TaskStatus
 } from '@shared/types'
@@ -23,7 +24,7 @@ export const COLUMN_IDS: ColumnId[] = [
 ]
 export const TASK_STATUSES: TaskStatus[] = ['queued', 'probing', 'downloading', 'paused', 'done', 'error', 'missing']
 export const QUEUE_MODES: QueueMode[] = ['manual', 'onetime', 'periodic']
-export const QUEUE_ACTIONS: QueueCompletionAction[] = ['none', 'exit', 'sleep', 'hibernate', 'shutdown']
+export const QUEUE_ACTIONS: QueueCompletionAction[] = ['none', 'run', 'exit', 'sleep', 'hibernate', 'shutdown']
 
 export function clamp(value: unknown, min: number, max: number, fallback: number): number {
   const n = Math.round(Number(value))
@@ -91,14 +92,34 @@ export function sanitizeSettings(input: unknown, base: Settings, defaultColumns:
   const accent = typeof source.accent === 'string' && /^#[0-9a-f]{6}$/i.test(source.accent)
     ? source.accent.toLowerCase()
     : base.accent
+  const proxyUrl = sanitizeProxyUrl(source.proxyUrl)
+  const hostConnectionLimits = sanitizeHostConnectionLimits(source.hostConnectionLimits)
+  const quotaBytes = typeof source.quotaBytes === 'number' && Number.isSafeInteger(source.quotaBytes) && source.quotaBytes > 0
+    ? Math.min(source.quotaBytes, Number.MAX_SAFE_INTEGER)
+    : null
 
   return {
     ...base,
+    language: source.language === 'en' || source.language === 'tr' ? source.language : 'system',
+    theme: source.theme === 'light' || source.theme === 'system' ? source.theme : 'dark',
     downloadDir: typeof source.downloadDir === 'string' && source.downloadDir.trim() ? source.downloadDir.trim() : base.downloadDir,
     maxConcurrentTasks: clamp(source.maxConcurrentTasks, 1, 20, base.maxConcurrentTasks),
     maxConnectionsPerTask: clamp(source.maxConnectionsPerTask, 1, 16, base.maxConnectionsPerTask),
     minSplitSize: clamp(source.minSplitSize, 64 * 1024, 256 * 1024 * 1024, base.minSplitSize),
     speedLimit,
+    proxyUrl,
+    hostConnectionLimits,
+    quotaBytes,
+    quotaWindowMinutes: clamp(source.quotaWindowMinutes, 1, 7 * 24 * 60, base.quotaWindowMinutes),
+    antivirusProgram: typeof source.antivirusProgram === 'string' && source.antivirusProgram.trim()
+      ? source.antivirusProgram.trim().slice(0, 1000)
+      : null,
+    antivirusArgs: Array.isArray(source.antivirusArgs)
+      ? source.antivirusArgs.filter((arg): arg is string => typeof arg === 'string').slice(0, 30).map((arg) => arg.slice(0, 500))
+      : base.antivirusArgs,
+    antivirusTimeoutSeconds: clamp(source.antivirusTimeoutSeconds, 5, 3600, base.antivirusTimeoutSeconds),
+    updateFeedUrl: safeHttpsUrl(source.updateFeedUrl),
+    autoCheckUpdates: typeof source.autoCheckUpdates === 'boolean' ? source.autoCheckUpdates : base.autoCheckUpdates,
     retryLimit: clamp(source.retryLimit, 1, 20, base.retryLimit),
     timeoutMs: clamp(source.timeoutMs, 5_000, 300_000, base.timeoutMs),
     defaultCategoryId: typeof source.defaultCategoryId === 'string' ? source.defaultCategoryId : null,
@@ -118,6 +139,38 @@ export function sanitizeSettings(input: unknown, base: Settings, defaultColumns:
     sortDirection: source.sortDirection === 'asc' || source.sortDirection === 'desc' ? source.sortDirection as SortDirection : base.sortDirection,
     sidebarSelection: typeof source.sidebarSelection === 'string' ? source.sidebarSelection.slice(0, 200) : base.sidebarSelection
   }
+}
+
+function sanitizeProxyUrl(value: unknown): string | null {
+  if (typeof value !== 'string' || !value.trim() || value.length > 2048) return null
+  try {
+    const parsed = new URL(value.trim())
+    return parsed.protocol === 'http:' || parsed.protocol === 'https:' ? parsed.toString() : null
+  } catch {
+    return null
+  }
+}
+
+function safeHttpsUrl(value: unknown): string | null {
+  if (typeof value !== 'string' || !value.trim() || value.length > 2048) return null
+  try {
+    const parsed = new URL(value.trim())
+    return parsed.protocol === 'https:' ? parsed.toString() : null
+  } catch {
+    return null
+  }
+}
+
+function sanitizeHostConnectionLimits(value: unknown): Settings['hostConnectionLimits'] {
+  if (!Array.isArray(value)) return []
+  const byHost = new Map<string, number>()
+  for (const raw of value.slice(0, 200)) {
+    if (!isRecord(raw) || typeof raw.host !== 'string') continue
+    const host = raw.host.trim().toLowerCase().replace(/^\.+|\.+$/g, '')
+    if (!host || host.length > 253 || !/^[a-z0-9.-]+$/i.test(host)) continue
+    byHost.set(host, clamp(raw.connections, 1, 16, 1))
+  }
+  return [...byHost].map(([host, connections]) => ({ host, connections }))
 }
 
 function mergeColumns(stored: unknown[], defaultsFactory: () => ColumnPref[]): ColumnPref[] {
@@ -156,6 +209,7 @@ export function sanitizeCategories(input: unknown, fallback: () => Category[]): 
       name,
       folder: toFolderName(folderRaw),
       builtin: raw.builtin === true,
+      hosts: lowerList(raw.hosts).map((host) => host.replace(/^\.+|\.+$/g, '')).filter((host) => /^(?:[a-z0-9-]+\.)*[a-z0-9-]+$/.test(host)),
       extensions: lowerList(raw.extensions).map((e) => e.replace(/^\./, '').slice(0, 32)).filter(Boolean)
     })
   }
@@ -178,7 +232,7 @@ export function sanitizeTasks(input: unknown, defaultDir: string): DownloadTask[
     const receivedRaw = safeNonNegativeInt(raw.received, 0) ?? 0
     const received = size === null ? receivedRaw : Math.min(receivedRaw, size)
     const status: TaskStatus = TASK_STATUSES.includes(raw.status as TaskStatus) ? raw.status as TaskStatus : 'paused'
-    const kind: TaskKind = raw.kind === 'hls' ? 'hls' : 'file'
+    const kind: TaskKind = raw.kind === 'hls' || raw.kind === 'dash' ? raw.kind : 'file'
     const filenameSource = typeof raw.filename === 'string' ? raw.filename : (filenameFromUrl(url) ?? 'download')
     const filename = sanitizeFilename(filenameSource)
     const finalUrl = validUrl(raw.finalUrl) ?? url
@@ -197,11 +251,14 @@ export function sanitizeTasks(input: unknown, defaultDir: string): DownloadTask[
       dir: typeof raw.dir === 'string' && raw.dir.trim() ? raw.dir : defaultDir,
       categoryId: typeof raw.categoryId === 'string' ? raw.categoryId : null,
       queueId: typeof raw.queueId === 'string' ? raw.queueId : null,
+      queueRetryCount: clamp(raw.queueRetryCount, 0, 20, 0),
+      nextQueueAttemptAt: safeTimestamp(raw.nextQueueAttemptAt, null),
       kind,
       size,
       received,
       status,
       resumable: raw.resumable === true,
+      singleConnectionFallback: raw.singleConnectionFallback === true,
       segments,
       connections: clamp(raw.connections, 1, 16, 1),
       speed: typeof raw.speed === 'number' && Number.isFinite(raw.speed) && raw.speed >= 0 ? raw.speed : 0,
@@ -214,6 +271,7 @@ export function sanitizeTasks(input: unknown, defaultDir: string): DownloadTask[
       etag: optionalText(raw.etag, 4096),
       lastModified: optionalText(raw.lastModified, 1024),
       headers: headers(raw.headers),
+      subtitles: sanitizeSubtitles(raw.subtitles),
       mimeType: optionalText(raw.mimeType, 1024),
       description: typeof raw.description === 'string' ? raw.description.slice(0, 10_000) : ''
     })
@@ -276,9 +334,20 @@ export function sanitizeQueues(input: unknown): Queue[] {
       stopTime: validTime(raw.stopTime),
       days,
       maxConcurrent: clamp(raw.maxConcurrent, 1, 20, 1),
+      retryLimit: clamp(raw.retryLimit, 0, 20, 3),
+      retryDelaySeconds: clamp(raw.retryDelaySeconds, 0, 86_400, 30),
       onComplete: QUEUE_ACTIONS.includes(raw.onComplete as QueueCompletionAction) ? raw.onComplete as QueueCompletionAction : 'none',
+      completionProgram: typeof raw.completionProgram === 'string' && raw.completionProgram.trim()
+        ? raw.completionProgram.trim().slice(0, 1000)
+        : null,
+      completionArgs: Array.isArray(raw.completionArgs)
+        ? raw.completionArgs.filter((arg): arg is string => typeof arg === 'string').slice(0, 20).map((arg) => arg.slice(0, 500))
+        : [],
       running: false,
-      oneTimeCompleted: raw.oneTimeCompleted === true
+      oneTimeCompleted: raw.oneTimeCompleted === true,
+      lastResult: raw.lastResult === 'completed' || raw.lastResult === 'completed-with-errors'
+        ? raw.lastResult
+        : 'idle'
     })
   }
   return out
@@ -303,7 +372,28 @@ export function sanitizeMedia(input: unknown): MediaCandidate[] {
       type,
       variants,
       headers: headers(raw.headers),
+      subtitles: sanitizeSubtitles(raw.subtitles),
       discoveredAt: safeTimestamp(raw.discoveredAt, Date.now()) ?? Date.now()
+    })
+  }
+  return out
+}
+
+function sanitizeSubtitles(input: unknown): SubtitleTrack[] {
+  if (!Array.isArray(input)) return []
+  const out: SubtitleTrack[] = []
+  const seen = new Set<string>()
+  for (const raw of input.slice(0, 20)) {
+    if (!isRecord(raw)) continue
+    const url = validUrl(raw.url)
+    const format = raw.format
+    if (!url || seen.has(url) || (format !== 'vtt' && format !== 'srt' && format !== 'ttml')) continue
+    seen.add(url)
+    out.push({
+      url,
+      label: typeof raw.label === 'string' ? raw.label.slice(0, 100) : '',
+      language: typeof raw.language === 'string' ? raw.language.slice(0, 35) : null,
+      format
     })
   }
   return out

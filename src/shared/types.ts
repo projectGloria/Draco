@@ -47,7 +47,7 @@ export type TaskStatus =
   | 'missing'
 
 /** What the engine is downloading. HLS is a pre-split segment list plus a mux. */
-export type TaskKind = 'file' | 'hls'
+export type TaskKind = 'file' | 'hls' | 'dash'
 
 /**
  * One byte range owned by exactly one connection. Segments never overlap, which
@@ -73,6 +73,13 @@ export interface RequestHeaders {
   extra?: Record<string, string>
 }
 
+export interface SubtitleTrack {
+  url: string
+  label: string
+  language: string | null
+  format: 'vtt' | 'srt' | 'ttml'
+}
+
 export interface DownloadTask {
   id: string
   /** What the user or the browser handed us. */
@@ -93,6 +100,8 @@ export interface DownloadTask {
   dir: string
   categoryId: string | null
   queueId: string | null
+  queueRetryCount: number
+  nextQueueAttemptAt: number | null
   kind: TaskKind
   /** Total bytes, or null when the server would not say. */
   size: number | null
@@ -100,6 +109,8 @@ export interface DownloadTask {
   status: TaskStatus
   /** True once a 206 has actually been seen - not merely Accept-Ranges. */
   resumable: boolean
+  /** Sticky compatibility mode for servers that advertise ranges then ignore them. */
+  singleConnectionFallback: boolean
   segments: Segment[]
   /** Connection budget for this task. */
   connections: number
@@ -119,6 +130,8 @@ export interface DownloadTask {
   etag: string | null
   lastModified: string | null
   headers: RequestHeaders
+  /** External caption files captured from the page and saved beside the media. */
+  subtitles?: SubtitleTrack[]
   mimeType: string | null
   description: string
 }
@@ -147,6 +160,7 @@ export interface NewDownload {
   categoryId?: string | null
   queueId?: string | null
   headers?: RequestHeaders
+  subtitles?: SubtitleTrack[]
   description?: string
   kind?: TaskKind
   /** When false the task is created paused instead of starting immediately. */
@@ -203,6 +217,7 @@ export interface Category {
   name: string
   /** Lowercase, no leading dot. Matched against the filename extension. */
   extensions: string[]
+  hosts: string[]
   /** Subfolder under the download root, already Windows-safe. */
   folder: string
   /** Built-ins can be edited but not deleted, mirroring IDM. */
@@ -215,7 +230,7 @@ export interface Category {
 
 export type QueueMode = 'manual' | 'onetime' | 'periodic'
 
-export type QueueCompletionAction = 'none' | 'exit' | 'sleep' | 'hibernate' | 'shutdown'
+export type QueueCompletionAction = 'none' | 'run' | 'exit' | 'sleep' | 'hibernate' | 'shutdown'
 
 export interface Queue {
   id: string
@@ -229,11 +244,17 @@ export interface Queue {
   /** 0 = Sunday. Only meaningful for periodic queues. */
   days: number[]
   maxConcurrent: number
+  /** Additional attempts after the engine has exhausted its own request retries. */
+  retryLimit: number
+  retryDelaySeconds: number
   onComplete: QueueCompletionAction
+  completionProgram: string | null
+  completionArgs: string[]
   /** True while the scheduler (or the user) has this queue running. */
   running: boolean
   /** One-time schedules latch after they have drained so they cannot rerun every day. */
   oneTimeCompleted: boolean
+  lastResult: 'idle' | 'completed' | 'completed-with-errors'
 }
 
 /** A pending shutdown/sleep the user can still call off. */
@@ -268,6 +289,8 @@ export interface ColumnPref {
 }
 
 export interface Settings {
+  language: 'system' | 'en' | 'tr'
+  theme: 'system' | 'dark' | 'light'
   /** Root for downloads; categories add a subfolder under it. */
   downloadDir: string
   /** How many tasks run at once. */
@@ -278,6 +301,19 @@ export interface Settings {
   minSplitSize: number
   /** Global cap in bytes/sec, or null for unlimited. */
   speedLimit: number | null
+  /** HTTP(S) proxy URL. Authentication may be embedded in the URL. */
+  proxyUrl: string | null
+  /** Per-origin connection exceptions, matched by hostname and subdomains. */
+  hostConnectionLimits: Array<{ host: string; connections: number }>
+  /** Rolling transfer allowance, or null for no quota. */
+  quotaBytes: number | null
+  /** Length of the quota window in minutes. */
+  quotaWindowMinutes: number
+  antivirusProgram: string | null
+  antivirusArgs: string[]
+  antivirusTimeoutSeconds: number
+  updateFeedUrl: string | null
+  autoCheckUpdates: boolean
   /** Per-segment attempts before the task is failed. */
   retryLimit: number
   /** Socket/headers timeout in ms. */
@@ -331,16 +367,16 @@ export interface MediaCandidate {
   /** Filled in once the playlist has been parsed. */
   variants: MediaVariant[]
   headers: RequestHeaders
+  subtitles: SubtitleTrack[]
   discoveredAt: number
 }
 
 /**
  * One YouTube format as the page's own player response describes it.
  *
- * Metadata only, and deliberately so: this crosses from web content into the
- * app, so it may name a format but never supply a URL to fetch. It exists to
- * put a quality menu on screen the instant the button is pressed, instead of
- * after a yt-dlp round trip.
+ * The optional URL is the already-playing Googlevideo resource. It is accepted
+ * only after strict CDN/path/itag validation, allowing the final Download click
+ * to start transferring without another extractor round trip.
  */
 export interface PageFormat {
   itag: number
@@ -350,14 +386,14 @@ export interface PageFormat {
   height: number | null
   fps: number | null
   contentLength: number | null
+  url?: string | null
 }
 
 export interface MediaVariant {
   /**
    * The variant playlist URL, or the media URL itself for progressive files.
    *
-   * Empty for a YouTube quality read from the page: those name their format by
-   * itag and have the real, signed URL looked up when the download starts.
+   * Empty only when the page did not expose a validated direct resource.
    */
   url: string
   /** The separate audio stream URL, if the stream is demuxed. */
@@ -388,14 +424,52 @@ export interface MediaVariant {
 export interface IntegrationStatus {
   /** Absolute path the user points "Load unpacked" at. */
   extensionPath: string
+  firefoxExtensionPath: string
   /** The pinned ID derived from the extension key, or null if not generated. */
   extensionId: string | null
   /** Which browsers have the native-messaging registry key pointing at us. */
-  registered: { chrome: boolean; edge: boolean; brave: boolean }
+  registered: { chrome: boolean; edge: boolean; brave: boolean; opera: boolean; vivaldi: boolean; firefox: boolean }
   /** True while the named-pipe server is accepting host connections. */
   bridgeListening: boolean
   /** Epoch ms of the last message received from the extension, if any. */
   lastHandoffAt: number | null
+}
+
+export interface UpdateInfo {
+  currentVersion: string
+  latestVersion: string
+  available: boolean
+  downloadUrl: string | null
+  notes: string | null
+}
+
+export interface SiteGrabOptions {
+  startUrl: string
+  maxDepth: number
+  maxPages: number
+  includeAssets: boolean
+  stayOnHost: boolean
+  respectRobots: boolean
+  autoStart: boolean
+  scheduleHours?: number | null
+}
+
+export interface SiteGrabResult {
+  discovered: number
+  added: number
+  rootDir: string
+  projectId: string
+}
+
+export interface SiteGrabProject {
+  id: string
+  name: string
+  options: SiteGrabOptions
+  rootDir: string
+  knownUrls: string[]
+  createdAt: number
+  lastRunAt: number | null
+  lastError: string | null
 }
 
 /* ------------------------------------------------------------------ */
@@ -458,13 +532,6 @@ export interface RendererApi {
   onPendingAction(cb: (pending: PendingAction | null) => void): () => void
   cancelPendingAction(): Promise<void>
 
-  /* media grabber */
-  listMedia(): Promise<MediaCandidate[]>
-  resolveMedia(id: string): Promise<MediaCandidate>
-  downloadMedia(id: string, opts: { variantUrl: string; filename: string; audioUrl?: string | null; youtube?: { videoFormatId: string; audioFormatId?: string | null } }): Promise<DownloadTask>
-  clearMedia(): Promise<void>
-  onMediaChanged(cb: (media: MediaCandidate[]) => void): () => void
-
   /* settings + integration */
   getSettings(): Promise<Settings>
   saveSettings(patch: Partial<Settings>): Promise<Settings>
@@ -472,6 +539,12 @@ export interface RendererApi {
   getIntegration(): Promise<IntegrationStatus>
   registerIntegration(): Promise<IntegrationStatus>
   copyToClipboard(text: string): Promise<void>
+  checkForUpdates(): Promise<UpdateInfo>
+  openUpdate(url: string): Promise<void>
+  startSiteGrab(options: SiteGrabOptions): Promise<SiteGrabResult>
+  listSiteGrabs(): Promise<SiteGrabProject[]>
+  runSiteGrab(id: string): Promise<SiteGrabResult>
+  removeSiteGrab(id: string): Promise<void>
 
   /* icons */
   /**

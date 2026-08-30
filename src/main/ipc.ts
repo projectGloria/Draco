@@ -11,7 +11,9 @@ import type {
   NewDownload,
   Queue,
   RequestHeaders,
-  Settings
+  Settings,
+  SiteGrabOptions,
+  SiteGrabResult
 } from '@shared/types'
 import { getPaths } from './bootstrap/paths.ts'
 import { checkRegistered, ensureRegistered, readExtensionId } from './bridge/integration.ts'
@@ -22,14 +24,16 @@ import { sanitizeFilename, uniquePath } from './engine/naming.ts'
 import type { DownloadManager } from './engine/manager.ts'
 import { probeUrl } from './engine/probe.ts'
 import { resolveVariants } from './hls/playlist.ts'
+import { checkForUpdates } from './update.ts'
+import { chosenYouTubeUrls } from './youtube-url.ts'
 import { iconForExtension, iconForSite } from './icons.ts'
 import { logger } from './log.ts'
 import type { Scheduler } from './queue/scheduler.ts'
+import type { SiteProjectManager } from './site-grabber/projects.ts'
 import {
   getCategories,
   getSettings,
   saveCategories,
-  saveMedia,
   saveSettings,
   persistTasks
 } from './store.ts'
@@ -37,8 +41,7 @@ import {
   broadcast,
   closeHandoffWindow,
   createProgressWindow,
-  getMainWindow,
-  send
+  getMainWindow
 } from './windows.ts'
 
 const log = logger('ipc')
@@ -46,6 +49,7 @@ const log = logger('ipc')
 export interface AppContext {
   manager: DownloadManager
   scheduler: Scheduler
+  siteProjects: SiteProjectManager
   pipe: PipeServer
   media: MediaCandidate[]
   /**
@@ -82,7 +86,8 @@ export function placeTask(input: NewDownload): DownloadTask {
         categories,
         filename,
         null,
-        input.categoryId ?? settings.defaultCategoryId
+        input.categoryId ?? settings.defaultCategoryId,
+        url
       )
 
   return createTask({
@@ -94,6 +99,7 @@ export function placeTask(input: NewDownload): DownloadTask {
     categoryId,
     queueId: input.queueId ?? null,
     headers: input.headers,
+    subtitles: input.subtitles,
     description: input.description,
     kind
   })
@@ -109,7 +115,8 @@ export function refileTask(task: DownloadTask): void {
     getCategories(),
     task.filename,
     task.mimeType,
-    task.categoryId ?? settings.defaultCategoryId
+    task.categoryId ?? settings.defaultCategoryId,
+    task.url
   )
 
   task.dir = dir
@@ -176,7 +183,11 @@ export function registerIpc(ctx: AppContext): void {
     // Only fields the UI is allowed to edit. Letting a renderer patch `segments`
     // or `received` would let it corrupt the engine's own bookkeeping.
     if (typeof patch.description === 'string') task.description = patch.description.slice(0, 500)
-    if (typeof patch.queueId === 'string' || patch.queueId === null) task.queueId = patch.queueId
+    if (typeof patch.queueId === 'string' || patch.queueId === null) {
+      const previousQueueId = task.queueId
+      await ctx.scheduler.syncTaskQueue(task.id, previousQueueId, patch.queueId)
+      task.queueId = patch.queueId
+    }
     if (typeof patch.filename === 'string' && patch.filename.trim()) {
       const nextFilename = sanitizeFilename(patch.filename.trim(), task.filename || 'download')
       if (task.status === 'downloading' || task.status === 'probing' || task.status === 'queued') {
@@ -296,8 +307,9 @@ export function registerIpc(ctx: AppContext): void {
     if (!request) throw new Error('That download request has expired')
     const candidate = ctx.media.find((m) => m.id === request.mediaId)
     if (!candidate) throw new Error('That media entry is gone')
-    if (candidate.type === 'dash') throw new Error('MPEG-DASH streams are not supported yet - only HLS')
-
+    // Metadata-only YouTube choices intentionally keep the watch page as a
+    // placeholder. The engine resolves those itags after this window closes,
+    // so an unavoidable player challenge never traps the user in a modal.
     const urls = resolveChosenUrls(candidate, opts)
 
     takeHandoff(id)
@@ -311,8 +323,9 @@ export function registerIpc(ctx: AppContext): void {
       categoryId: opts.categoryId,
       queueId: opts.queueId,
       headers: candidate.headers,
+      subtitles: candidate.subtitles,
       description: candidate.pageTitle,
-      kind: candidate.type === 'file' ? 'file' : 'hls'
+      kind: candidate.type
     })
 
     ctx.manager.add(task, true)
@@ -346,43 +359,6 @@ export function registerIpc(ctx: AppContext): void {
   handle('queues:stop', (id: string) => ctx.scheduler.stopQueue(id))
   handle('queues:cancelPending', () => ctx.scheduler.cancelPending())
 
-  /* media grabber */
-
-  handle('media:list', () => ctx.media)
-
-  handle('media:resolve', (id: string) => resolveCandidate(ctx, id))
-
-  handle('media:download', async (
-    id: string,
-    opts: { variantUrl: string; filename: string; audioUrl?: string | null; youtube?: { videoFormatId: string; audioFormatId?: string | null } }
-  ) => {
-    const candidate = ctx.media.find((m) => m.id === id)
-    if (!candidate) throw new Error('That media entry is gone')
-    if (candidate.type === 'dash') throw new Error('MPEG-DASH streams are not supported yet - only HLS')
-
-    const urls = resolveChosenUrls(candidate, opts)
-
-    const task = placeTask({
-      url: urls.url,
-      audioUrl: urls.audioUrl,
-      youtube: opts.youtube ? { pageUrl: candidate.pageUrl, videoFormatId: opts.youtube.videoFormatId, audioFormatId: opts.youtube.audioFormatId ?? null } : undefined,
-      filename: opts.filename,
-      headers: candidate.headers,
-      description: candidate.pageTitle,
-      kind: candidate.type === 'file' ? 'file' : 'hls'
-    })
-
-    ctx.manager.add(task, true)
-    announce(task)
-    return task
-  })
-
-  handle('media:clear', async () => {
-    ctx.media.length = 0
-    await saveMedia(ctx.media)
-    send('media:changed', ctx.media)
-  })
-
   /* settings and integration */
 
   handle('settings:get', () => getSettings())
@@ -390,6 +366,10 @@ export function registerIpc(ctx: AppContext): void {
   handle('settings:save', async (patch: Partial<Settings>) => {
     const next = await saveSettings(patch)
     ctx.manager.applySettings()
+    if (patch.watchClipboard !== undefined) {
+      const { updateClipboardWatcher } = require('./index.ts')
+      updateClipboardWatcher(patch.watchClipboard)
+    }
     return next
   })
 
@@ -405,6 +385,7 @@ export function registerIpc(ctx: AppContext): void {
   handle('integration:get', async (): Promise<IntegrationStatus> => {
     return {
       extensionPath: getPaths().extensionDir,
+      firefoxExtensionPath: getPaths().firefoxExtensionDir,
       extensionId: await readExtensionId(),
       registered: await checkRegistered(),
       bridgeListening: ctx.pipe.listening,
@@ -416,6 +397,7 @@ export function registerIpc(ctx: AppContext): void {
     const registered = await ensureRegistered()
     return {
       extensionPath: getPaths().extensionDir,
+      firefoxExtensionPath: getPaths().firefoxExtensionDir,
       extensionId: await readExtensionId(),
       registered,
       bridgeListening: ctx.pipe.listening,
@@ -424,6 +406,18 @@ export function registerIpc(ctx: AppContext): void {
   })
 
   handle('clipboard:write', (text: string) => clipboard.writeText(String(text)))
+  handle('updates:check', () => checkForUpdates(getSettings().updateFeedUrl))
+  handle('updates:open', async (raw: string) => {
+    const url = validateUrl(raw)
+    if (!url.startsWith('https://')) throw new Error('Update links must use HTTPS')
+    await shell.openExternal(url)
+  })
+  handle('siteGrabber:start', async (input: SiteGrabOptions): Promise<SiteGrabResult> => {
+    return ctx.siteProjects.create(input)
+  })
+  handle('siteGrabber:list', () => ctx.siteProjects.list())
+  handle('siteGrabber:run', (id: string) => ctx.siteProjects.run(String(id)))
+  handle('siteGrabber:remove', (id: string) => ctx.siteProjects.remove(String(id)))
 
   /* icons - the shell's, and the source site's */
 
@@ -474,13 +468,6 @@ export async function resolveCandidate(
   const candidate = ctx.media.find((m) => m.id === id)
   if (!candidate) throw new Error('That media entry is gone')
 
-  // The extension spots MPEG-DASH so the page's streams are all visible, but
-  // only HLS can be downloaded. Refusing here is far clearer than letting the
-  // .mpd be parsed as a playlist and fail with "no media segments".
-  if (candidate.type === 'dash') {
-    throw new Error('MPEG-DASH streams are not supported yet - only HLS')
-  }
-
   if (candidate.variants && candidate.variants.length > 0) {
     return candidate
   }
@@ -497,33 +484,26 @@ export async function resolveCandidate(
         estimatedSize: probe.size
       }
     ]
-  } else {
+  } else if (candidate.type === 'hls') {
     candidate.variants = await resolveVariants(candidate.mediaUrl, candidate.headers)
+  } else {
+    const { resolveMpd } = await import('./dash/manifest.ts')
+    candidate.variants = (await resolveMpd(candidate.mediaUrl, candidate.headers)).variants
   }
 
-  await saveMedia(ctx.media)
-  send('media:changed', ctx.media)
   return candidate
 }
 
 /**
  * Turns a chosen quality into the URLs the task will carry.
  *
- * A YouTube variant identifies its format by itag, not by URL - the ladder is
- * read from the page, which is web content and gets no say in what Draco
- * requests - so a YouTube task carries the watch page and its format ids, and
- * the engine looks the signed URLs up itself as it starts (`TaskRunner.run`).
+ * A YouTube final confirmation is offered only for variants whose URLs were
+ * already prepared. The engine starts with those signed resources immediately;
+ * stable page/itag identity remains attached so an expired URL can be refreshed
+ * after a 401/403/410 without making every normal start pay that cost.
  *
- * Doing it there rather than here is what makes Start feel like IDM's. Pressing
- * the button used to wait on yt-dlp before anything at all appeared; now the
- * window closes at once and the wait, when there is one, happens in the
- * progress window with the download visibly connecting. It also means a signed
- * URL is never written to tasks.json, where it would expire and leave a task
- * that cannot be resumed without one.
- *
- * The audio half is named the same way - the page URL stands in for it - because
- * it is the presence of `audioUrl` that tells the manager this is a two-stream
- * download to mux.
+ * The page URL fallback is retained for old persisted requests and extensions;
+ * current handoffs should always take the prepared branch above.
  */
 function resolveChosenUrls(
   candidate: MediaCandidate,
@@ -537,10 +517,8 @@ function resolveChosenUrls(
     return { url: opts.variantUrl, audioUrl: opts.audioUrl ?? null }
   }
 
-  return {
-    url: candidate.pageUrl,
-    audioUrl: opts.youtube.audioFormatId ? candidate.pageUrl : null
-  }
+  const youtube = opts.youtube
+  return chosenYouTubeUrls(candidate.variants, candidate.pageUrl, youtube)
 }
 
 /** Turns an extension handoff into a queued download. */
@@ -581,6 +559,7 @@ export function recordMedia(
     mediaUrl: string
     audioUrl?: string | null
     variants?: any[]
+    subtitles?: Array<{ url: string; label: string; language: string | null; format: 'vtt' | 'srt' | 'ttml' }>
     kind: 'hls' | 'dash' | 'file'
     referer?: string
     cookie?: string
@@ -599,9 +578,8 @@ export function recordMedia(
         cookie: message.cookie,
         userAgent: message.userAgent
       }
+      existing.subtitles = message.subtitles ?? existing.subtitles
       existing.discoveredAt = Date.now()
-      void saveMedia(ctx.media)
-      send('media:changed', ctx.media)
     }
     return existing
   }
@@ -618,6 +596,7 @@ export function recordMedia(
       cookie: message.cookie,
       userAgent: message.userAgent
     },
+    subtitles: message.subtitles ?? [],
     discoveredAt: Date.now()
   }
 
@@ -626,7 +605,5 @@ export function recordMedia(
   // the user ever scrolled past.
   if (ctx.media.length > 100) ctx.media.length = 100
 
-  void saveMedia(ctx.media)
-  send('media:changed', ctx.media)
   return candidate
 }

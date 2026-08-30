@@ -1,10 +1,12 @@
 import { useEffect, useState } from 'react'
 import { useApp } from '../store/app'
 import { BrandMark, CloseGlyph, MaximizeGlyph, MinimizeGlyph } from './Icons'
+import { useT } from '../i18n'
 
 export default function TitleBar(): React.ReactElement {
   const [maximized, setMaximized] = useState(false)
-  const active = useApp((s) => s.tasks.filter((t) => t.status === 'downloading').length)
+  const active = useApp((s) => s.tasks.reduce((n, t) => t.status === 'downloading' ? n + 1 : n, 0))
+  const t = useT()
 
   useEffect(() => window.api.onMaximizeChange(setMaximized), [])
 
@@ -14,20 +16,20 @@ export default function TitleBar(): React.ReactElement {
       <span className="font-display text-[13px] font-bold tracking-[0.3px]">Draco</span>
 
       <div className="flex-1 text-center text-[11.5px] text-faint tracking-[0.2px] truncate max-[720px]:hidden">
-        {active > 0 ? `${active} download${active === 1 ? '' : 's'} in progress` : 'Download Manager'}
+        {active > 0 ? t('inProgress', { count: active }) : t('downloadManager')}
       </div>
 
       <div className="no-drag flex">
-        <WindowButton label="Minimize" onClick={() => void window.api.minimize()}>
+        <WindowButton label={t('minimize')} onClick={() => void window.api.minimize()}>
           <MinimizeGlyph />
         </WindowButton>
         <WindowButton
-          label={maximized ? 'Restore' : 'Maximize'}
+          label={maximized ? t('restore') : t('maximize')}
           onClick={() => void window.api.toggleMaximize()}
         >
           <MaximizeGlyph maximized={maximized} />
         </WindowButton>
-        <WindowButton label="Close" onClick={() => void window.api.close()} close>
+        <WindowButton label={t('close')} onClick={() => void window.api.close()} close>
           <CloseGlyph />
         </WindowButton>
       </div>

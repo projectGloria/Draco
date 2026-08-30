@@ -6,6 +6,7 @@ import { reportError, toast } from '../store/toasts'
 import Dialog, { GhostButton, PrimaryButton } from './Dialog'
 import { CopyIcon, FolderIcon, PlusIcon, RefreshIcon, TrashIcon } from './Icons'
 import Toggle from './Toggle'
+import { useT } from '../i18n'
 
 type Tab = 'general' | 'connection' | 'categories' | 'browser' | 'appearance'
 
@@ -122,9 +123,22 @@ function GeneralTab(): React.ReactElement {
   const settings = useApp((s) => s.settings)
   const categories = useApp((s) => s.categories)
   const patch = useApp((s) => s.patchSettings)
+  const [checkingUpdate, setCheckingUpdate] = useState(false)
+  const t = useT()
 
   return (
     <div className="space-y-4">
+      <Field label={t('language')}>
+        <select
+          value={settings.language}
+          onChange={(event) => void patch({ language: event.target.value as 'system' | 'en' | 'tr' })}
+          className="field text-[12.5px]"
+        >
+          <option value="system">{t('systemLanguage')}</option>
+          <option value="en">{t('english')}</option>
+          <option value="tr">{t('turkish')}</option>
+        </select>
+      </Field>
       <Field
         label="Download folder"
         hint="Categories create their subfolders under this one."
@@ -159,6 +173,65 @@ function GeneralTab(): React.ReactElement {
           ))}
         </select>
       </Field>
+
+      <Field
+        label="Security scanner (optional)"
+        hint="Runs after completion without a command shell. Use {file} where the downloaded path belongs."
+      >
+        <div className="grid grid-cols-[1fr_150px] gap-2">
+          <input
+            value={settings.antivirusProgram ?? ''}
+            onChange={(event) => void patch({ antivirusProgram: event.target.value || null })}
+            className="field text-[12px]"
+            placeholder="C:\\Program Files\\Scanner\\scan.exe"
+          />
+          <textarea
+            rows={2}
+            value={settings.antivirusArgs.join('\n')}
+            onChange={(event) => void patch({
+              antivirusArgs: event.target.value.split(/\r?\n/).filter(Boolean)
+            })}
+            className="field text-[12px]"
+            placeholder={'--scan\n{file}'}
+          />
+        </div>
+      </Field>
+
+      <Field
+        label="Updates"
+        hint="HTTPS JSON feed with version, url, and optional notes fields. Draco never installs an update silently."
+      >
+        <div className="flex gap-2">
+          <input
+            value={settings.updateFeedUrl ?? ''}
+            onChange={(event) => void patch({ updateFeedUrl: event.target.value || null })}
+            className="field text-[12px] flex-1"
+            placeholder="https://example.com/draco/latest.json"
+          />
+          <GhostButton
+            disabled={checkingUpdate || !settings.updateFeedUrl}
+            onClick={() => {
+              setCheckingUpdate(true)
+              void window.api.checkForUpdates()
+                .then((info) => {
+                  if (info.available) {
+                    toast('success', `Draco ${info.latestVersion} is available`, info.notes ?? undefined)
+                    if (info.downloadUrl) void window.api.openUpdate(info.downloadUrl)
+                  } else toast('success', 'Draco is up to date', info.currentVersion)
+                })
+                .catch((error) => reportError('Update check failed', error))
+                .finally(() => setCheckingUpdate(false))
+            }}
+          >
+            {checkingUpdate ? 'Checking…' : 'Check'}
+          </GhostButton>
+        </div>
+      </Field>
+      <Toggle
+        checked={settings.autoCheckUpdates}
+        onChange={(next) => void patch({ autoCheckUpdates: next })}
+        label="Check the configured feed at startup"
+      />
 
       <div className="pt-1 border-t border-line">
         <Toggle
@@ -200,9 +273,24 @@ function ConnectionTab(): React.ReactElement {
   const [limitText, setLimitText] = useState(
     settings.speedLimit ? String(Math.round(settings.speedLimit / 1024)) : ''
   )
+  const [proxyText, setProxyText] = useState(settings.proxyUrl ?? '')
+  const [quotaText, setQuotaText] = useState(
+    settings.quotaBytes ? String(Math.round(settings.quotaBytes / (1024 * 1024))) : ''
+  )
+  const [hostLimitsText, setHostLimitsText] = useState(
+    settings.hostConnectionLimits.map((rule) => `${rule.host}=${rule.connections}`).join('\n')
+  )
+
+  useEffect(() => setProxyText(settings.proxyUrl ?? ''), [settings.proxyUrl])
+  useEffect(() => {
+    setQuotaText(settings.quotaBytes ? String(Math.round(settings.quotaBytes / (1024 * 1024))) : '')
+  }, [settings.quotaBytes])
+  useEffect(() => {
+    setHostLimitsText(settings.hostConnectionLimits.map((rule) => `${rule.host}=${rule.connections}`).join('\n'))
+  }, [settings.hostConnectionLimits])
 
   return (
-    <div className="space-y-4">
+    <div className="space-y-4 max-h-[410px] overflow-y-auto pr-1">
       <div className="grid grid-cols-2 gap-3">
         <NumberField
           label="Downloads at once"
@@ -266,6 +354,65 @@ function ConnectionTab(): React.ReactElement {
           className="field text-[12.5px] tnum"
         />
       </Field>
+
+      <Field
+        label="HTTP/HTTPS proxy"
+        hint="Leave empty for a direct connection. Example: http://proxy.example:8080"
+      >
+        <input
+          value={proxyText}
+          onChange={(event) => setProxyText(event.target.value)}
+          onBlur={() => void patch({ proxyUrl: proxyText.trim() || null })}
+          placeholder="Direct connection"
+          className="field text-[12.5px]"
+        />
+      </Field>
+
+      <div className="grid grid-cols-2 gap-3">
+        <Field label="Transfer quota (MB)" hint="Leave empty for no quota.">
+          <input
+            inputMode="numeric"
+            value={quotaText}
+            onChange={(event) => setQuotaText(event.target.value.replace(/[^\d]/g, ''))}
+            onBlur={() => {
+              const mb = Number(quotaText)
+              void patch({ quotaBytes: mb > 0 ? mb * 1024 * 1024 : null })
+            }}
+            placeholder="Unlimited"
+            className="field text-[12.5px] tnum"
+          />
+        </Field>
+        <NumberField
+          label="Quota window (minutes)"
+          value={settings.quotaWindowMinutes}
+          min={1}
+          max={10_080}
+          onCommit={(next) => void patch({ quotaWindowMinutes: next })}
+        />
+      </div>
+
+      <Field
+        label="Per-host connection limits"
+        hint="One host=connections rule per line. Parent domains also match subdomains."
+      >
+        <textarea
+          value={hostLimitsText}
+          onChange={(event) => setHostLimitsText(event.target.value)}
+          onBlur={() => {
+            const rules = hostLimitsText
+              .split(/\r?\n/)
+              .map((line) => {
+                const [host, rawConnections] = line.split('=', 2)
+                return { host: host?.trim() ?? '', connections: Number(rawConnections) }
+              })
+              .filter((rule) => rule.host && Number.isFinite(rule.connections))
+            void patch({ hostConnectionLimits: rules })
+          }}
+          rows={3}
+          placeholder={'example.com=2\ndownloads.example.net=1'}
+          className="field text-[12.5px] tnum resize-y"
+        />
+      </Field>
     </div>
   )
 }
@@ -314,11 +461,11 @@ function CategoriesTab(): React.ReactElement {
         <button
           onClick={() => {
             const added: Category = {
-              // main assigns the real id; an empty one here means "new".
-              id: '',
+              id: crypto.randomUUID(),
               name: 'New category',
               folder: 'New category',
               extensions: [],
+              hosts: [],
               builtin: false
             }
             setDraft((list) => [...list, added])
@@ -363,6 +510,20 @@ function CategoriesTab(): React.ReactElement {
                 rows={4}
                 spellCheck={false}
                 className="field font-mono text-[11.5px] leading-relaxed resize-none"
+              />
+            </Field>
+
+            <Field
+              label="Site rules"
+              hint="Host suffixes, space separated. Site matches take precedence over extensions."
+            >
+              <textarea
+                value={current.hosts.join(' ')}
+                onChange={(event) => patchCurrent({ hosts: event.target.value.split(/[\s,]+/).filter(Boolean) })}
+                rows={2}
+                spellCheck={false}
+                className="field font-mono text-[11.5px] resize-none"
+                placeholder="downloads.example.com example.org"
               />
             </Field>
 
@@ -455,6 +616,21 @@ function BrowserTab(): React.ReactElement {
           value={integration?.registered.brave ? 'Registered' : 'Not registered'}
         />
         <StatusLine
+          ok={integration?.registered.opera === true}
+          label="Opera"
+          value={integration?.registered.opera ? 'Registered' : 'Not registered'}
+        />
+        <StatusLine
+          ok={integration?.registered.vivaldi === true}
+          label="Vivaldi"
+          value={integration?.registered.vivaldi ? 'Registered' : 'Not registered'}
+        />
+        <StatusLine
+          ok={integration?.registered.firefox === true}
+          label="Firefox"
+          value={integration?.registered.firefox ? 'Registered' : 'Not registered'}
+        />
+        <StatusLine
           ok={integration?.extensionId !== null && integration?.extensionId !== undefined}
           label="ID"
           value={integration?.extensionId ?? 'Run npm run keygen to pin the extension ID'}
@@ -479,6 +655,21 @@ function BrowserTab(): React.ReactElement {
           >
             <CopyIcon className="w-3.5 h-3.5 text-faint shrink-0" />
             <span className="truncate">{integration?.extensionPath ?? '—'}</span>
+          </button>
+          <p className="text-[11px] text-faint leading-relaxed mt-2 mb-2">
+            Firefox uses its generated package at:
+          </p>
+          <button
+            onClick={() => {
+              const path = integration?.firefoxExtensionPath
+              if (!path) return
+              void window.api.copyToClipboard(path)
+              toast('success', 'Firefox path copied')
+            }}
+            className="field text-left text-[11.5px] font-mono flex items-center gap-2 hover:bg-white/[0.06] transition-colors"
+          >
+            <CopyIcon className="w-3.5 h-3.5 text-faint shrink-0" />
+            <span className="truncate">{integration?.firefoxExtensionPath ?? '—'}</span>
           </button>
         </div>
       </div>
@@ -577,6 +768,17 @@ function AppearanceTab(): React.ReactElement {
 
   return (
     <div className="space-y-4">
+      <Field label="Theme">
+        <select
+          value={settings.theme}
+          onChange={(event) => void patch({ theme: event.target.value as 'system' | 'dark' | 'light' })}
+          className="field text-[12.5px]"
+        >
+          <option value="system">System</option>
+          <option value="dark">Dark</option>
+          <option value="light">Light</option>
+        </select>
+      </Field>
       <Field label="Accent" hint="Used for progress, selection and every live indicator.">
         <div className="flex gap-2">
           {ACCENTS.map((hex) => (

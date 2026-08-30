@@ -26,6 +26,8 @@ export interface YtDlpFormat {
   filesize?: number | null
   filesize_approx?: number | null
   language?: string | null
+  language_preference?: number | null
+  preference?: number | null
   audio_ext?: string
   video_ext?: string
   manifest_url?: string
@@ -168,10 +170,9 @@ function variantFor(
 
   return {
     container: containerFor(video, audio),
-    // Page-derived formats have no URL of their own, and even a yt-dlp one is
-    // only ever displayed: the task carries the watch page and its format ids,
-    // and the engine resolves the signed URL as it starts. Nothing fetches this
-    // value - see `refreshYouTubeFormat`.
+    // Page-derived formats carry the already-playing CDN resource when the
+    // browser exposes it. yt-dlp variants always carry one. Either way, this is
+    // the URL the task starts with; stable itags below remain the refresh key.
     url: video.url ?? '',
     audioUrl: audio?.url ?? null,
     label: tierLabel(tier, video.fps),
@@ -270,6 +271,65 @@ export function isDirectDownload(format: YtDlpFormat): boolean {
   return !/[.]m3u8([?#]|$)|\/manifest\//i.test(format.url ?? '')
 }
 
+/**
+ * Finds a fetchable replacement for a page-selected itag. Premium formats can
+ * share a resolution with an ordinary file while exposing only an HLS URL; the
+ * latter is what the segmented downloader needs.
+ */
+export function selectDirectYtFormat(formats: YtDlpFormat[], formatId: string): YtDlpFormat | null {
+  const direct = formats.filter(
+    (candidate) => Boolean(candidate.url) && /^https?:/i.test(candidate.url!) && isDirectDownload(candidate)
+  )
+  const exact = direct.find((candidate) => candidate.format_id === formatId)
+  if (exact) return exact
+
+  // Multi-language videos now commonly expose an itag as 140-0, 140-1, …
+  // even though YouTube's player response still names the family as 140. Pick
+  // yt-dlp's default/original-language member of that family rather than
+  // declaring the page-selected audio unavailable.
+  const alternateTracks = direct.filter((candidate) => baseFormatId(candidate.format_id) === formatId)
+  if (alternateTracks.length > 0) return preferredLanguageTrack(alternateTracks)
+
+  const requested = formats.find(
+    (candidate) => candidate.format_id === formatId || baseFormatId(candidate.format_id) === formatId
+  )
+  if (!requested) return null
+
+  const video = Boolean(requested.vcodec && requested.vcodec !== 'none')
+  const candidates = direct.filter((candidate) => {
+    const isVideo = Boolean(candidate.vcodec && candidate.vcodec !== 'none')
+    if (isVideo !== video) return false
+    if (video) return candidate.height === requested.height && candidate.width === requested.width
+    return candidate.ext === requested.ext
+  })
+  if (candidates.length === 0) return null
+
+  const targetRate = requested.vbr ?? requested.abr ?? requested.tbr ?? 0
+  return [...candidates].sort((a, b) => {
+    const aRate = a.vbr ?? a.abr ?? a.tbr ?? 0
+    const bRate = b.vbr ?? b.abr ?? b.tbr ?? 0
+    return Math.abs(aRate - targetRate) - Math.abs(bRate - targetRate)
+  })[0]
+}
+
+function baseFormatId(formatId: string | undefined): string | null {
+  if (!formatId) return null
+  const match = /^(.*)-(\d+)$/.exec(formatId)
+  return match?.[1] ?? null
+}
+
+function preferredLanguageTrack(formats: YtDlpFormat[]): YtDlpFormat {
+  return [...formats].sort((a, b) => {
+    const language = (b.language_preference ?? 0) - (a.language_preference ?? 0)
+    if (language !== 0) return language
+    const preference = (b.preference ?? 0) - (a.preference ?? 0)
+    if (preference !== 0) return preference
+    const bDefault = /(?:original|default)/i.test(b.format_note ?? '') ? 1 : 0
+    const aDefault = /(?:original|default)/i.test(a.format_note ?? '') ? 1 : 0
+    return bDefault - aDefault
+  })[0]
+}
+
 /** YouTube's progressive audio rate, used only when a format will not say. */
 const NOMINAL_PROGRESSIVE_ABR = 96
 
@@ -286,7 +346,21 @@ function videoRate(f: YtDlpFormat): number {
 }
 
 export function formatsFromYtDlp(formats: YtDlpFormat[]): SourceFormat[] {
+  const preferredAudio = new Map<string, YtDlpFormat>()
+  for (const format of formats) {
+    const audioOnly = Boolean(format.acodec && format.acodec !== 'none') &&
+      (!format.vcodec || format.vcodec === 'none')
+    const base = audioOnly ? baseFormatId(format.format_id) : null
+    if (!base) continue
+    const previous = preferredAudio.get(base)
+    preferredAudio.set(base, previous ? preferredLanguageTrack([previous, format]) : format)
+  }
+
   return formats
+    .filter((format) => {
+      const base = baseFormatId(format.format_id)
+      return !base || !preferredAudio.has(base) || preferredAudio.get(base) === format
+    })
     .filter((f) => f.url && /^https?:/i.test(f.url) && isDirectDownload(f))
     .map((f) => ({
       id: f.format_id ?? '',
@@ -343,7 +417,7 @@ export function formatsFromPage(formats: PageFormat[]): SourceFormat[] {
 
       return {
         id: String(f.itag),
-        url: null,
+        url: f.url ?? null,
         width: f.width ?? null,
         height: f.height ?? null,
         fps: f.fps ?? null,

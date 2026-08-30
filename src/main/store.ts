@@ -5,15 +5,15 @@ import type {
   Category,
   ColumnPref,
   DownloadTask,
-  MediaCandidate,
   Queue,
+  SiteGrabProject,
   Settings
 } from '@shared/types'
+import type { QuotaState } from './engine/limiter.ts'
 import { getPaths } from './bootstrap/paths.ts'
 import { defaultCategories } from './categories.ts'
 import {
   sanitizeCategories,
-  sanitizeMedia,
   sanitizeQueues,
   sanitizeSettings,
   sanitizeTasks
@@ -70,11 +70,22 @@ export function defaultColumns(): ColumnPref[] {
 
 export function defaultSettings(): Settings {
   return {
+    language: 'system',
+    theme: 'dark',
     downloadDir: getPaths().defaultDownloadDir,
     maxConcurrentTasks: 3,
     maxConnectionsPerTask: 8,
     minSplitSize: 1024 * 1024,
     speedLimit: null,
+    proxyUrl: null,
+    hostConnectionLimits: [],
+    quotaBytes: null,
+    quotaWindowMinutes: 60,
+    antivirusProgram: null,
+    antivirusArgs: ['{file}'],
+    antivirusTimeoutSeconds: 120,
+    updateFeedUrl: null,
+    autoCheckUpdates: true,
     retryLimit: 5,
     timeoutMs: 30_000,
     defaultCategoryId: null,
@@ -203,6 +214,32 @@ export async function flushTasks(): Promise<void> {
 }
 
 /* ------------------------------------------------------------------ */
+/* Transfer quota                                                      */
+/* ------------------------------------------------------------------ */
+
+let quotaWritePromise: Promise<void> = Promise.resolve()
+
+export async function loadQuotaState(): Promise<QuotaState | null> {
+  const raw = await readJson<unknown>(getPaths().quotaFile)
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null
+  const source = raw as Record<string, unknown>
+  if (!Number.isSafeInteger(source.used) || (source.used as number) < 0) return null
+  if (typeof source.startedAt !== 'number' || !Number.isFinite(source.startedAt) || source.startedAt < 0) return null
+  return { used: source.used as number, startedAt: source.startedAt }
+}
+
+export function persistQuotaState(state: QuotaState): void {
+  const snapshot = { ...state }
+  quotaWritePromise = quotaWritePromise
+    .then(() => writeJsonAtomic(getPaths().quotaFile, snapshot))
+    .catch(() => {})
+}
+
+export async function flushQuotaState(): Promise<void> {
+  await quotaWritePromise
+}
+
+/* ------------------------------------------------------------------ */
 /* Queues                                                              */
 /* ------------------------------------------------------------------ */
 
@@ -219,9 +256,14 @@ export async function loadQueues(): Promise<Queue[]> {
       stopTime: null,
       days: [],
       maxConcurrent: 3,
+      retryLimit: 3,
+      retryDelaySeconds: 30,
       onComplete: 'none',
+      completionProgram: null,
+      completionArgs: [],
       running: false,
-      oneTimeCompleted: false
+      oneTimeCompleted: false,
+      lastResult: 'idle'
     }
     await writeJsonAtomic(getPaths().queuesFile, [main])
     return [main]
@@ -236,19 +278,47 @@ export async function saveQueues(queues: Queue[]): Promise<void> {
   await writeJsonAtomic(getPaths().queuesFile, queues)
 }
 
-/* ------------------------------------------------------------------ */
-/* Media candidates                                                    */
-/* ------------------------------------------------------------------ */
-
-export async function loadMedia(): Promise<MediaCandidate[]> {
-  const stored = await readJson<unknown>(getPaths().mediaFile)
-  const media = sanitizeMedia(stored)
-  if (Array.isArray(stored)) await writeJsonAtomic(getPaths().mediaFile, media)
-  return media
+export async function loadSiteProjects(): Promise<SiteGrabProject[]> {
+  const stored = await readJson<unknown>(getPaths().siteProjectsFile)
+  if (!Array.isArray(stored)) return []
+  const projects: SiteGrabProject[] = []
+  for (const raw of stored.slice(0, 100)) {
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) continue
+    const value = raw as Record<string, unknown>
+    const options = value.options as Record<string, unknown> | undefined
+    if (!options || typeof options.startUrl !== 'string') continue
+    let parsed: URL
+    try { parsed = new URL(options.startUrl) } catch { continue }
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') continue
+    projects.push({
+      id: typeof value.id === 'string' && value.id ? value.id.slice(0, 128) : randomUUID(),
+      name: typeof value.name === 'string' && value.name.trim() ? value.name.trim().slice(0, 100) : parsed.hostname,
+      options: {
+        startUrl: parsed.toString(),
+        maxDepth: Math.min(5, Math.max(0, Math.round(Number(options.maxDepth)) || 0)),
+        maxPages: Math.min(1000, Math.max(1, Math.round(Number(options.maxPages)) || 100)),
+        includeAssets: options.includeAssets !== false,
+        stayOnHost: options.stayOnHost !== false,
+        respectRobots: options.respectRobots !== false,
+        autoStart: options.autoStart === true,
+        scheduleHours: typeof options.scheduleHours === 'number' && Number.isFinite(options.scheduleHours) && options.scheduleHours >= 1
+          ? Math.min(24 * 30, Math.round(options.scheduleHours))
+          : null
+      },
+      rootDir: typeof value.rootDir === 'string' ? value.rootDir.slice(0, 32768) : '',
+      knownUrls: Array.isArray(value.knownUrls)
+        ? [...new Set(value.knownUrls.filter((url): url is string => typeof url === 'string'))].slice(0, 10_000)
+        : [],
+      createdAt: typeof value.createdAt === 'number' ? value.createdAt : Date.now(),
+      lastRunAt: typeof value.lastRunAt === 'number' ? value.lastRunAt : null,
+      lastError: typeof value.lastError === 'string' ? value.lastError.slice(0, 2000) : null
+    })
+  }
+  return projects
 }
 
-export async function saveMedia(media: MediaCandidate[]): Promise<void> {
-  await writeJsonAtomic(getPaths().mediaFile, media)
+export async function saveSiteProjects(projects: SiteGrabProject[]): Promise<void> {
+  await writeJsonAtomic(getPaths().siteProjectsFile, projects)
 }
 
 export { toFolderName } from './store-sanitize-path.ts'

@@ -1,4 +1,4 @@
-import { Agent, interceptors, type Dispatcher } from 'undici'
+import { Agent, ProxyAgent, interceptors, type Dispatcher } from 'undici'
 
 /**
  * The shared connection pool.
@@ -14,12 +14,22 @@ import { Agent, interceptors, type Dispatcher } from 'undici'
  */
 
 const dispatchers = new Map<number, Dispatcher>()
+const retiredDispatchers = new Set<Dispatcher>()
+let proxyUrl: string | null = null
+
+/** Applies to newly-created pools; active requests finish on their old pool. */
+export function setProxyUrl(next: string | null): void {
+  if (next === proxyUrl) return
+  proxyUrl = next
+  for (const dispatcher of dispatchers.values()) retiredDispatchers.add(dispatcher)
+  dispatchers.clear()
+}
 
 export function getDispatcher(timeoutMs: number): Dispatcher {
   const existing = dispatchers.get(timeoutMs)
   if (existing) return existing
 
-  const agent = new Agent({
+  const options = {
     // Must comfortably exceed maxConnectionsPerTask, or segments of the same
     // file would queue behind each other instead of running in parallel.
     connections: 64,
@@ -27,7 +37,11 @@ export function getDispatcher(timeoutMs: number): Dispatcher {
     keepAliveMaxTimeout: 120_000,
     headersTimeout: timeoutMs,
     bodyTimeout: timeoutMs
-  }).compose(interceptors.redirect({ maxRedirections: 10 }))
+  }
+  const base = proxyUrl
+    ? new ProxyAgent({ uri: proxyUrl, ...options })
+    : new Agent(options)
+  const agent = base.compose(interceptors.redirect({ maxRedirections: 10 }))
 
   dispatchers.set(timeoutMs, agent)
   return agent
@@ -35,7 +49,8 @@ export function getDispatcher(timeoutMs: number): Dispatcher {
 
 /** Closes every pool. Only for shutdown - in-flight requests are cut off. */
 export async function closeDispatchers(): Promise<void> {
-  const all = [...dispatchers.values()]
+  const all = [...dispatchers.values(), ...retiredDispatchers]
   dispatchers.clear()
+  retiredDispatchers.clear()
   await Promise.allSettled(all.map((d) => d.close()))
 }

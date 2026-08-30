@@ -51,6 +51,27 @@
   --row-h: 30px;
 }
 
+:root[data-theme='light'] {
+  --color-abyss: #eef2f7;
+  --color-ground: #f6f8fb;
+  --color-surface: #ffffff;
+  --color-raised: #e9eef5;
+  --color-line: rgba(15, 23, 42, 0.10);
+  --color-line-strong: rgba(15, 23, 42, 0.18);
+  --color-ink: #101828;
+  --color-muted: #475467;
+  --color-faint: #667085;
+}
+
+:root[data-theme='light'] [class*='bg-white/'] {
+  background-color: rgba(15, 23, 42, 0.045) !important;
+}
+
+:root[data-theme='light'] ::-webkit-scrollbar-thumb {
+  background: rgba(15, 23, 42, 0.16);
+  background-clip: content-box;
+}
+
 * {
   box-sizing: border-box;
 }

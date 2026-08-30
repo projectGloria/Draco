@@ -14,8 +14,10 @@ export interface AppPaths {
   tasksFile: string
   categoriesFile: string
   queuesFile: string
+  quotaFile: string
   /** Streams the extension spotted, kept between runs so the panel survives a restart. */
   mediaFile: string
+  siteProjectsFile: string
   /** Empty stand-in files the shell is asked for a file-type icon against. */
   iconCache: string
   ffmpegExe: string
@@ -23,10 +25,12 @@ export interface AppPaths {
   defaultDownloadDir: string
   /** The folder the user points chrome://extensions -> Load unpacked at. */
   extensionDir: string
+  firefoxExtensionDir: string
   /** The console binary Chrome launches for native messaging. */
   hostExe: string
   /** Where the generated native-messaging manifest is written. */
   hostManifest: string
+  firefoxHostManifest: string
 }
 
 let cached: AppPaths | null = null
@@ -50,16 +54,20 @@ export function getPaths(): AppPaths {
     tasksFile: join(root, 'tasks.json'),
     categoriesFile: join(root, 'categories.json'),
     queuesFile: join(root, 'queues.json'),
+    quotaFile: join(root, 'quota.json'),
     mediaFile: join(root, 'media.json'),
+    siteProjectsFile: join(root, 'site-projects.json'),
     iconCache: join(root, 'icon-cache'),
     ffmpegExe: join(bin, 'ffmpeg.exe'),
     ytDlpExe: join(bin, 'yt-dlp.exe'),
     defaultDownloadDir: join(app.getPath('downloads'), 'Draco'),
     extensionDir: join(resourceRoot, 'extension'),
+    firefoxExtensionDir: join(resourceRoot, 'extension-firefox'),
     hostExe: app.isPackaged
       ? join(resourceRoot, 'draco-host.exe')
       : join(resourceRoot, 'host', 'draco-host.exe'),
-    hostManifest: join(root, 'com.nihil.draco.json')
+    hostManifest: join(root, 'com.nihil.draco.json'),
+    firefoxHostManifest: join(root, 'com.nihil.draco.firefox.json')
   }
   return cached
 }

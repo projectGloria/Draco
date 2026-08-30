@@ -21,6 +21,7 @@ const MODES: Array<{ id: QueueMode; label: string; hint: string }> = [
 
 const ACTIONS: Array<{ id: QueueCompletionAction; label: string }> = [
   { id: 'none', label: 'Do nothing' },
+  { id: 'run', label: 'Run a program' },
   { id: 'exit', label: 'Quit Draco' },
   { id: 'sleep', label: 'Sleep' },
   { id: 'hibernate', label: 'Hibernate' },
@@ -37,9 +38,14 @@ function blankQueue(): Queue {
     stopTime: null,
     days: [1, 2, 3, 4, 5],
     maxConcurrent: 2,
+    retryLimit: 3,
+    retryDelaySeconds: 30,
     onComplete: 'none',
+    completionProgram: null,
+    completionArgs: [],
     running: false,
-    oneTimeCompleted: false
+    oneTimeCompleted: false,
+    lastResult: 'idle'
   }
 }
 
@@ -89,7 +95,12 @@ export default function SchedulerDialog({ onClose }: { onClose(): void }): React
     }
   }
 
-  const assigned = tasks.filter((t) => t.queueId === draft.id)
+  const assigned = [
+    ...draft.taskIds
+      .map((id) => tasks.find((task) => task.id === id && task.queueId === draft.id))
+      .filter((task): task is NonNullable<typeof task> => Boolean(task)),
+    ...tasks.filter((task) => task.queueId === draft.id && !draft.taskIds.includes(task.id))
+  ]
   const timed = draft.mode !== 'manual'
 
   return (
@@ -250,7 +261,7 @@ export default function SchedulerDialog({ onClose }: { onClose(): void }): React
                         patch({
                           days: on
                             ? draft.days.filter((d) => d !== index)
-                            : [...draft.days, index].sort()
+                            : [...draft.days, index].sort((a, b) => a - b)
                         })
                       }
                       className={
@@ -272,6 +283,31 @@ export default function SchedulerDialog({ onClose }: { onClose(): void }): React
           )}
 
           <div>
+            <label className="label">Failure retries</label>
+            <div className="grid grid-cols-2 gap-3">
+              <input
+                type="number"
+                min={0}
+                max={20}
+                value={draft.retryLimit}
+                onChange={(event) => patch({ retryLimit: Number(event.target.value) })}
+                className="field text-[12.5px] tnum"
+                title="Additional queue-level attempts after request retries are exhausted"
+              />
+              <input
+                type="number"
+                min={0}
+                max={86400}
+                value={draft.retryDelaySeconds}
+                onChange={(event) => patch({ retryDelaySeconds: Number(event.target.value) })}
+                className="field text-[12.5px] tnum"
+                title="Seconds before retrying a failed download"
+              />
+            </div>
+            <p className="text-[10.5px] text-faint mt-1">Additional attempts · delay in seconds</p>
+          </div>
+
+          <div>
             <label className="label">When the queue finishes</label>
             <select
               value={draft.onComplete}
@@ -286,6 +322,23 @@ export default function SchedulerDialog({ onClose }: { onClose(): void }): React
                 </option>
               ))}
             </select>
+            {draft.onComplete === 'run' && (
+              <div className="grid grid-cols-2 gap-2 mt-2">
+                <input
+                  value={draft.completionProgram ?? ''}
+                  onChange={(event) => patch({ completionProgram: event.target.value || null })}
+                  className="field text-[12px]"
+                  placeholder="C:\\Tools\\after-download.exe"
+                />
+                <textarea
+                  rows={2}
+                  value={draft.completionArgs.join('\n')}
+                  onChange={(event) => patch({ completionArgs: event.target.value.split(/\r?\n/).filter(Boolean) })}
+                  className="field text-[12px]"
+                  placeholder="One argument per line"
+                />
+              </div>
+            )}
             {draft.onComplete !== 'none' && draft.onComplete !== 'exit' && (
               <p className="text-[11px] text-faint mt-1.5 leading-relaxed">
                 You get a minute to call this off before it happens.
@@ -301,9 +354,29 @@ export default function SchedulerDialog({ onClose }: { onClose(): void }): React
               </p>
             ) : (
               <div className="max-h-[110px] overflow-y-auto rounded-lg border border-line divide-y divide-line">
-                {assigned.map((task) => (
-                  <div key={task.id} className="px-2.5 py-1.5 text-[11.5px] truncate">
-                    {task.filename}
+                {assigned.map((task, index) => (
+                  <div key={task.id} className="px-2.5 py-1.5 text-[11.5px] flex items-center gap-2">
+                    <span className="flex-1 truncate">{task.filename}</span>
+                    <button
+                      disabled={index === 0}
+                      onClick={() => {
+                        const ids = assigned.map((item) => item.id)
+                        ;[ids[index - 1], ids[index]] = [ids[index], ids[index - 1]]
+                        patch({ taskIds: ids })
+                      }}
+                      className="text-faint hover:text-ink disabled:opacity-20"
+                      title="Move earlier"
+                    >↑</button>
+                    <button
+                      disabled={index === assigned.length - 1}
+                      onClick={() => {
+                        const ids = assigned.map((item) => item.id)
+                        ;[ids[index], ids[index + 1]] = [ids[index + 1], ids[index]]
+                        patch({ taskIds: ids })
+                      }}
+                      className="text-faint hover:text-ink disabled:opacity-20"
+                      title="Move later"
+                    >↓</button>
                   </div>
                 ))}
               </div>

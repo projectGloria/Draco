@@ -28,9 +28,13 @@ const FILE_EXTENSIONS = new Set([
 ])
 
 function extensionOfPath(url) {
+  // Fast path: avoid URL parsing if string clearly doesn't have an extension
+  const match = /\.([a-z0-9]{1,10})(?:[?#]|$)/i.exec(url)
+  if (!match) return ''
   try {
-    const match = /\.([a-z0-9]{1,10})$/i.exec(new URL(url, location.href).pathname)
-    return match ? match[1].toLowerCase() : ''
+    const parsed = new URL(url, location.href)
+    const m = /\.([a-z0-9]{1,10})$/i.exec(parsed.pathname)
+    return m ? m[1].toLowerCase() : ''
   } catch {
     return ''
   }
@@ -76,14 +80,21 @@ addEventListener(
 
     const suggested = anchor.getAttribute('download') || ''
 
+    let replayNode = null
+    const replay = () => {
+      if (anchor.target === '_blank') {
+        window.open(url, '_blank')
+      } else {
+        location.href = url
+      }
+    }
+
     chrome.runtime
       .sendMessage({ type: 'draco:link-click', url, filename: suggested || undefined })
       .then((reply) => {
-        if (!reply?.taken) location.href = url
+        if (!reply?.taken) replay()
       })
-      .catch(() => {
-        location.href = url
-      })
+      .catch(() => replay())
   },
   true
 )
@@ -149,6 +160,10 @@ function pageWantsButtons() {
 let handled = new WeakSet()
 let takenOver = false
 let pageKey = location.href
+let primedVideoId = null
+let primingVideoId = null
+let primeRetryTimer = null
+let primeRetryDelay = 1500
 
 /**
  * Where the button sits relative to the corner it is anchored to.
@@ -173,7 +188,6 @@ const GAP = 8
 let mediaCount = 0
 let scheduled = false
 let scanScheduled = false
-let pollTimer = null
 
 /** Fullscreen creates a new stacking context; anything outside it is invisible. */
 function overlayRoot() {
@@ -431,11 +445,26 @@ async function grab(entry) {
   }
 
   const source = entry.video.currentSrc || entry.video.src || ''
+  const subtitles = [...entry.video.querySelectorAll('track[src]')]
+    .filter((track) => track.kind === 'subtitles' || track.kind === 'captions')
+    .slice(0, 20)
+    .map((track) => {
+      const url = new URL(track.src, location.href).href
+      const path = new URL(url).pathname.toLowerCase()
+      const format = path.endsWith('.srt') ? 'srt' : path.endsWith('.ttml') || path.endsWith('.xml') ? 'ttml' : 'vtt'
+      return {
+        url,
+        label: track.label || track.srclang || 'Subtitles',
+        language: track.srclang || null,
+        format
+      }
+    })
   let reply
   try {
     reply = await chrome.runtime.sendMessage({
       type: 'draco:grab-best',
       videoSrc: /^https?:/i.test(source) ? source : '',
+      subtitles,
       adaptive: source.startsWith('blob:') || ADAPTIVE_SITES.test(location.hostname)
     })
   } catch (err) {
@@ -539,16 +568,10 @@ function layout() {
     entry.host.style.left = Math.round(left) + 'px'
     entry.host.style.top = Math.round(top) + 'px'
   }
-
-  if (overlays.size > 0 && !pollTimer) {
-    // A safety net for layout the observers cannot see - a player animating its
-    // own size, a sticky header collapsing. Cheap, and only while a video exists.
-    pollTimer = setInterval(schedule, 500)
-  } else if (overlays.size === 0 && pollTimer) {
-    clearInterval(pollTimer)
-    pollTimer = null
-  }
 }
+
+addEventListener('scroll', schedule, { capture: true, passive: true })
+addEventListener('resize', schedule, { passive: true })
 
 function destroy(entry) {
   clearTimeout(entry.resetTimer)
@@ -569,6 +592,10 @@ function checkNavigation() {
 
   handled = new WeakSet()
   takenOver = false
+  clearTimeout(primeRetryTimer)
+  primeRetryTimer = null
+  primingVideoId = null
+  primeRetryDelay = 1500
 
   // The overlays go with the old page. Rebuilding them is what returns a button
   // to a reused video element, and `destroy` also cancels the retire timer of
@@ -591,10 +618,62 @@ function scan() {
     return
   }
 
-  for (const video of document.querySelectorAll('video')) {
+  const videos = document.querySelectorAll('video')
+  for (const video of videos) {
     if (!overlays.has(video) && !handled.has(video)) createOverlay(video)
   }
+  if (videos.length > 0) primeYouTubeIfNeeded()
   schedule()
+}
+
+function currentYouTubeVideoId() {
+  return (
+    new URLSearchParams(location.search).get('v') ||
+    (/^\/(?:shorts|embed|live)\/([^/?#]+)/i.exec(location.pathname) || [])[1] ||
+    (/(^|\.)youtu\.be$/i.test(location.hostname)
+      ? location.pathname.replace(/^\//, '').split('/')[0]
+      : null)
+  )
+}
+
+function scheduleYouTubePrimeRetry(videoId) {
+  if (currentYouTubeVideoId() !== videoId || primedVideoId === videoId) return
+
+  clearTimeout(primeRetryTimer)
+  const delay = primeRetryDelay
+  primeRetryDelay = Math.min(primeRetryDelay * 2, 10000)
+  primeRetryTimer = setTimeout(() => {
+    primeRetryTimer = null
+    primeYouTubeIfNeeded()
+  }, delay)
+}
+
+/** Starts extraction on page open and retries until the link cache is ready. */
+function primeYouTubeIfNeeded() {
+  if (!isTopFrame || !YOUTUBE_HOSTS.test(location.hostname)) return
+
+  const videoId = currentYouTubeVideoId()
+
+  if (!videoId || videoId === primedVideoId || videoId === primingVideoId) return
+
+  primingVideoId = videoId
+  void chrome.runtime
+    .sendMessage({ type: 'draco:prime-youtube' })
+    .then((reply) => {
+      if (currentYouTubeVideoId() !== videoId) return
+
+      if (reply?.ok && reply?.primed) {
+        primedVideoId = videoId
+        primeRetryDelay = 1500
+        console.debug('[Draco] YouTube download links are ready')
+      } else {
+        scheduleYouTubePrimeRetry(videoId)
+      }
+    })
+    .catch(() => scheduleYouTubePrimeRetry(videoId))
+    .finally(() => {
+      if (primingVideoId === videoId) primingVideoId = null
+    })
 }
 
 /* ------------------------------------------------------------------ */

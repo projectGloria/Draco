@@ -48,16 +48,31 @@ export class HttpStatusError extends Error {
 
 export class ServerBusyError extends Error {
   readonly statusCode: number
+  readonly retryAfterMs: number | null
 
-  constructor(statusCode: number) {
+  constructor(statusCode: number, retryAfterMs: number | null = null) {
     super(`Server refused another connection (${statusCode})`)
     this.name = 'ServerBusyError'
     this.statusCode = statusCode
+    this.retryAfterMs = retryAfterMs
   }
 }
 
 /** 429 is explicit; 503 is what a connection-limited origin sends instead. */
 const BUSY_STATUS = new Set([429, 503])
+
+/** Parses either form allowed by HTTP: delay-seconds or an absolute HTTP date. */
+export function parseRetryAfterMs(value: string | string[] | undefined, now = Date.now()): number | null {
+  const raw = Array.isArray(value) ? value[0] : value
+  if (!raw) return null
+
+  const seconds = Number(raw.trim())
+  if (Number.isFinite(seconds) && seconds >= 0) return Math.min(300_000, seconds * 1000)
+
+  const date = Date.parse(raw)
+  if (!Number.isFinite(date)) return null
+  return Math.min(300_000, Math.max(0, date - now))
+}
 
 export interface SegmentContext {
   url: string
@@ -138,8 +153,9 @@ async function attemptSegment(seg: Segment, ctx: SegmentContext): Promise<void> 
   }
 
   if (BUSY_STATUS.has(res.statusCode)) {
+    const retryAfterMs = parseRetryAfterMs(res.headers['retry-after'])
     await res.body.dump().catch(() => {})
-    throw new ServerBusyError(res.statusCode)
+    throw new ServerBusyError(res.statusCode, retryAfterMs)
   }
 
   if (res.statusCode !== 206 && res.statusCode !== 200) {

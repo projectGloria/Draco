@@ -13,7 +13,7 @@
  * permanent. The private half is never needed again - it is only kept so the
  * same identity can be reissued if the manifest is ever rebuilt from scratch.
  */
-import { generateKeyPairSync, createHash } from 'node:crypto'
+import { generateKeyPairSync, createHash, createPrivateKey, createPublicKey } from 'node:crypto'
 import { readFileSync, writeFileSync, existsSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -38,7 +38,6 @@ if (existsSync(pemPath)) {
   // Reusing the existing key keeps the ID stable across reruns - regenerating
   // it would invalidate the registry entry and every allowed_origins line.
   pem = readFileSync(pemPath, 'utf8')
-  const { createPrivateKey, createPublicKey } = await import('node:crypto')
   der = createPublicKey(createPrivateKey(pem)).export({ type: 'spki', format: 'der' })
   console.log('reusing existing extension/key.pem')
 } else {
@@ -56,7 +55,13 @@ if (existsSync(pemPath)) {
 const key = Buffer.from(der).toString('base64')
 const id = extensionIdFromDer(der)
 
-const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'))
+let manifest
+try {
+  manifest = JSON.parse(readFileSync(manifestPath, 'utf8'))
+} catch (err) {
+  console.error(`Could not read manifest at ${manifestPath}:`, err)
+  process.exit(1)
+}
 manifest.key = key
 writeFileSync(manifestPath, JSON.stringify(manifest, null, 2) + '\n', 'utf8')
 

@@ -1,20 +1,21 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useCallback, useState } from 'react'
 import { filterTasks, sortTasks, useApp } from './store/app'
 import { reportError, toast } from './store/toasts'
 import AddUrlDialog from './components/AddUrlDialog'
 import ConfirmDialog, { type ConfirmRequest } from './components/ConfirmDialog'
 import DownloadTable from './components/DownloadTable'
-import GrabberPanel from './components/GrabberPanel'
 import OptionsDialog from './components/OptionsDialog'
 import PendingActionBar from './components/PendingActionBar'
 import SaveAsDialog from './components/SaveAsDialog'
 import SchedulerDialog from './components/SchedulerDialog'
+import SiteGrabberDialog from './components/SiteGrabberDialog'
 import Sidebar from './components/Sidebar'
 import StatusBar from './components/StatusBar'
 import TaskDetailDialog from './components/TaskDetailDialog'
 import TitleBar from './components/TitleBar'
 import Toasts from './components/Toasts'
 import Toolbar, { type ToolbarActions } from './components/Toolbar'
+import { resolvedLanguage } from './i18n'
 
 export default function App(): React.ReactElement {
   const init = useApp((s) => s.init)
@@ -29,8 +30,10 @@ export default function App(): React.ReactElement {
   const [saveAsUrl, setSaveAsUrl] = useState<string | null>(null)
   const [detailId, setDetailId] = useState<string | null>(null)
   const [schedulerOpen, setSchedulerOpen] = useState(false)
+  const [siteGrabberOpen, setSiteGrabberOpen] = useState(false)
   const [optionsOpen, setOptionsOpen] = useState(false)
   const [confirm, setConfirm] = useState<ConfirmRequest | null>(null)
+  const [draggingUrl, setDraggingUrl] = useState(false)
 
   useEffect(() => {
     void init()
@@ -51,6 +54,17 @@ export default function App(): React.ReactElement {
     }
   }, [init])
 
+  useEffect(() => {
+    document.documentElement.lang = resolvedLanguage(settings.language)
+  }, [settings.language])
+
+  useEffect(() => {
+    const systemDark = window.matchMedia('(prefers-color-scheme: dark)').matches
+    document.documentElement.dataset.theme = settings.theme === 'system'
+      ? (systemDark ? 'dark' : 'light')
+      : settings.theme
+  }, [settings.theme])
+
   const rows = useMemo(
     () =>
       sortTasks(
@@ -65,10 +79,11 @@ export default function App(): React.ReactElement {
   /* Commands                                                          */
   /* ---------------------------------------------------------------- */
 
-  function requestDelete(ids: string[]): void {
-    if (ids.length === 0) return
-    const targets = tasks.filter((t) => ids.includes(t.id))
-    const finished = targets.filter((t) => t.status === 'done')
+  const requestDelete = useCallback((ids: string[]): void => {
+    const targets = ids.map((id) => tasks.find((t) => t.id === id)).filter((t) => t != null)
+    if (targets.length === 0) return
+
+    const finished = targets.filter((t) => t?.status === 'done')
 
     const remove = (deleteFiles: boolean): void => {
       void window.api
@@ -94,9 +109,9 @@ export default function App(): React.ReactElement {
       checkbox: finished.length > 0 ? 'Also delete the downloaded files' : undefined,
       onConfirm: remove
     })
-  }
+  }, [tasks, settings.confirmDelete])
 
-  const actions: ToolbarActions = {
+  const actions: ToolbarActions = useMemo(() => ({
     onAdd: () => setAddOpen(true),
     onResume: () => {
       void window.api.startTasks(selection).catch((err) => reportError('Could not resume', err))
@@ -121,11 +136,39 @@ export default function App(): React.ReactElement {
       }),
     onDetails: () => selection[0] && setDetailId(selection[0]),
     onScheduler: () => setSchedulerOpen(true),
-    onOptions: () => setOptionsOpen(true)
-  }
+    onOptions: () => setOptionsOpen(true),
+    onSiteGrabber: () => setSiteGrabberOpen(true)
+  }), [selection, requestDelete])
 
   return (
-    <div className="app-bg h-full flex flex-col overflow-hidden">
+    <div
+      className="app-bg h-full flex flex-col overflow-hidden"
+      onDragEnter={(event) => {
+        if ([...event.dataTransfer.types].some((type) => type === 'text/uri-list' || type === 'text/plain')) {
+          event.preventDefault()
+          setDraggingUrl(true)
+        }
+      }}
+      onDragOver={(event) => {
+        event.preventDefault()
+        event.dataTransfer.dropEffect = 'copy'
+      }}
+      onDragLeave={(event) => {
+        if (event.currentTarget === event.target) setDraggingUrl(false)
+      }}
+      onDrop={(event) => {
+        event.preventDefault()
+        setDraggingUrl(false)
+        const raw = event.dataTransfer.getData('text/uri-list') || event.dataTransfer.getData('text/plain')
+        const urls = [...new Set(raw.split(/[\r\n\s]+/).filter((value) => /^https?:\/\//i.test(value)))]
+        if (urls.length === 1) setSaveAsUrl(urls[0])
+        else if (urls.length > 1) {
+          void Promise.all(urls.map((url) => window.api.addDownload({ url })))
+            .then(() => toast('success', `${urls.length} dropped links added`))
+            .catch((error) => reportError('Could not add dropped links', error))
+        } else toast('info', 'Drop an HTTP or HTTPS link')
+      }}
+    >
       <span
         className="bloom w-[420px] h-[420px] -top-[180px] -left-[120px] opacity-[0.16]"
         style={{ background: 'var(--accent)' }}
@@ -142,11 +185,7 @@ export default function App(): React.ReactElement {
         <Sidebar onEditQueues={() => setSchedulerOpen(true)} />
 
         <main className="flex-1 min-w-0 flex flex-col">
-          {sidebar === 'grabber' ? (
-            <GrabberPanel />
-          ) : (
-            <DownloadTable rows={rows} onDetails={setDetailId} onDelete={requestDelete} />
-          )}
+          <DownloadTable rows={rows} onDetails={setDetailId} onDelete={requestDelete} />
         </main>
       </div>
 
@@ -172,11 +211,20 @@ export default function App(): React.ReactElement {
       {saveAsUrl && <SaveAsDialog url={saveAsUrl} onClose={() => setSaveAsUrl(null)} />}
       {detailId && <TaskDetailDialog id={detailId} onClose={() => setDetailId(null)} />}
       {schedulerOpen && <SchedulerDialog onClose={() => setSchedulerOpen(false)} />}
+      {siteGrabberOpen && <SiteGrabberDialog onClose={() => setSiteGrabberOpen(false)} />}
       {optionsOpen && <OptionsDialog onClose={() => setOptionsOpen(false)} />}
       {confirm && <ConfirmDialog request={confirm} onClose={() => setConfirm(null)} />}
 
       {pending && <PendingActionBar pending={pending} />}
       <Toasts />
+      {draggingUrl && (
+        <div className="pointer-events-none fixed inset-3 z-[95] grid place-items-center rounded-2xl border-2 border-dashed border-[var(--accent)] bg-black/70 backdrop-blur-sm">
+          <div className="text-center">
+            <div className="text-lg font-semibold text-ink">Drop links to download</div>
+            <div className="text-xs text-muted mt-1">HTTP and HTTPS addresses are accepted</div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }

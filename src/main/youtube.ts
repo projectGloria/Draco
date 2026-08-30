@@ -8,14 +8,19 @@ import {
   buildVariants,
   formatsFromPage,
   formatsFromYtDlp,
-  isDirectDownload,
+  selectDirectYtFormat,
   type YtDlpFormat
 } from './youtube-ladder.ts'
+import { electronNodeRuntimeArgs, electronNodeRuntimeEnv } from './youtube-runtime.ts'
 
 const log = logger('youtube')
 
 const YTDLP_URL = 'https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe'
 const MIN_YTDLP_BYTES = 2_000_000
+// A normal metadata lookup takes a few seconds. A longer wait gives slow
+// connections room while ensuring a task cannot stay on "Getting the download
+// link" forever if GitHub, YouTube, or an extractor component stalls.
+const YTDLP_LOOKUP_TIMEOUT_MS = 45_000
 
 let ytdlpProvision: Promise<string> | null = null
 
@@ -48,17 +53,12 @@ export function resolveYouTubeInstant(
   }
 }
 
-/**
- * Starts the yt-dlp lookup without waiting for it.
- *
- * Called as the confirm window opens, so the six seconds it takes overlap with
- * the user reading the quality list rather than following their click on
- * Download.
- */
-export function primeYouTube(pageUrl: string, headers: RequestHeaders | undefined): void {
-  void loadInfo(pageUrl, headers).catch(() => {
-    // Primed speculatively; whoever actually needs it will surface the error.
-  })
+/** Fills the shared yt-dlp cache before the user asks to download. */
+export async function primeYouTube(
+  pageUrl: string,
+  headers: RequestHeaders | undefined
+): Promise<void> {
+  await loadInfo(pageUrl, headers)
 }
 
 export async function resolveYouTube(
@@ -82,7 +82,6 @@ export async function resolveYouTube(
   }
 }
 
-
 export async function refreshYouTubeFormat(
   pageUrl: string,
   headers: RequestHeaders | undefined,
@@ -94,19 +93,30 @@ export async function refreshYouTubeFormat(
   // wants the cache: `primeYouTube` filled it while the window was open, and
   // insisting on a fresh lookup there is six seconds spent to learn the same
   // thing twice - once per stream, for a video and audio pair.
-  const info = await loadInfo(pageUrl, headers, force)
+  let info = await loadInfo(pageUrl, headers, force)
   // The same guard the ladder applies, repeated at the point of use: this is
   // the only place a YouTube download URL comes from, and what reaches the
   // engine must be a file it can fetch rather than an HLS or DASH manifest.
-  const format = (info.formats ?? []).find(
-    (candidate) =>
-      candidate.format_id === formatId &&
-      candidate.url &&
-      /^https?:/i.test(candidate.url) &&
-      isDirectDownload(candidate)
-  )
+  let format = selectDirectYtFormat(info.formats ?? [], formatId)
+  if (!format?.url && headers?.cookie) {
+    // Some YouTube sessions accept playback in Chrome but cause the extractor
+    // client to receive only a low-quality progressive fallback. Retrying
+    // without the browser cookie preserves the requested quality whenever the
+    // public extractor response has the normal adaptive stream list.
+    log.warn(`YouTube format ${formatId} was unavailable with browser cookies; retrying without them`)
+    const { cookie: _cookie, ...headersWithoutCookie } = headers
+    info = await loadInfo(
+      pageUrl,
+      Object.keys(headersWithoutCookie).length > 0 ? headersWithoutCookie : undefined,
+      true
+    )
+    format = selectDirectYtFormat(info.formats ?? [], formatId)
+  }
   if (!format?.url) {
     throw new Error(`YouTube format ${formatId} is no longer available`)
+  }
+  if (format.format_id !== formatId) {
+    log.warn(`replacing non-direct YouTube format ${formatId} with ${format.format_id}`)
   }
   return format.url
 }
@@ -159,7 +169,10 @@ async function loadInfo(
 
   if (!force) {
     const hit = infoCache.get(key)
-    if (hit && now - hit.at < INFO_TTL_MS) return hit.promise
+    if (hit && now - hit.at < INFO_TTL_MS) {
+      log.info(`reusing YouTube extraction cache for ${key}`)
+      return hit.promise
+    }
   }
 
   const promise = (async () => {
@@ -197,23 +210,36 @@ export async function ensureYtDlp(): Promise<string> {
 }
 
 async function provisionYtDlp(): Promise<string> {
-  const target = getPaths().ytDlpExe
-  if (await usable(target)) return target
-
   const existing = await findOnPath('yt-dlp.exe').catch(() => null)
   if (existing && await usable(existing)) {
     log.info(`using yt-dlp from PATH: ${existing}`)
     return existing
   }
 
+  const target = getPaths().ytDlpExe
+  if (await usable(target)) return target
+
   await mkdir(dirname(target), { recursive: true })
   const tmp = `${target}.download`
 
   try {
-    const res = await fetch(YTDLP_URL, {
-      redirect: 'follow',
-      headers: { 'user-agent': 'Draco/0.1' }
-    })
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(), YTDLP_LOOKUP_TIMEOUT_MS)
+    let res: Response
+    try {
+      res = await fetch(YTDLP_URL, {
+        redirect: 'follow',
+        headers: { 'user-agent': 'Draco/0.1' },
+        signal: controller.signal
+      })
+    } catch (err) {
+      if (controller.signal.aborted) {
+        throw new Error('yt-dlp installation timed out after 45 seconds')
+      }
+      throw err
+    } finally {
+      clearTimeout(timer)
+    }
 
     if (!res.ok || !res.body) {
       throw new Error(`HTTP ${res.status} while downloading yt-dlp`)
@@ -273,6 +299,7 @@ async function dumpJson(
     '--no-progress',
     '--remote-components',
     'ejs:github',
+    ...electronNodeRuntimeArgs(),
     url
   ]
 
@@ -280,10 +307,15 @@ async function dumpJson(
   if (headers?.referer) args.push('--referer', headers.referer)
   if (headers?.cookie) args.push('--add-header', `Cookie: ${headers.cookie}`)
 
-  // Let yt-dlp discover Deno/Node/QuickJS itself. It enables Deno by default;
-  // users who already have a supported runtime get current YouTube challenge
-  // solving without Draco trying to replicate YouTube's JavaScript.
-  const { stdout, stderr, code } = await runCapture(executable, args, 180_000)
+  // Electron's bundled Node runtime is supplied explicitly above. yt-dlp still
+  // owns the challenge implementation; Draco only provides the runtime needed
+  // to execute its maintained EJS component.
+  const { stdout, stderr, code } = await runCapture(
+    executable,
+    args,
+    YTDLP_LOOKUP_TIMEOUT_MS,
+    electronNodeRuntimeEnv()
+  )
   if (code !== 0) {
     const detail = lastUsefulLine(stderr) || lastUsefulLine(stdout) || `yt-dlp exited with ${code}`
     throw new Error(normalizeYtDlpError(detail))
@@ -379,12 +411,14 @@ function run(
 function runCapture(
   command: string,
   args: string[],
-  timeoutMs: number
+  timeoutMs: number,
+  env?: NodeJS.ProcessEnv
 ): Promise<{ code: number; stdout: string; stderr: string }> {
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, {
       shell: false,
       windowsHide: true,
+      env,
       stdio: ['ignore', 'pipe', 'pipe']
     })
 

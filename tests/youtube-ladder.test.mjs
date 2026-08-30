@@ -4,6 +4,7 @@ import {
   buildVariants,
   formatsFromPage,
   formatsFromYtDlp,
+  selectDirectYtFormat,
   tierFor,
   tierLabel
 } from '../src/main/youtube-ladder.ts'
@@ -32,7 +33,10 @@ function audio(id, opts = {}) {
     vcodec: 'none',
     acodec: opts.acodec ?? 'mp4a.40.2',
     abr: opts.abr ?? 128,
-    filesize: opts.filesize ?? null
+    filesize: opts.filesize ?? null,
+    language: opts.language ?? null,
+    language_preference: opts.language_preference ?? null,
+    format_note: opts.format_note ?? null
   }
 }
 
@@ -221,6 +225,24 @@ test('formats read from the page are understood without any URL', () => {
   assert.equal(variants[0].audioUrl, null)
 })
 
+test('validated page resources flow into the chosen video and audio variant', () => {
+  const videoUrl = 'https://rr2.googlevideo.com/videoplayback?itag=137'
+  const audioUrl = 'https://rr2.googlevideo.com/videoplayback?itag=140'
+  const variants = buildVariants(formatsFromPage([
+    {
+      itag: 137, mimeType: 'video/mp4; codecs="avc1.640028"', bitrate: 4_000_000,
+      width: 1920, height: 1080, fps: 30, contentLength: 100, url: videoUrl
+    },
+    {
+      itag: 140, mimeType: 'audio/mp4; codecs="mp4a.40.2"', bitrate: 128_000,
+      width: null, height: null, fps: null, contentLength: 25, url: audioUrl
+    }
+  ]))
+
+  assert.equal(variants[0].url, videoUrl)
+  assert.equal(variants[0].audioUrl, audioUrl)
+})
+
 test('a progressive format in the page response lists both codecs', () => {
   const [format] = formatsFromPage([
     { itag: 18, mimeType: 'video/mp4; codecs="avc1.42001E, mp4a.40.2"', bitrate: 700000, width: 640, height: 360, fps: 30, contentLength: null }
@@ -297,6 +319,20 @@ test('the plain audio track is preferred over its -drc twin', () => {
   assert.equal(variants[0].youtube.audioFormatId, '140')
 })
 
+test('a page itag resolves to the default language member of a suffixed audio family', () => {
+  const formats = [
+    audio('140-0', { language: 'ar', language_preference: -1, format_note: 'Arabic' }),
+    audio('140-1', {
+      language: 'en-US', language_preference: 10,
+      format_note: 'English (US) original (default)'
+    })
+  ]
+
+  assert.equal(selectDirectYtFormat(formats, '140')?.format_id, '140-1')
+  const source = formatsFromYtDlp([video('137', 1080), ...formats])
+  assert.equal(buildVariants(source)[0].youtube.audioFormatId, '140-1')
+})
+
 test('a progressive format is ranked on its video bitrate, not its total', () => {
   // itag 18 declares only tbr, which counts its audio. Compared raw against a
   // video-only format's vbr it would win on bitrate it does not have.
@@ -363,4 +399,36 @@ test('a progressive format keeps its own container', () => {
     ])
   )
   assert.equal(only.container, 'mp4')
+})
+
+test('a Premium manifest is replaced with a direct stream at the same quality', () => {
+  const format = selectDirectYtFormat(
+    [
+      {
+        format_id: '616',
+        url: 'https://manifest.googlevideo.com/api/manifest/hls_playlist/x/index.m3u8',
+        protocol: 'm3u8_native',
+        width: 1920,
+        height: 1080,
+        vbr: 4359,
+        ext: 'mp4',
+        vcodec: 'vp09.00.51.08',
+        acodec: 'none'
+      },
+      {
+        format_id: '137',
+        url: 'https://rr1.googlevideo.com/videoplayback?direct=1',
+        protocol: 'https',
+        width: 1920,
+        height: 1080,
+        vbr: 4082,
+        ext: 'mp4',
+        vcodec: 'avc1.640028',
+        acodec: 'none'
+      }
+    ],
+    '616'
+  )
+
+  assert.equal(format?.format_id, '137')
 })

@@ -6,6 +6,7 @@ function defaults() {
   return {
     downloadDir: 'C:/Downloads', maxConcurrentTasks: 3, maxConnectionsPerTask: 8,
     minSplitSize: 1024 * 1024, speedLimit: null, retryLimit: 5, timeoutMs: 30000,
+    proxyUrl: null, hostConnectionLimits: [], quotaBytes: null, quotaWindowMinutes: 60,
     defaultCategoryId: null, confirmDelete: true, closeToTray: true, startMinimized: false,
     takeoverEnabled: true, confirmHandoff: true, takeoverMinSize: 1024 * 1024,
     takeoverExtensions: [], takeoverExcludeHosts: [], watchClipboard: false, accent: '#38bdf8',
@@ -44,6 +45,27 @@ test('persistence sanitizers survive hostile and malformed records', () => {
   assert.deepEqual(media, [])
 })
 
+test('network settings reject unsafe proxies and normalize per-host limits', () => {
+  const settings = sanitizeSettings({
+    proxyUrl: 'http://proxy.example:8080',
+    hostConnectionLimits: [
+      { host: '.Example.COM.', connections: 3 },
+      { host: 'example.com', connections: 5 },
+      { host: 'bad host', connections: 9 }
+    ],
+    quotaBytes: 500_000_000,
+    quotaWindowMinutes: 120
+  }, defaults(), () => defaults().columns)
+
+  assert.equal(settings.proxyUrl, 'http://proxy.example:8080/')
+  assert.deepEqual(settings.hostConnectionLimits, [{ host: 'example.com', connections: 5 }])
+  assert.equal(settings.quotaBytes, 500_000_000)
+  assert.equal(settings.quotaWindowMinutes, 120)
+
+  const unsafe = sanitizeSettings({ proxyUrl: 'file:///etc/passwd' }, defaults(), () => defaults().columns)
+  assert.equal(unsafe.proxyUrl, null)
+})
+
 test('a YouTube quality read from the page survives a restart without a URL', () => {
   const [candidate] = sanitizeMedia([
     {
@@ -65,6 +87,24 @@ test('a YouTube quality read from the page survives a restart without a URL', ()
   assert.equal(candidate.variants[0].label, '1080p')
   assert.equal(candidate.variants[0].url, '')
   assert.equal(candidate.variants[0].youtube.videoFormatId, '248')
+})
+
+test('DASH task kind survives persistence sanitization', () => {
+  const [task] = sanitizeTasks([{
+    id: 'dash-task',
+    url: 'https://cdn.example.test/manifest.mpd',
+    filename: 'video.mp4',
+    kind: 'dash',
+    status: 'paused',
+    subtitles: [
+      { url: 'https://cdn.example.test/en.vtt', label: 'English', language: 'en', format: 'vtt' },
+      { url: 'javascript:bad', label: 'Bad', language: null, format: 'srt' }
+    ]
+  }], 'C:/Downloads')
+  assert.equal(task.kind, 'dash')
+  assert.deepEqual(task.subtitles, [{
+    url: 'https://cdn.example.test/en.vtt', label: 'English', language: 'en', format: 'vtt'
+  }])
 })
 
 test('a restored quality still knows the container it will be saved as', () => {

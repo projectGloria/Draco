@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { ColumnId, DownloadTask, TaskStatus } from '@shared/types'
 import { formatBytes, formatEta, formatPercent, formatSpeed, formatWhen, percent } from '../lib/format'
 import { queueName, useApp } from '../store/app'
@@ -293,7 +293,7 @@ async function patchQueue(ids: string[], queueId: string | null): Promise<void> 
   }
 }
 
-function Row({
+const Row = memo(function Row({
   task,
   columns,
   template,
@@ -334,7 +334,7 @@ function Row({
       <div />
     </div>
   )
-}
+})
 
 function Cell({
   id,

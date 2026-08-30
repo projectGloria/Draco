@@ -16,6 +16,7 @@ export function defaultCategories(): Category[] {
       name: 'Compressed',
       folder: 'Compressed',
       builtin: true,
+      hosts: [],
       extensions: ['zip', 'rar', '7z', 'gz', 'bz2', 'xz', 'tar', 'tgz', 'cab', 'arj', 'lzh', 'ace']
     },
     {
@@ -23,6 +24,7 @@ export function defaultCategories(): Category[] {
       name: 'Documents',
       folder: 'Documents',
       builtin: true,
+      hosts: [],
       extensions: [
         'pdf', 'doc', 'docx', 'xls', 'xlsx', 'ppt', 'pptx', 'odt', 'ods', 'rtf',
         'txt', 'epub', 'mobi', 'djvu', 'chm'
@@ -33,6 +35,7 @@ export function defaultCategories(): Category[] {
       name: 'Music',
       folder: 'Music',
       builtin: true,
+      hosts: [],
       extensions: ['mp3', 'flac', 'wav', 'aac', 'm4a', 'ogg', 'opus', 'wma', 'aiff', 'ape']
     },
     {
@@ -40,6 +43,7 @@ export function defaultCategories(): Category[] {
       name: 'Programs',
       folder: 'Programs',
       builtin: true,
+      hosts: [],
       extensions: ['exe', 'msi', 'msix', 'appx', 'bat', 'cmd', 'dmg', 'pkg', 'deb', 'rpm', 'apk', 'iso', 'img']
     },
     {
@@ -47,6 +51,7 @@ export function defaultCategories(): Category[] {
       name: 'Video',
       folder: 'Video',
       builtin: true,
+      hosts: [],
       extensions: ['mkv', 'mp4', 'avi', 'mov', 'wmv', 'flv', 'webm', 'm4v', 'mpg', 'mpeg', 'ts', '3gp']
     }
   ]
@@ -95,11 +100,22 @@ export function directoryFor(
   categories: Category[],
   filename: string,
   mimeType: string | null,
-  explicitCategoryId: string | null
+  explicitCategoryId: string | null,
+  sourceUrl?: string
 ): { dir: string; categoryId: string | null } {
   if (explicitCategoryId) {
     const explicit = categories.find((c) => c.id === explicitCategoryId)
     if (explicit) return { dir: join(downloadDir, explicit.folder), categoryId: explicit.id }
+  }
+
+  if (sourceUrl) {
+    try {
+      const host = new URL(sourceUrl).hostname.toLowerCase()
+      const byHost = categories.find((category) =>
+        (category.hosts ?? []).some((rule) => host === rule || host.endsWith('.' + rule))
+      )
+      if (byHost) return { dir: join(downloadDir, byHost.folder), categoryId: byHost.id }
+    } catch {}
   }
 
   const match = categoryFor(categories, filename, mimeType)

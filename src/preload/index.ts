@@ -3,7 +3,6 @@ import type {
   BootstrapState,
   Category,
   DownloadTask,
-  MediaCandidate,
   NewDownload,
   PendingAction,
   Queue,
@@ -75,14 +74,6 @@ const api: RendererApi = {
   onPendingAction: (cb) => subscribe<PendingAction | null>('queues:pending', cb),
   cancelPendingAction: () => ipcRenderer.invoke('queues:cancelPending'),
 
-  /* media */
-  listMedia: () => ipcRenderer.invoke('media:list'),
-  resolveMedia: (id: string) => ipcRenderer.invoke('media:resolve', id),
-  downloadMedia: (id: string, opts: { variantUrl: string; filename: string; audioUrl?: string | null; youtube?: { videoFormatId: string; audioFormatId?: string | null } }) =>
-    ipcRenderer.invoke('media:download', id, opts),
-  clearMedia: () => ipcRenderer.invoke('media:clear'),
-  onMediaChanged: (cb) => subscribe<MediaCandidate[]>('media:changed', cb),
-
   /* settings and integration */
   getSettings: () => ipcRenderer.invoke('settings:get'),
   saveSettings: (patch: Partial<Settings>) => ipcRenderer.invoke('settings:save', patch),
@@ -90,6 +81,12 @@ const api: RendererApi = {
   getIntegration: () => ipcRenderer.invoke('integration:get'),
   registerIntegration: () => ipcRenderer.invoke('integration:register'),
   copyToClipboard: (text: string) => ipcRenderer.invoke('clipboard:write', text),
+  checkForUpdates: () => ipcRenderer.invoke('updates:check'),
+  openUpdate: (url: string) => ipcRenderer.invoke('updates:open', url),
+  startSiteGrab: (options) => ipcRenderer.invoke('siteGrabber:start', options),
+  listSiteGrabs: () => ipcRenderer.invoke('siteGrabber:list'),
+  runSiteGrab: (id: string) => ipcRenderer.invoke('siteGrabber:run', id),
+  removeSiteGrab: (id: string) => ipcRenderer.invoke('siteGrabber:remove', id),
 
   /* icons */
   fileIcon: (extension: string) => ipcRenderer.invoke('icons:file', extension),

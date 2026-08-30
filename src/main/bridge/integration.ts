@@ -19,10 +19,13 @@ const log = logger('integration')
 
 export const HOST_NAME = 'com.nihil.draco'
 
-const REGISTRY_KEYS: Record<'chrome' | 'edge' | 'brave', string> = {
+const REGISTRY_KEYS: Record<'chrome' | 'edge' | 'brave' | 'opera' | 'vivaldi' | 'firefox', string> = {
   chrome: `HKCU\\Software\\Google\\Chrome\\NativeMessagingHosts\\${HOST_NAME}`,
   edge: `HKCU\\Software\\Microsoft\\Edge\\NativeMessagingHosts\\${HOST_NAME}`,
-  brave: `HKCU\\Software\\BraveSoftware\\Brave-Browser\\NativeMessagingHosts\\${HOST_NAME}`
+  brave: `HKCU\\Software\\BraveSoftware\\Brave-Browser\\NativeMessagingHosts\\${HOST_NAME}`,
+  opera: `HKCU\\Software\\Opera Software\\NativeMessagingHosts\\${HOST_NAME}`,
+  vivaldi: `HKCU\\Software\\Vivaldi\\NativeMessagingHosts\\${HOST_NAME}`,
+  firefox: `HKCU\\Software\\Mozilla\\NativeMessagingHosts\\${HOST_NAME}`
 }
 
 /**
@@ -64,18 +67,36 @@ function run(command: string, args: string[]): Promise<{ code: number; stdout: s
  * Writes the manifest Chrome reads to find the host binary, plus the small
  * config the host reads to find the app.
  */
-export async function writeHostFiles(extensionId: string): Promise<void> {
+export async function writeHostFiles(extensionId: string | null): Promise<void> {
   const paths = getPaths()
 
+  if (extensionId) {
+    await writeFile(
+      paths.hostManifest,
+      JSON.stringify(
+        {
+          name: HOST_NAME,
+          description: 'Draco download manager bridge',
+          path: paths.hostExe,
+          type: 'stdio',
+          allowed_origins: [`chrome-extension://${extensionId}/`]
+        },
+        null,
+        2
+      ),
+      'utf8'
+    )
+  }
+
   await writeFile(
-    paths.hostManifest,
+    paths.firefoxHostManifest,
     JSON.stringify(
       {
         name: HOST_NAME,
         description: 'Draco download manager bridge',
         path: paths.hostExe,
         type: 'stdio',
-        allowed_origins: [`chrome-extension://${extensionId}/`]
+        allowed_extensions: ['draco@nihil.local']
       },
       null,
       2
@@ -107,14 +128,15 @@ export async function writeHostFiles(extensionId: string): Promise<void> {
   )
 }
 
-export async function registerAll(): Promise<IntegrationStatus['registered']> {
+export async function registerAll(includeChromium = true): Promise<IntegrationStatus['registered']> {
   const paths = getPaths()
-  const result = { chrome: false, edge: false, brave: false }
+  const result = { chrome: false, edge: false, brave: false, opera: false, vivaldi: false, firefox: false }
 
   for (const [browser, key] of Object.entries(REGISTRY_KEYS) as [
     keyof typeof REGISTRY_KEYS,
     string
   ][]) {
+    if (browser !== 'firefox' && !includeChromium) continue
     const { code } = await run('reg', [
       'add',
       key,
@@ -122,7 +144,7 @@ export async function registerAll(): Promise<IntegrationStatus['registered']> {
       '/t',
       'REG_SZ',
       '/d',
-      paths.hostManifest,
+      browser === 'firefox' ? paths.firefoxHostManifest : paths.hostManifest,
       '/f'
     ])
     result[browser] = code === 0
@@ -135,7 +157,7 @@ export async function registerAll(): Promise<IntegrationStatus['registered']> {
 /** Reports which browsers currently point at *our* manifest path. */
 export async function checkRegistered(): Promise<IntegrationStatus['registered']> {
   const paths = getPaths()
-  const result = { chrome: false, edge: false, brave: false }
+  const result = { chrome: false, edge: false, brave: false, opera: false, vivaldi: false, firefox: false }
 
   for (const [browser, key] of Object.entries(REGISTRY_KEYS) as [
     keyof typeof REGISTRY_KEYS,
@@ -144,7 +166,8 @@ export async function checkRegistered(): Promise<IntegrationStatus['registered']
     const { code, stdout } = await run('reg', ['query', key, '/ve'])
     // A stale key left behind by a move is worse than no key: it points the
     // browser at a manifest that is not there any more.
-    result[browser] = code === 0 && stdout.includes(paths.hostManifest)
+    const manifest = browser === 'firefox' ? paths.firefoxHostManifest : paths.hostManifest
+    result[browser] = code === 0 && stdout.includes(manifest)
   }
 
   return result
@@ -156,15 +179,23 @@ export async function checkRegistered(): Promise<IntegrationStatus['registered']
  */
 export async function ensureRegistered(): Promise<IntegrationStatus['registered']> {
   const extensionId = await readExtensionId()
-  if (!extensionId) {
-    log.warn('extension key not generated yet; skipping registration')
-    return { chrome: false, edge: false, brave: false }
-  }
+  if (!extensionId) log.warn('extension key not generated yet; Chromium registration is unavailable')
 
   await writeHostFiles(extensionId)
 
   const current = await checkRegistered()
-  if (current.chrome && current.edge && current.brave) return current
+  const required = extensionId
+    ? Object.values(current)
+    : [current.firefox]
+  if (required.every(Boolean)) return current
 
-  return registerAll()
+  const registered = await registerAll(Boolean(extensionId))
+  if (!extensionId) {
+    registered.chrome = current.chrome
+    registered.edge = current.edge
+    registered.brave = current.brave
+    registered.opera = current.opera
+    registered.vivaldi = current.vivaldi
+  }
+  return registered
 }

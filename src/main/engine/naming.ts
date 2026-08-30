@@ -36,7 +36,7 @@ export function sanitizeFilename(name: string, fallback = 'download'): string {
   const stem = ext ? cleaned.slice(0, -ext.length) : cleaned
 
   // Cap the stem, not the whole name, so a long title never eats the extension.
-  const cappedStem = stem.slice(0, 150).replace(/[.\s]+$/, '') || fallback
+  const cappedStem = Array.from(stem).slice(0, 150).join('').replace(/[.\s]+$/, '') || fallback
   const safeStem = RESERVED_DEVICE_NAMES.test(cappedStem) ? cappedStem + '_' : cappedStem
 
   return safeStem + ext.slice(0, 16)

@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Draco Integration",
-  "version": "0.1.0",
+  "version": "0.1.2",
   "description": "Hands downloads and detected media streams to the Draco download manager.",
   "minimum_chrome_version": "116",
   "permissions": [
@@ -36,7 +36,13 @@
   ],
   "action": {
     "default_popup": "popup.html",
-    "default_title": "Draco"
+    "default_title": "Draco",
+    "default_icon": "icon.png"
+  },
+  "icons": {
+    "16": "icon.png",
+    "48": "icon.png",
+    "128": "icon.png"
   },
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAtwCeDoxJ83O3qYOxVufxdAR2zD6F21mS9/3DHiwYHEspYJUjWHs75fgdocXjE3lyWj4ab72TmXNZzPIvfuM9BJw4YY8572AKeNliJOlHHG9BrM8vi1u5o2j5lFHpbrPNW92JldI0QzS/RVQWnEP1RojwlFEttzS9JFcGUThrO3CwlB1ITPVhS29nLQvf/RCyxrzcEaNPQWP84Xam0eILA517ohbDRvnf3+4KKznq93Xr1Qk/4xsFff9lqg+brPGeTn6KW7c/iyaJemVkB69q1u136fqD95Qfenl2HzHIAmSquKF94PVVVhaMyGC9J3uDNzDeI3tpJFf9avSClPyl9wIDAQAB"
 }

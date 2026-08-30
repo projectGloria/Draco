@@ -2,6 +2,7 @@ import type { ProbeResult, RequestHeaders } from '../../shared/types.ts'
 import { getDispatcher } from './http.ts'
 import { isEmptyRangeResponse } from './probe-helpers.ts'
 import { filenameFromDisposition, filenameFromUrl, sanitizeFilename } from './naming.ts'
+import { HttpStatusError } from './worker.ts'
 
 /**
  * Turns a URL into a download plan: where it really lives, how big it is, what
@@ -51,7 +52,23 @@ export function totalFromContentRange(value: string | null): number | null {
   return Number.isSafeInteger(total) && total >= 0 ? total : null
 }
 
+const probeCache = new Map<string, { result: ProbeResult; expiresAt: number }>()
+
+function setProbeCache(key: string, value: { result: ProbeResult; expiresAt: number }) {
+  probeCache.set(key, value)
+  if (probeCache.size > 500) {
+    const oldest = probeCache.keys().next().value
+    if (oldest !== undefined) probeCache.delete(oldest)
+  }
+}
+
 export async function probeUrl(url: string, options: ProbeOptions = {}): Promise<ProbeResult> {
+  const cacheKey = url + JSON.stringify(options.headers || {})
+  const cached = probeCache.get(cacheKey)
+  if (cached && Date.now() < cached.expiresAt) {
+    return cached.result
+  }
+
   const timeoutMs = options.timeoutMs ?? 30_000
   const headers = buildHeaders(options.headers)
   const dispatcher = getDispatcher(timeoutMs)
@@ -111,7 +128,7 @@ export async function probeUrl(url: string, options: ProbeOptions = {}): Promise
         lastModified = ranged.headers.get('last-modified') ?? lastModified
         mimeType = ranged.headers.get('content-type') ?? mimeType
         disposition = ranged.headers.get('content-disposition') ?? disposition
-        return {
+        const result = {
           finalUrl,
           filename: resolveFilename(disposition, finalUrl, url, mimeType),
           size: 0,
@@ -121,10 +138,12 @@ export async function probeUrl(url: string, options: ProbeOptions = {}): Promise
           mimeType,
           statusCode: 416
         }
+        setProbeCache(cacheKey, { result, expiresAt: Date.now() + 60_000 })
+        return result
       }
 
     if (!ranged.ok) {
-      throw new Error(`Server responded ${ranged.status}`)
+      throw new HttpStatusError(ranged.status, ranged.statusText)
     }
 
     const resumable = ranged.status === 206
@@ -147,7 +166,7 @@ export async function probeUrl(url: string, options: ProbeOptions = {}): Promise
     mimeType = ranged.headers.get('content-type') ?? mimeType
     disposition = ranged.headers.get('content-disposition') ?? disposition
 
-    return {
+    const result = {
       finalUrl,
       filename: resolveFilename(disposition, finalUrl, url, mimeType),
       size,
@@ -157,6 +176,9 @@ export async function probeUrl(url: string, options: ProbeOptions = {}): Promise
       mimeType,
       statusCode: ranged.status
     }
+
+    setProbeCache(cacheKey, { result, expiresAt: Date.now() + 60_000 })
+    return result
   } finally {
     // Always drain: an unconsumed body holds its socket out of the pool.
     await ranged.body?.cancel().catch(() => {})

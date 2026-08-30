@@ -1,18 +1,56 @@
 {
   "name": "draco",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "A personal download manager: dynamic segmented downloads, browser takeover, queues and a scheduler",
   "main": "./out/main/index.js",
   "author": "Nihil",
   "license": "MIT",
+  "build": {
+    "appId": "com.nihil.draco",
+    "productName": "Draco",
+    "asar": true,
+    "files": [
+      "out/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "extension",
+        "to": "extension",
+        "filter": [
+          "**/*",
+          "!key.pem"
+        ]
+      },
+      {
+        "from": "extension-firefox",
+        "to": "extension-firefox"
+      },
+      {
+        "from": "host/draco-host.exe",
+        "to": "draco-host.exe"
+      }
+    ],
+    "win": {
+      "target": "nsis",
+      "icon": "resources/icon.ico"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true
+    }
+  },
   "scripts": {
     "dev": "electron-vite dev",
     "start": "npm run build && electron-vite preview",
     "build": "npm run typecheck && electron-vite build",
     "typecheck": "tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.web.json",
     "test": "node --experimental-strip-types --test tests/*.test.mjs",
-    "pack": "npm run build && electron-builder --dir",
-    "dist": "npm run build && electron-builder --win",
+    "extension:firefox": "node tools/build-firefox-extension.mjs",
+    "pack": "npm run extension:firefox && npm run build && electron-builder --dir",
+    "dist": "npm run extension:firefox && npm run build && electron-builder --win",
     "host": "powershell -ExecutionPolicy Bypass -File host/build.ps1",
     "keygen": "node tools/gen-extension-key.mjs",
     "icon": "node tools/gen-icon.mjs",

@@ -6,7 +6,8 @@
  * frames through without parsing or re-encoding them.
  */
 
-import type { PageFormat } from '../../shared/types.ts'
+import type { PageFormat, SubtitleTrack } from '../../shared/types.ts'
+import { preparedYouTubeUrl } from '../youtube-url.ts'
 
 /** Chrome's own cap on a single native message. */
 export const MAX_FRAME_BYTES = 64 * 1024 * 1024
@@ -60,6 +61,16 @@ export interface YouTubeMessage {
   pageFormats?: PageFormat[]
 }
 
+/** Starts Draco if needed and warms YouTube extraction before a download click. */
+export interface YouTubePrimeMessage {
+  type: 'youtubePrime'
+  requestId?: string
+  pageUrl: string
+  referer?: string
+  cookie?: string
+  userAgent?: string
+}
+
 export interface MediaMessage {
   type: 'media'
   requestId?: string
@@ -68,13 +79,20 @@ export interface MediaMessage {
   mediaUrl: string
   audioUrl?: string | null
   variants?: any[]
+  subtitles?: SubtitleTrack[]
   kind: 'hls' | 'dash' | 'file'
   referer?: string
   cookie?: string
   userAgent?: string
 }
 
-export type HostMessage = PingMessage | ConfigMessage | DownloadMessage | MediaMessage | YouTubeMessage
+export type HostMessage =
+  | PingMessage
+  | ConfigMessage
+  | DownloadMessage
+  | MediaMessage
+  | YouTubeMessage
+  | YouTubePrimeMessage
 
 export interface HostReply {
   ok: boolean
@@ -88,6 +106,8 @@ export interface HostReply {
     excludeHosts: string[]
   }
   version?: string
+  /** Only meaningful for youtubePrime. */
+  primed?: boolean
 }
 
 /** Splits a growing buffer into complete frames, returning the leftover tail. */
@@ -215,13 +235,27 @@ export function validateHostMessage(value: unknown): HostMessage {
           : undefined
       }
     }
+    case 'youtubePrime': {
+      return {
+        type,
+        ...(requestId ? { requestId } : {}),
+        pageUrl: urlField('pageUrl'),
+        referer: optionalUrl('referer'),
+        cookie: stringField('cookie', 1_000_000),
+        userAgent: stringField('userAgent', 1024)
+      }
+    }
     case 'media': {
       const kind = message.kind
       if (kind !== 'hls' && kind !== 'dash' && kind !== 'file') throw new Error('Invalid media kind')
       const variants = message.variants
+      const subtitles = message.subtitles
       if (variants !== undefined) {
         if (!Array.isArray(variants) || variants.length > 50) throw new Error('Invalid variants')
         for (const variant of variants) normalizeMediaVariant(variant)
+      }
+      if (subtitles !== undefined && (!Array.isArray(subtitles) || subtitles.length > 20)) {
+        throw new Error('Invalid subtitles')
       }
       return {
         type,
@@ -231,6 +265,7 @@ export function validateHostMessage(value: unknown): HostMessage {
         mediaUrl: urlField('mediaUrl'),
         audioUrl: optionalUrl('audioUrl') ?? null,
         variants: Array.isArray(variants) ? variants.map(normalizeMediaVariant) : undefined,
+        subtitles: Array.isArray(subtitles) ? subtitles.map(normalizeSubtitleTrack) : undefined,
         kind,
         referer: optionalUrl('referer'),
         cookie: stringField('cookie', 1_000_000),
@@ -239,6 +274,21 @@ export function validateHostMessage(value: unknown): HostMessage {
     }
     default:
       throw new Error(`Unsupported native message type: ${type}`)
+  }
+}
+
+function normalizeSubtitleTrack(value: unknown): SubtitleTrack {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Invalid subtitle track')
+  const track = value as Record<string, unknown>
+  const format = track.format
+  if (format !== 'vtt' && format !== 'srt' && format !== 'ttml') throw new Error('Invalid subtitle format')
+  return {
+    url: requiredUrlValue(track.url, 'subtitle url'),
+    label: boundedString(track.label ?? '', 100, 'subtitle label'),
+    language: track.language === null || track.language === undefined
+      ? null
+      : boundedString(track.language, 35, 'subtitle language'),
+    format
   }
 }
 
@@ -256,6 +306,12 @@ function normalizePageFormat(value: unknown): PageFormat {
   if (typeof itag !== 'number' || !Number.isSafeInteger(itag) || itag < 0 || itag > 100_000) {
     throw new Error('Invalid page format itag')
   }
+  const url = f.url === undefined || f.url === null
+    ? null
+    : preparedYouTubeUrl(f.url, itag)
+  if (f.url !== undefined && f.url !== null && !url) {
+    throw new Error('Invalid page format URL')
+  }
 
   return {
     itag,
@@ -267,7 +323,8 @@ function normalizePageFormat(value: unknown): PageFormat {
     width: nonNegativeNumber(f.width, 'page format width'),
     height: nonNegativeNumber(f.height, 'page format height'),
     fps: nonNegativeNumber(f.fps, 'page format fps'),
-    contentLength: nonNegativeNumber(f.contentLength, 'page format contentLength')
+    contentLength: nonNegativeNumber(f.contentLength, 'page format contentLength'),
+    url
   }
 }
 
@@ -345,4 +402,3 @@ function nonNegativeNumber(value: unknown, label: string): number | null {
   }
   return value
 }
-

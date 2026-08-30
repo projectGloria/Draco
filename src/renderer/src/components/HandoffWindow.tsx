@@ -290,6 +290,7 @@ function MediaBody({
   async function accept(): Promise<void> {
     if (!variant) return
     setBusy(true)
+    setError(null)
     try {
       await window.api.acceptHandoffMedia(request.id, {
         variantUrl: variant.url,
@@ -388,6 +389,7 @@ function MediaBody({
             </select>
           </Field>
         </div>
+
       </div>
 
       <Footer>

@@ -1,9 +1,11 @@
 import { useApp } from '../store/app'
+import { useT } from '../i18n'
 import {
   BroomIcon,
   CalendarIcon,
   GearIcon,
   InfoIcon,
+  LayersIcon,
   PauseIcon,
   PlayIcon,
   PlusIcon,
@@ -28,6 +30,7 @@ export interface ToolbarActions {
   onDetails(): void
   onScheduler(): void
   onOptions(): void
+  onSiteGrabber(): void
 }
 
 export default function Toolbar({
@@ -41,6 +44,7 @@ export default function Toolbar({
 }): React.ReactElement {
   const tasks = useApp((s) => s.tasks)
   const selection = useApp((s) => s.selection)
+  const t = useT()
 
   const selected = tasks.filter((t) => selection.includes(t.id))
   const canResume = selected.some((t) => t.status !== 'downloading' && t.status !== 'done')
@@ -50,20 +54,21 @@ export default function Toolbar({
 
   return (
     <div className="h-11 shrink-0 flex items-center gap-1 px-2 border-b border-line bg-white/[0.02]">
-      <Button icon={<PlusIcon />} label="Add URL" primary onClick={actions.onAdd} />
+      <Button icon={<PlusIcon />} label={t('addUrl')} primary onClick={actions.onAdd} />
+      <Button icon={<LayersIcon />} label={t('siteGrabber')} onClick={actions.onSiteGrabber} />
 
       <Divider />
 
       <Button
         icon={<PlayIcon />}
-        label="Resume"
+        label={t('resume')}
         disabled={!canResume}
         onClick={actions.onResume}
       />
-      <Button icon={<PauseIcon />} label="Stop" disabled={!canPause} onClick={actions.onPause} />
+      <Button icon={<PauseIcon />} label={t('stop')} disabled={!canPause} onClick={actions.onPause} />
       <Button
         icon={<StopAllIcon />}
-        label="Stop all"
+        label={t('stopAll')}
         disabled={!anyRunning}
         onClick={actions.onPauseAll}
       />
@@ -72,27 +77,27 @@ export default function Toolbar({
 
       <Button
         icon={<TrashIcon />}
-        label="Delete"
+        label={t('delete')}
         disabled={selection.length === 0}
         onClick={actions.onDelete}
       />
       <Button
         icon={<BroomIcon />}
-        label="Delete completed"
+        label={t('deleteCompleted')}
         disabled={!anyDone}
         onClick={actions.onDeleteCompleted}
       />
       <Button
         icon={<InfoIcon />}
-        label="Details"
+        label={t('details')}
         disabled={selection.length !== 1}
         onClick={actions.onDetails}
       />
 
       <Divider />
 
-      <Button icon={<CalendarIcon />} label="Scheduler" onClick={actions.onScheduler} />
-      <Button icon={<GearIcon />} label="Options" onClick={actions.onOptions} />
+      <Button icon={<CalendarIcon />} label={t('scheduler')} onClick={actions.onScheduler} />
+      <Button icon={<GearIcon />} label={t('options')} onClick={actions.onOptions} />
 
       <div className="flex-1" />
 
@@ -101,7 +106,7 @@ export default function Toolbar({
         <input
           value={search}
           onChange={(event) => onSearch(event.target.value)}
-          placeholder="Search"
+          placeholder={t('search')}
           className="field !py-1 !pl-8 text-[12px]"
           spellCheck={false}
         />

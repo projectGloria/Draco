@@ -51,7 +51,9 @@ export class DashRunner implements Runner {
       onUpdate: () => this.tick(),
       onFinished: (childTask, error) => {
         if (!error) return
-        this.controller.abort()
+        // Stop the sibling, but do not abort the parent controller. An abort
+        // is a user pause in the parent's catch path and would hide this real
+        // child failure by leaving the composite task stuck on "probing".
         if (childTask.id === videoTask.id) void this.audioRunner?.pause()
         else void this.videoRunner?.pause()
       },
@@ -84,10 +86,9 @@ export class DashRunner implements Runner {
       const aPromise = this.audioRunner.start()
 
       await Promise.all([vPromise, aPromise])
-      if (this.controller.signal.aborted) throw new AbortedError()
-
       if (this.videoRunner.task.status === 'error') throw new Error(this.videoRunner.task.error || 'Video fetch failed')
       if (this.audioRunner.task.status === 'error') throw new Error(this.audioRunner.task.error || 'Audio fetch failed')
+      if (this.controller.signal.aborted) throw new AbortedError()
 
       this.muxing = true
       this.task.status = 'downloading'
@@ -166,6 +167,13 @@ export class DashRunner implements Runner {
     this.controller.abort()
 
     await Promise.allSettled([this.videoRunner.pause(), this.audioRunner.pause()])
+    // Each child publishes a final update as it stops. Keep that update from
+    // recombining their transient states into "probing" after the user chose
+    // Pause for the parent task.
+    this.task.status = 'paused'
+    this.task.speed = 0
+    this.task.eta = null
+    this.task.detail = null
     this.deps.onUpdate(this.task)
   }
 
@@ -180,16 +188,21 @@ export class DashRunner implements Runner {
      * a task that says it is downloading, so the column read empty throughout.
      */
     if (!this.muxing) {
-      const states = [this.videoRunner.task.status, this.audioRunner.task.status]
-      this.task.status = states.includes('downloading') ? 'downloading' : 'probing'
+      if (this.controller.signal.aborted) {
+        this.task.status = 'paused'
+        this.task.detail = null
+      } else {
+        const states = [this.videoRunner.task.status, this.audioRunner.task.status]
+        this.task.status = states.includes('downloading') ? 'downloading' : 'probing'
 
-      // Before any bytes move, the only thing worth saying is what the children
-      // are waiting on - resolving a YouTube URL, most of the time - and the
-      // parent is the task the list and the progress window are looking at.
-      this.task.detail =
-        this.task.status === 'downloading'
-          ? null
-          : (this.videoRunner.task.detail ?? this.audioRunner.task.detail)
+        // Before any bytes move, the only thing worth saying is what the children
+        // are waiting on - resolving a YouTube URL, most of the time - and the
+        // parent is the task the list and the progress window are looking at.
+        this.task.detail =
+          this.task.status === 'downloading'
+            ? null
+            : (this.videoRunner.task.detail ?? this.audioRunner.task.detail)
+      }
     }
 
     this.task.received = this.videoRunner.task.received + this.audioRunner.task.received

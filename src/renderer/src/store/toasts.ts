@@ -9,6 +9,7 @@ export interface Toast {
   detail?: string
   /** Set while the exit animation plays, just before the row is dropped. */
   leaving?: boolean
+  timer?: NodeJS.Timeout
 }
 
 const VISIBLE_MS = 3600
@@ -29,11 +30,14 @@ export const useToasts = create<ToastState>((set, get) => ({
 
   push(kind, title, detail) {
     const id = nextId++
-    set((state) => ({ toasts: [...state.toasts, { id, kind, title, detail }].slice(-MAX_VISIBLE) }))
-    setTimeout(() => get().dismiss(id), VISIBLE_MS)
+    const timer = setTimeout(() => get().dismiss(id), VISIBLE_MS)
+    set((state) => ({ toasts: [...state.toasts, { id, kind, title, detail, timer }].slice(-MAX_VISIBLE) }))
   },
 
   dismiss(id) {
+    const toast = get().toasts.find(t => t.id === id)
+    if (toast?.timer) clearTimeout(toast.timer)
+
     // Mark first so the exit animation can run, then drop the row. Removing it
     // outright makes toasts vanish mid-stack and the ones below jump up.
     set((state) => ({

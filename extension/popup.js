@@ -76,14 +76,28 @@ async function refreshMedia() {
 
 form.addEventListener('submit', async (event) => {
   event.preventDefault()
+  const btn = form.querySelector('button')
+  const originalText = btn.textContent
+  btn.textContent = '...'
+  btn.disabled = true
+
   const tab = await currentTab()
-  await chrome.runtime.sendMessage({
+  const res = await chrome.runtime.sendMessage({
     type: 'draco:send-url',
     url: urlInput.value,
     referer: tab?.url
   })
-  urlInput.value = ''
-  window.close()
+
+  if (res?.ok) {
+    urlInput.value = ''
+    window.close()
+  } else {
+    btn.textContent = 'Error'
+    setTimeout(() => {
+      btn.textContent = originalText
+      btn.disabled = false
+    }, 2000)
+  }
 })
 
 void refreshStatus()

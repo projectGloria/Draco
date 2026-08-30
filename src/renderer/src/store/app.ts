@@ -5,7 +5,6 @@ import type {
   ColumnPref,
   DownloadTask,
   IntegrationStatus,
-  MediaCandidate,
   PendingAction,
   Queue,
   Settings,
@@ -34,11 +33,22 @@ export type SidebarKey = string
  */
 function provisionalSettings(): Settings {
   return {
+    language: 'system',
+    theme: 'dark',
     downloadDir: '',
     maxConcurrentTasks: 3,
     maxConnectionsPerTask: 8,
     minSplitSize: 1024 * 1024,
     speedLimit: null,
+    proxyUrl: null,
+    hostConnectionLimits: [],
+    quotaBytes: null,
+    quotaWindowMinutes: 60,
+    antivirusProgram: null,
+    antivirusArgs: ['{file}'],
+    antivirusTimeoutSeconds: 120,
+    updateFeedUrl: null,
+    autoCheckUpdates: true,
     retryLimit: 5,
     timeoutMs: 30_000,
     defaultCategoryId: null,
@@ -75,7 +85,6 @@ interface AppState {
   tasks: DownloadTask[]
   categories: Category[]
   queues: Queue[]
-  media: MediaCandidate[]
   settings: Settings
   integration: IntegrationStatus | null
   pending: PendingAction | null
@@ -111,12 +120,13 @@ function persistSoon(patch: Partial<Settings>): void {
   }, 400)
 }
 
+let initialized = false
+
 export const useApp = create<AppState>((set, get) => ({
   ready: false,
   tasks: [],
   categories: [],
   queues: [],
-  media: [],
   settings: provisionalSettings(),
   integration: null,
   pending: null,
@@ -124,6 +134,9 @@ export const useApp = create<AppState>((set, get) => ({
   sidebar: 'all',
 
   async init() {
+    if (initialized) return
+    initialized = true
+
     // Subscribe before the first read, so an event that lands between the two
     // is not dropped on the floor.
     window.api.onTasksChanged((tasks) => {
@@ -150,16 +163,14 @@ export const useApp = create<AppState>((set, get) => ({
     })
 
     window.api.onQueuesChanged((queues) => set({ queues }))
-    window.api.onMediaChanged((media) => set({ media }))
     window.api.onPendingAction((pending) => set({ pending }))
 
     try {
-      const [settings, tasks, categories, queues, media] = await Promise.all([
+      const [settings, tasks, categories, queues] = await Promise.all([
         window.api.getSettings(),
         window.api.listTasks(),
         window.api.listCategories(),
-        window.api.listQueues(),
-        window.api.listMedia()
+        window.api.listQueues()
       ])
 
       applyAccent(settings.accent)
@@ -168,7 +179,6 @@ export const useApp = create<AppState>((set, get) => ({
         tasks,
         categories,
         queues,
-        media,
         sidebar: settings.sidebarSelection || 'all',
         ready: true
       })

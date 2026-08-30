@@ -2,6 +2,7 @@ import { useState } from 'react'
 import type { DownloadTask } from '@shared/types'
 import { useApp } from '../store/app'
 import { reportError } from '../store/toasts'
+import { useT } from '../i18n'
 import {
   CalendarIcon,
   CheckIcon,
@@ -11,8 +12,7 @@ import {
   LayersIcon,
   ListIcon,
   PlayIcon,
-  StopAllIcon,
-  VideoIcon
+  StopAllIcon
 } from './Icons'
 
 /**
@@ -28,42 +28,43 @@ export default function Sidebar({
   const tasks = useApp((s) => s.tasks)
   const categories = useApp((s) => s.categories)
   const queues = useApp((s) => s.queues)
-  const media = useApp((s) => s.media)
   const sidebar = useApp((s) => s.sidebar)
   const setSidebar = useApp((s) => s.setSidebar)
+  const t = useT()
+
+  const total = useApp((s) => s.tasks.length)
+  const unfinished = useApp((s) => s.tasks.filter((t) => t.status !== 'done').length)
+  const finished = total - unfinished
 
   const [openCategories, setOpenCategories] = useState(true)
   const [openQueues, setOpenQueues] = useState(true)
-
-  const unfinished = tasks.filter((t) => t.status !== 'done').length
-  const finished = tasks.length - unfinished
 
   return (
     <nav className="w-[204px] shrink-0 border-r border-line bg-white/[0.012] overflow-y-auto py-2 px-2 flex flex-col gap-0.5">
       <Item
         icon={<ListIcon className="w-[15px] h-[15px]" />}
-        label="All downloads"
-        count={tasks.length}
+        label={t('allDownloads')}
+        count={total}
         active={sidebar === 'all'}
         onClick={() => setSidebar('all')}
       />
       <Item
         icon={<DownloadIcon className="w-[15px] h-[15px]" />}
-        label="Unfinished"
+        label={t('unfinished')}
         count={unfinished}
         active={sidebar === 'unfinished'}
         onClick={() => setSidebar('unfinished')}
       />
       <Item
         icon={<CheckIcon className="w-[15px] h-[15px]" />}
-        label="Finished"
+        label={t('finished')}
         count={finished}
         active={sidebar === 'finished'}
         onClick={() => setSidebar('finished')}
       />
 
       <Section
-        label="Categories"
+        label={t('categories')}
         open={openCategories}
         onToggle={() => setOpenCategories((v) => !v)}
       />
@@ -80,10 +81,10 @@ export default function Sidebar({
           />
         ))}
 
-      <Section label="Queues" open={openQueues} onToggle={() => setOpenQueues((v) => !v)}>
+      <Section label={t('queues')} open={openQueues} onToggle={() => setOpenQueues((v) => !v)}>
         <button
           onClick={onEditQueues}
-          title="Manage queues and the scheduler"
+          title={t('manageQueues')}
           className="w-5 h-5 rounded grid place-items-center text-faint hover:text-ink hover:bg-white/[0.07]"
         >
           <CalendarIcon className="w-3.5 h-3.5" />
@@ -99,19 +100,11 @@ export default function Sidebar({
             count={countBy(tasks, (t) => t.queueId === queue.id)}
             active={sidebar === 'queue:' + queue.id}
             onClick={() => setSidebar('queue:' + queue.id)}
+            stopLabel={t('stopQueue')}
+            startLabel={t('startQueue')}
+            errorLabel={t('queueFailed')}
           />
         ))}
-
-      <div className="mt-auto pt-2">
-        <Item
-          icon={<VideoIcon className="w-[15px] h-[15px]" />}
-          label="Media grabber"
-          count={media.length}
-          highlight={media.length > 0}
-          active={sidebar === 'grabber'}
-          onClick={() => setSidebar('grabber')}
-        />
-      </div>
     </nav>
   )
 }
@@ -213,7 +206,10 @@ function QueueItem({
   running,
   count,
   active,
-  onClick
+  onClick,
+  stopLabel,
+  startLabel,
+  errorLabel
 }: {
   id: string
   name: string
@@ -221,13 +217,16 @@ function QueueItem({
   count: number
   active: boolean
   onClick(): void
+  stopLabel: string
+  startLabel: string
+  errorLabel: string
 }): React.ReactElement {
   const toggle = (event: React.MouseEvent): void => {
     // The row selects the queue; the glyph starts or stops it. Without this the
     // only way to run a queue would be a trip through the scheduler dialog.
     event.stopPropagation()
     const call = running ? window.api.stopQueue(id) : window.api.startQueue(id)
-    void call.catch((err) => reportError('Queue command failed', err))
+    void call.catch((err) => reportError(errorLabel, err))
   }
 
   return (
@@ -246,7 +245,7 @@ function QueueItem({
           onKeyDown={(event) => {
             if (event.key === 'Enter' || event.key === ' ') toggle(event as unknown as React.MouseEvent)
           }}
-          title={running ? 'Stop this queue' : 'Start this queue'}
+          title={running ? stopLabel : startLabel}
           className={
             'w-5 h-5 rounded grid place-items-center shrink-0 transition-colors ' +
             (running ? 'text-ok' : 'text-faint opacity-0 group-hover:opacity-100 hover:text-ink')

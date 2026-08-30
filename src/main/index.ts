@@ -1,4 +1,4 @@
-import { app, ipcMain } from 'electron'
+import { app, ipcMain, powerSaveBlocker, Notification } from 'electron'
 import { version } from '../../package.json'
 import { randomUUID } from 'node:crypto'
 import type {
@@ -6,7 +6,7 @@ import type {
   BootstrapStep,
   BootstrapStepId,
   HandoffRequest,
-  MediaCandidate
+  TaskStatus
 } from '@shared/types'
 import { ensureDirs } from './bootstrap/paths.ts'
 import { ClipboardWatcher } from './clipboard.ts'
@@ -16,22 +16,29 @@ import type { HostMessage, HostReply } from './bridge/protocol.ts'
 import { validateUrl } from './engine/create.ts'
 import { closeDispatchers } from './engine/http.ts'
 import { DownloadManager } from './engine/manager.ts'
+import { MpdRunner } from './dash/runner.ts'
 import { HlsRunner } from './hls/runner.ts'
 import { handoffToTask, recordMedia, refileTask, registerIpc, type AppContext } from './ipc.ts'
-import { logger } from './log.ts'
+import { logger, setLogDirectory } from './log.ts'
 import { Scheduler } from './queue/scheduler.ts'
+import { SiteProjectManager } from './site-grabber/projects.ts'
 import {
   flushTasks,
+  flushQuotaState,
   getSettings,
   loadCategories,
-  loadMedia,
   loadQueues,
+  loadQuotaState,
   loadSettings,
+  loadSiteProjects,
   loadTasks,
   persistTasks,
-  saveQueues
+  persistQuotaState,
+  saveQueues,
+  saveSiteProjects
 } from './store.ts'
 import { createTray, destroyTray } from './tray.ts'
+import { checkForUpdates } from './update.ts'
 import {
   broadcast,
   closeSplash,
@@ -71,8 +78,15 @@ const STEPS: Array<{ id: BootstrapStepId; label: string }> = [
 
 let ctx: AppContext | null = null
 let clipboardWatcher: ClipboardWatcher | null = null
+
+export function updateClipboardWatcher(enabled: boolean) {
+  if (enabled) clipboardWatcher?.start()
+  else clipboardWatcher?.stop()
+}
 const state: BootstrapState = freshState()
 let finished = false
+let powerSaveBlockerId: number | null = null
+const taskStatuses = new Map<string, TaskStatus>()
 
 /* ------------------------------------------------------------------ */
 /* Single instance                                                     */
@@ -104,6 +118,14 @@ if (!app.requestSingleInstanceLock()) {
  * `runBootstrap` instead.
  */
 async function main(): Promise<void> {
+  process.on('uncaughtException', (error) => {
+    log.error('Uncaught Exception', error)
+  })
+
+  process.on('unhandledRejection', (reason) => {
+    log.error('Unhandled Rejection', reason)
+  })
+
   await app.whenReady()
   app.setAppUserModelId('com.nihil.draco')
 
@@ -118,7 +140,14 @@ async function main(): Promise<void> {
         minSplitSize: s.minSplitSize,
         retryLimit: s.retryLimit,
         timeoutMs: s.timeoutMs,
-        speedLimit: s.speedLimit
+        speedLimit: s.speedLimit,
+        proxyUrl: s.proxyUrl,
+        hostConnectionLimits: s.hostConnectionLimits,
+        quotaBytes: s.quotaBytes,
+        quotaWindowMinutes: s.quotaWindowMinutes,
+        antivirusProgram: s.antivirusProgram,
+        antivirusArgs: s.antivirusArgs,
+        antivirusTimeoutSeconds: s.antivirusTimeoutSeconds
       }
     },
     onTasks: (tasks) => {
@@ -126,8 +155,35 @@ async function main(): Promise<void> {
       // Broadcast rather than sent: each open progress window is watching the
       // same feed for the one task it is about.
       broadcast('tasks:changed', tasks)
+
+      let newlyDone = 0
+      let hasActive = false
+      for (const t of tasks) {
+        if (t.status === 'done' && taskStatuses.get(t.id) !== 'done') {
+          newlyDone++
+        }
+        taskStatuses.set(t.id, t.status)
+        if (t.status === 'downloading' || t.status === 'probing') {
+          hasActive = true
+        }
+      }
+
+      if (newlyDone > 0) {
+        new Notification({
+          title: newlyDone === 1 ? 'Download Complete' : `${newlyDone} Downloads Complete`,
+          body: newlyDone === 1 ? tasks.find(t => t.status === 'done')?.filename : 'Your files have finished downloading.',
+        }).show()
+      }
+
+      if (hasActive && powerSaveBlockerId === null) {
+        powerSaveBlockerId = powerSaveBlocker.start('prevent-app-suspension')
+      } else if (!hasActive && powerSaveBlockerId !== null) {
+        powerSaveBlocker.stop(powerSaveBlockerId)
+        powerSaveBlockerId = null
+      }
     },
     onProgress: (updates) => broadcast('tasks:progress', updates),
+    onQuotaState: persistQuotaState,
     onProbed: (task) => refileTask(task),
     createHlsRunner: (task, context) =>
       new HlsRunner(
@@ -144,6 +200,7 @@ async function main(): Promise<void> {
           onProbed: context.onProbed
         }
       ),
+    createMpdRunner: (task, context) => new MpdRunner(task, context),
     createDashRunner: (task, context) => new DashRunner(task, context),
     refreshYouTube: async (task, force) => {
       if (!task.youtube) throw new Error('Missing YouTube source metadata')
@@ -159,6 +216,13 @@ async function main(): Promise<void> {
     saveQueues,
     onPending: (pending) => send('queues:pending', pending),
     onExitRequested: () => quit()
+  })
+
+  const siteProjects = new SiteProjectManager({
+    manager,
+    downloadDir: () => getSettings().downloadDir,
+    load: loadSiteProjects,
+    save: saveSiteProjects
   })
 
   const pipe = new PipeServer({
@@ -178,6 +242,7 @@ async function main(): Promise<void> {
   ctx = {
     manager,
     scheduler,
+    siteProjects,
     pipe,
     media: [],
     pendingHandoffs: [],
@@ -198,19 +263,22 @@ async function runBootstrap(): Promise<void> {
   state.error = null
 
   await runStep('appdata', async () => {
-    ensureDirs()
+    const paths = ensureDirs()
+    setLogDirectory(paths.logs)
   })
 
   await runStep('settings', async () => {
     await loadSettings()
+    ctx!.manager.restoreQuota(await loadQuotaState())
     await loadCategories()
   })
 
   await runStep('restore', async () => {
-    const [tasks, queues, media] = await Promise.all([loadTasks(), loadQueues(), loadMedia()])
+    const [tasks, queues] = await Promise.all([loadTasks(), loadQueues()])
     await ctx!.manager.load(tasks)
     ctx!.scheduler.load(queues)
-    ctx!.media = media as MediaCandidate[]
+    await ctx!.siteProjects.start()
+    ctx!.media = []
   })
 
   await runStep('bridge', async () => {
@@ -219,7 +287,7 @@ async function runBootstrap(): Promise<void> {
 
   await runStep('integration', async () => {
     const registered = await ensureRegistered()
-    if (!registered.chrome && !registered.edge && !registered.brave) {
+    if (!Object.values(registered).some(Boolean)) {
       // Browser integration is optional. A machine with no supported Chromium
       // browser, a portable install, or a missing extension key must not prevent
       // the download manager itself from starting. The integration can be retried
@@ -253,6 +321,17 @@ function finish(): void {
 
   ctx.scheduler.start()
   clipboardWatcher?.start()
+  const updateSettings = getSettings()
+  if (updateSettings.autoCheckUpdates && updateSettings.updateFeedUrl) {
+    void checkForUpdates(updateSettings.updateFeedUrl)
+      .then((info) => {
+        if (info.available) send('toast', {
+          kind: 'info',
+          message: `Draco ${info.latestVersion} is available. Open Options to download it.`
+        })
+      })
+      .catch((error) => log.warn(`automatic update check failed: ${String(error)}`))
+  }
   log.info('ready')
 }
 
@@ -448,6 +527,7 @@ async function handleHostMessageOnce(ctx: AppContext, message: HostMessage): Pro
 
     case 'youtube': {
       try {
+        const handoffStartedAt = Date.now()
         if (!/^https?:\/\/(?:www\.|m\.)?(?:youtube\.com)(?:\/|$)|^https?:\/\/youtu\.be\//i.test(message.pageUrl)) {
           return { ok: false, error: 'Not a supported YouTube URL' }
         }
@@ -460,27 +540,36 @@ async function handleHostMessageOnce(ctx: AppContext, message: HostMessage): Pro
 
         /*
          * The browser already parsed the ladder in order to play the video, so
-         * take it from there and put the window up at once. yt-dlp remains the
-         * only source of an actual download URL - it is just no longer in the
-         * way of showing the choice.
+         * take it from there. The final dialog is shown only once its variants
+         * already carry usable media URLs: either straight from the live player
+         * or, when that player exposes metadata only, from yt-dlp here during
+         * the browser button's earlier "Checking" stage.
          */
         const instant = resolveYouTubeInstant(
           message.pageUrl,
           message.pageTitle,
           message.pageFormats
         )
-        const resolved = instant ?? (await resolveYouTube(message.pageUrl, headers))
+        // The page already knows the complete quality ladder even when some
+        // entries carry signatureCipher instead of a direct URL. Show that
+        // ladder now; the chosen itags are prepared only after confirmation.
+        const pagePrepared = Boolean(
+          instant && instant.variants.every((variant) =>
+            Boolean(variant.url) && (!variant.youtube?.audioFormatId || Boolean(variant.audioUrl))
+          )
+        )
+        const resolved = instant ?? await resolveYouTube(message.pageUrl, headers)
         log.info(
           instant
-            ? `ladder from the page: ${resolved.variants.length} qualities`
+            ? `instant page ladder: ${resolved.variants.length} qualities` +
+              (pagePrepared ? ' (resources prepared)' : ' (resources prepare after selection)')
             : `ladder from yt-dlp: ${resolved.variants.length} qualities` +
               ' (the extension sent no page formats - is it reloaded?)'
         )
 
-        // Start the lookup the accept path will need. When the ladder came from
-        // the page this is the only yt-dlp call there is, and it now overlaps
-        // with the user choosing a quality rather than following their click.
-        primeYouTube(message.pageUrl, headers)
+        // Cipher resolution overlaps with the time spent choosing a quality.
+        // It never delays the window and the selection reuses this cached call.
+        if (instant && !pagePrepared) void primeYouTube(message.pageUrl, headers).catch(() => {})
 
         const candidate = recordMedia(ctx, {
           pageUrl: message.pageUrl,
@@ -509,12 +598,34 @@ async function handleHostMessageOnce(ctx: AppContext, message: HostMessage): Pro
         if (ctx.pendingHandoffs.length > 12) ctx.pendingHandoffs.shift()
 
         createHandoffWindow(request.id)
+        log.info(`YouTube handoff window ready in ${Date.now() - handoffStartedAt} ms`)
         return { ok: true }
       } catch (err) {
         return {
           ok: false,
           error: err instanceof Error ? err.message : String(err)
         }
+      }
+    }
+
+    case 'youtubePrime': {
+      if (!isSupportedYouTubeUrl(message.pageUrl)) {
+        return { ok: false, primed: false, error: 'Not a supported YouTube URL' }
+      }
+
+      const primeStartedAt = Date.now()
+      try {
+        await primeYouTube(message.pageUrl, {
+          referer: message.referer ?? message.pageUrl,
+          cookie: message.cookie,
+          userAgent: message.userAgent
+        })
+        log.info(`YouTube extraction cache ready in ${Date.now() - primeStartedAt} ms`)
+        return { ok: true, primed: true }
+      } catch (err) {
+        const error = err instanceof Error ? err.message : String(err)
+        log.warn(`YouTube extraction prefetch failed: ${error}`)
+        return { ok: false, primed: false, error }
       }
     }
 
@@ -552,6 +663,18 @@ async function handleHostMessageOnce(ctx: AppContext, message: HostMessage): Pro
   }
 }
 
+function isSupportedYouTubeUrl(value: string): boolean {
+  try {
+    const url = new URL(value)
+    return url.protocol === 'https:' && (
+      /(^|\.)youtube\.com$/i.test(url.hostname) ||
+      /(^|\.)youtu\.be$/i.test(url.hostname)
+    )
+  } catch {
+    return false
+  }
+}
+
 /* ------------------------------------------------------------------ */
 /* Shutdown                                                            */
 /* ------------------------------------------------------------------ */
@@ -578,9 +701,11 @@ async function shutdown(): Promise<void> {
   destroyTray()
   clipboardWatcher?.stop()
   ctx?.scheduler.stop()
+  ctx?.siteProjects.dispose()
   await ctx?.manager.shutdown()
   await ctx?.pipe.stop()
   await flushTasks()
+  await flushQuotaState()
   await closeDispatchers()
 }
 

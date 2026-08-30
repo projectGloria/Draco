@@ -8,8 +8,8 @@ $ErrorActionPreference = 'Stop'
 $here = Split-Path -Parent $MyInvocation.MyCommand.Path
 Push-Location $here
 try {
+    $env:CGO_ENABLED = '0'
     $env:GOOS = 'windows'
-    $env:GOARCH = 'amd64'
     # -s -w strip the symbol table and DWARF data; this binary is never debugged
     # in the field and the size shows up in every install.
     go build -trimpath -ldflags '-s -w' -o draco-host.exe .

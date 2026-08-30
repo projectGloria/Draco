@@ -47,8 +47,45 @@ async function setMedia(tabId, list) {
  * take it over again. Entries expire after 30 seconds to prevent unbounded
  * growth over a long session.
  */
-const passThrough = new Set()
 const PASSTHROUGH_EXPIRY_MS = 30_000
+
+async function addPassThrough(url) {
+  const data = await chrome.storage.session.get('passThrough')
+  const pt = data.passThrough || {}
+  pt[url] = Date.now() + PASSTHROUGH_EXPIRY_MS
+
+  // Prune expired
+  const now = Date.now()
+  for (const k of Object.keys(pt)) {
+    if (pt[k] < now) delete pt[k]
+  }
+
+  await chrome.storage.session.set({ passThrough: pt })
+}
+
+async function checkAndConsumePassThrough(url) {
+  const data = await chrome.storage.session.get('passThrough')
+  const pt = data.passThrough || {}
+
+  // Clean up expired ones while we're here
+  let changed = false
+  const now = Date.now()
+  for (const k of Object.keys(pt)) {
+    if (pt[k] < now) {
+      delete pt[k]
+      changed = true
+    }
+  }
+
+  if (pt[url]) {
+    delete pt[url]
+    await chrome.storage.session.set({ passThrough: pt })
+    return true
+  } else if (changed) {
+    await chrome.storage.session.set({ passThrough: pt })
+  }
+  return false
+}
 
 /* ------------------------------------------------------------------ */
 /* Native host                                                         */
@@ -155,15 +192,22 @@ async function cookieHeaderFor(url) {
 }
 
 chrome.downloads.onCreated.addListener(async (item) => {
-  const url = item.finalUrl || item.url
-  if (passThrough.delete(item.finalUrl) || passThrough.delete(item.url)) return
+  if (item.finalUrl && await checkAndConsumePassThrough(item.finalUrl)) return
+  if (item.url && await checkAndConsumePassThrough(item.url)) return
 
+  const url = item.finalUrl || item.url
   const rules = await refreshConfig()
   if (!shouldTakeOver(item, rules)) return
   const [cookie, tab] = await Promise.all([
     cookieHeaderFor(url),
-    item.tabId ? chrome.tabs.get(item.tabId).catch(() => null) : Promise.resolve(null)
+    item.tabId >= 0 ? chrome.tabs.get(item.tabId).catch(() => null) : Promise.resolve(null)
   ])
+
+  try {
+    await chrome.downloads.pause(item.id)
+  } catch {
+    // If it's too fast, we might not be able to pause it.
+  }
 
   const reply = await callHost({
     type: 'download',
@@ -176,20 +220,18 @@ chrome.downloads.onCreated.addListener(async (item) => {
     mimeType: item.mime || null
   })
 
-  // Only now is it safe to cancel. Cancelling first and asking afterwards would
-  // silently eat the download whenever the app is not reachable.
   if (!reply.ok || !reply.taken) {
     console.warn('Draco did not take the download:', reply.error ?? 'declined')
+    try {
+      await chrome.downloads.resume(item.id)
+    } catch {}
     return
   }
 
   try {
     await chrome.downloads.cancel(item.id)
     await chrome.downloads.erase({ id: item.id })
-  } catch {
-    // The download may have already finished if it was tiny. Nothing to undo:
-    // Draco has its own copy queued either way.
-  }
+  } catch {}
 })
 
 /* ------------------------------------------------------------------ */
@@ -208,21 +250,66 @@ chrome.runtime.onInstalled.addListener(() => {
   chrome.contextMenus.removeAll(() => {
     for (const menu of MENUS) chrome.contextMenus.create(menu)
   })
-  void refreshConfig(true)
 })
-
-chrome.runtime.onStartup.addListener(() => void refreshConfig(true))
 
 function isYouTubePage(url) {
   try {
     const parsed = new URL(url)
     return (
-      /(^|\\.)youtube\\.com$/i.test(parsed.hostname) ||
-      /(^|\\.)youtu\\.be$/i.test(parsed.hostname)
+      /(^|\.)youtube\.com$/i.test(parsed.hostname) ||
+      /(^|\.)youtu\.be$/i.test(parsed.hostname)
     )
   } catch {
     return false
   }
+}
+
+function youtubeVideoId(url) {
+  try {
+    const parsed = new URL(url)
+    if (/(^|\.)youtu\.be$/i.test(parsed.hostname)) {
+      return parsed.pathname.replace(/^\//, '').split('/')[0] || null
+    }
+    if (!/(^|\.)youtube\.com$/i.test(parsed.hostname)) return null
+    return (
+      parsed.searchParams.get('v') ||
+      (/^\/(?:shorts|embed|live)\/([^/?#]+)/i.exec(parsed.pathname) || [])[1] ||
+      null
+    )
+  } catch {
+    return null
+  }
+}
+
+const youtubePrimeRequests = new Map()
+
+/** Warms links from tab navigation even if the content script has not loaded yet. */
+function primeYouTubeUrl(url) {
+  const videoId = youtubeVideoId(url)
+  if (!videoId) return Promise.resolve({ ok: false, primed: false })
+
+  const active = youtubePrimeRequests.get(videoId)
+  if (active) return active
+
+  const request = (async () => {
+    const cookie = await cookieHeaderFor(url)
+    const reply = await callHost({
+      type: 'youtubePrime',
+      pageUrl: url,
+      referer: url,
+      cookie: cookie || undefined,
+      userAgent: navigator.userAgent
+    })
+    console.debug(
+      reply?.ok && reply?.primed
+        ? `[Draco] links ready for ${videoId}`
+        : `[Draco] link preparation failed for ${videoId}: ${reply?.error ?? 'unknown error'}`
+    )
+    return reply
+  })().finally(() => youtubePrimeRequests.delete(videoId))
+
+  youtubePrimeRequests.set(videoId, request)
+  return request
 }
 
 /**
@@ -233,9 +320,9 @@ function isYouTubePage(url) {
  * between a menu that appears the moment the button is pressed and one that
  * appears after yt-dlp has spent six seconds asking YouTube the same question.
  *
- * Metadata only - itags, heights, bitrates. No URLs are taken from the page:
- * the app looks those up itself, so a hostile page cannot nominate what Draco
- * downloads. A null return is fine; the app falls back to asking yt-dlp.
+ * Direct URLs are included only when they point at the matching itag on
+ * Google's media CDN. Those are the resources the browser is already playing,
+ * so using them removes the extractor wait after the final Download click.
  */
 async function youTubePageFormats(tab) {
   if (!tab || typeof tab.id !== 'number' || tab.id < 0) return null
@@ -284,8 +371,24 @@ async function youTubePageFormats(tab) {
 
           const all = [].concat(streaming.formats || [], streaming.adaptiveFormats || [])
           const formats = []
+          let directCount = 0
+          let cipherCount = 0
           for (const format of all) {
             if (!format || typeof format.itag !== 'number') continue
+            let directUrl = null
+            try {
+              const parsed = new URL(format.url)
+              if (
+                parsed.protocol === 'https:' &&
+                /(^|\.)googlevideo\.com$/i.test(parsed.hostname) &&
+                /\/videoplayback$/i.test(parsed.pathname) &&
+                parsed.searchParams.get('itag') === String(format.itag)
+              ) {
+                directUrl = parsed.href
+                directCount++
+              }
+            } catch {}
+            if (!directUrl && (format.signatureCipher || format.cipher)) cipherCount++
             formats.push({
               itag: format.itag,
               mimeType: typeof format.mimeType === 'string' ? format.mimeType.slice(0, 200) : null,
@@ -293,12 +396,24 @@ async function youTubePageFormats(tab) {
               width: Number(format.width) || null,
               height: Number(format.height) || null,
               fps: Number(format.fps) || null,
-              contentLength: Number(format.contentLength) || null
+              contentLength: Number(format.contentLength) || null,
+              url: directUrl
             })
             if (formats.length >= 100) break
           }
 
-          if (formats.length > 0) return { title: details.title || '', formats }
+          if (formats.length > 0) {
+            return {
+              title: details.title || '',
+              formats,
+              diagnostics: {
+                formats: formats.length,
+                direct: directCount,
+                ciphered: cipherCount,
+                sabr: Boolean(streaming.serverAbrStreamingUrl)
+              }
+            }
+          }
         }
 
         return null
@@ -315,6 +430,7 @@ async function youTubePageFormats(tab) {
 async function sendYouTube(tab) {
   const cookie = await cookieHeaderFor(tab.url)
   const page = await youTubePageFormats(tab)
+  if (page?.diagnostics) console.debug('Draco YouTube ladder', page.diagnostics)
   const reply = await callHost({
     type: 'youtube',
     pageUrl: tab.url,
@@ -385,8 +501,8 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
       args: [wantImages],
       func: (images) =>
         images
-          ? [...document.images].map((el) => el.src)
-          : [...document.links].map((el) => el.href)
+          ? [...document.querySelectorAll('img')].map((el) => el.src)
+          : [...document.querySelectorAll('a, area')].map((el) => el.href)
     })
 
     await sendUrls(result?.result ?? [], referer)
@@ -417,19 +533,25 @@ function classify(url) {
 /** Hosts that only ever serve adaptive chunks, never a whole file. */
 const ADAPTIVE_HOSTS = /(^|\.)(googlevideo\.com|ytimg\.com|ttvnw\.net|nflxvideo\.net)$/i
 
+const tabLocks = new Map()
+
 async function remember(tabId, mediaUrl, kind) {
-  const list = await getMedia(tabId)
-  // A player re-requests the same playlist constantly; one entry is enough.
-  if (list.some((m) => m.mediaUrl === mediaUrl)) return
+  let p = tabLocks.get(tabId) || Promise.resolve()
+  p = p.then(async () => {
+    const list = await getMedia(tabId)
+    // A player re-requests the same playlist constantly; one entry is enough.
+    if (list.some((m) => m.mediaUrl === mediaUrl)) return
 
-  list.push({ mediaUrl, kind, at: Date.now() })
-  // Keep the list bounded: a long live stream would otherwise grow forever.
-  const bounded = list.slice(-40)
-  await setMedia(tabId, bounded)
+    list.push({ mediaUrl, kind, at: Date.now() })
+    // Keep the list bounded: a long live stream would otherwise grow forever.
+    const bounded = list.slice(-40)
+    await setMedia(tabId, bounded)
 
-  chrome.action.setBadgeText({ tabId, text: String(bounded.length) })
-  chrome.action.setBadgeBackgroundColor({ tabId, color: '#38bdf8' })
-  chrome.tabs.sendMessage(tabId, { type: 'draco:media-count', count: bounded.length }).catch(() => {})
+    chrome.action.setBadgeText({ tabId, text: String(bounded.length) })
+    chrome.action.setBadgeBackgroundColor({ tabId, color: '#38bdf8' })
+    chrome.tabs.sendMessage(tabId, { type: 'draco:media-count', count: bounded.length }).catch(() => {})
+  }).catch(() => {})
+  tabLocks.set(tabId, p)
 }
 
 /**
@@ -484,12 +606,22 @@ chrome.webRequest.onHeadersReceived.addListener(
 )
 
 chrome.tabs.onRemoved.addListener((tabId) => chrome.storage.session.remove(`media_${tabId}`))
-chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
+chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
   if (changeInfo.status === 'loading' && changeInfo.url) {
     chrome.storage.session.remove(`media_${tabId}`)
     chrome.action.setBadgeText({ tabId, text: '' })
   }
+
+  const url = changeInfo.url || tab.url
+  if (url && youtubeVideoId(url)) void primeYouTubeUrl(url)
 })
+
+// Reloading the extension should prepare a YouTube tab that is already open;
+// requiring another refresh here is both surprising and easy to miss in tests.
+void chrome.tabs
+  .query({})
+  .then((tabs) => Promise.all(tabs.map((tab) => (tab.url ? primeYouTubeUrl(tab.url) : null))))
+  .catch(() => {})
 
 /* ------------------------------------------------------------------ */
 /* Messages from the popup and content script                          */
@@ -505,65 +637,6 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         return
       }
 
-      case 'draco:get-yt-data': {
-        const tab = sender.tab;
-        if (!tab || !tab.id) {
-          sendResponse(null);
-          return false;
-        }
-
-        fetch(tab.url)
-          .then(res => res.text())
-          .then(html => {
-            const patterns = [
-              /ytInitialPlayerResponse\s*=\s*({.+?});\s*var\s+meta/s,
-              /window\.\["ytInitialPlayerResponse"\]\s*=\s*({.+?});/s,
-              /ytInitialPlayerResponse\s*=\s*({.+?})\s*;/s
-            ];
-            
-            for (const p of patterns) {
-              const m = html.match(p);
-              if (m && m[1]) {
-                try {
-                  const data = JSON.parse(m[1]);
-                  if (data && data.streamingData) {
-                    sendResponse({ streamingData: data.streamingData });
-                    return;
-                  }
-                } catch(e) {}
-              }
-            }
-            throw new Error('Not found in HTML');
-          })
-          .catch(() => {
-            // Fallback to executeScript (only extracting streamingData to avoid large serialization limits)
-            chrome.scripting.executeScript({
-              target: { tabId: tab.id },
-              world: 'MAIN',
-              func: () => {
-                try {
-                  let res = null;
-                  const player = document.getElementById('movie_player');
-                  if (player && typeof player.getPlayerResponse === 'function') {
-                    res = player.getPlayerResponse();
-                  }
-                  if (!res) {
-                    res = window.ytInitialPlayerResponse || (window.ytplayer && window.ytplayer.config && window.ytplayer.config.args && JSON.parse(window.ytplayer.config.args.raw_player_response));
-                  }
-                  return res && res.streamingData ? { streamingData: res.streamingData } : null;
-                } catch(e) {
-                  return null;
-                }
-              }
-            }).then(results => {
-              sendResponse(results?.[0]?.result ?? null);
-            }).catch(() => {
-              sendResponse(null);
-            });
-          });
-        return true; // Keep message channel open for async response
-      }
-
       case 'draco:resolve-youtube': {
         const tab = sender.tab
         if (!tab?.url) {
@@ -573,6 +646,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
         const cookie = await cookieHeaderFor(tab.url)
         const page = await youTubePageFormats(tab)
+        if (page?.diagnostics) console.debug('Draco YouTube ladder', page.diagnostics)
         const reply = await callHost({
           type: 'youtube',
           pageUrl: tab.url,
@@ -587,27 +661,21 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         return
       }
 
+      case 'draco:prime-youtube': {
+        const tab = sender.tab
+        if (!tab?.url || !isYouTubePage(tab.url)) {
+          sendResponse({ ok: false, primed: false })
+          return
+        }
+
+        const reply = await primeYouTubeUrl(tab.url)
+        sendResponse(reply)
+        return
+      }
+
       case 'draco:grab-best': {
         const tab = sender.tab
         const list = await getMedia(tab?.id)
-
-        if (message.ytVariants && message.ytVariants.length > 0) {
-          const cookie = await cookieHeaderFor(tab?.url)
-          const reply = await callHost({
-            type: 'media',
-            pageUrl: tab?.url ?? '',
-            pageTitle: tab?.title ?? '',
-            mediaUrl: message.ytVariants[0].url,
-            audioUrl: message.ytVariants[0].audioUrl,
-            variants: message.ytVariants,
-            kind: 'file',
-            referer: tab?.url,
-            cookie: cookie || undefined,
-            userAgent: navigator.userAgent
-          })
-          sendResponse(reply.ok ? { ok: true } : { ok: false, error: reply.error })
-          return
-        }
 
         // The page's own <video src> is the most reliable thing there is when
         // it is a plain URL: no guessing about which of forty sniffed requests
@@ -637,6 +705,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           pageUrl: tab?.url ?? '',
           pageTitle: tab?.title ?? '',
           mediaUrl: best.mediaUrl,
+          subtitles: message.subtitles,
           kind: best.kind,
           referer: tab?.url,
           cookie: cookie || undefined,
@@ -668,13 +737,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         const rules = await refreshConfig()
         const url = message.url
 
-        function ignoreUrl(u) {
-          passThrough.add(u)
-          setTimeout(() => passThrough.delete(u), PASSTHROUGH_EXPIRY_MS)
+        async function ignoreUrl(u) {
+          // Store the exemption before replaying the click. The browser can
+          // create its DownloadItem immediately after the reply is received.
+          await addPassThrough(u)
         }
 
         if (!rules.enabled || !isTakeableUrl(url, rules)) {
-          ignoreUrl(url)
+          await ignoreUrl(url)
           sendResponse({ taken: false })
           return
         }
@@ -697,7 +767,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
         // Let the page's own navigation happen instead; onCreated will see the
         // URL in passThrough and keep its hands off it.
-        ignoreUrl(url)
+        await ignoreUrl(url)
         sendResponse({ taken: false, error: reply.error })
         return
       }

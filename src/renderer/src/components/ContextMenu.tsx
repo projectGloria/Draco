@@ -40,8 +40,8 @@ export default function ContextMenu({
     const { width, height } = el.getBoundingClientRect()
     const margin = 6
     setPos({
-      x: Math.min(at.x, window.innerWidth - width - margin),
-      y: Math.min(at.y, window.innerHeight - height - margin)
+      x: Math.max(margin, Math.min(at.x, window.innerWidth - width - margin)),
+      y: Math.max(margin, Math.min(at.y, window.innerHeight - height - margin))
     })
   }, [at])
 

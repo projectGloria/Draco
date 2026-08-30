@@ -1,5 +1,6 @@
 import { useApp } from '../store/app'
 import { formatBytes, formatSpeed } from '../lib/format'
+import { useT } from '../i18n'
 
 /**
  * The one-line summary along the bottom: what is running, how fast in total,
@@ -15,6 +16,7 @@ export default function StatusBar({
   const tasks = useApp((s) => s.tasks)
   const settings = useApp((s) => s.settings)
   const integration = useApp((s) => s.integration)
+  const t = useT()
 
   const active = tasks.filter((t) => t.status === 'downloading')
   const queued = tasks.filter((t) => t.status === 'queued').length
@@ -31,13 +33,13 @@ export default function StatusBar({
   const bridge = integration?.bridgeListening === true
   const anyBrowser =
     integration !== null &&
-    (integration.registered.chrome || integration.registered.edge || integration.registered.brave)
+    Object.values(integration.registered).some(Boolean)
 
   return (
     <footer className="h-7 shrink-0 flex items-center gap-4 px-3 border-t border-line bg-white/[0.02] text-[11.5px] text-faint">
       <span className="tnum">
-        {active.length} active
-        {queued > 0 && <span className="text-faint/70"> · {queued} queued</span>}
+        {active.length} {t('active')}
+        {queued > 0 && <span className="text-faint/70"> · {queued} {t('queued')}</span>}
       </span>
 
       {speed > 0 && (
@@ -46,13 +48,13 @@ export default function StatusBar({
         </span>
       )}
 
-      {remaining > 0 && <span className="tnum">{formatBytes(remaining)} remaining</span>}
+      {remaining > 0 && <span className="tnum">{formatBytes(remaining)} {t('remaining')}</span>}
 
       <div className="flex-1" />
 
       {settings.speedLimit && (
         <span className="tnum" title="Global speed limit, from Options">
-          limit {formatSpeed(settings.speedLimit)}
+          {t('limit')} {formatSpeed(settings.speedLimit)}
         </span>
       )}
 
@@ -69,7 +71,7 @@ export default function StatusBar({
           className="w-1.5 h-1.5 rounded-full"
           style={{ background: bridge && anyBrowser ? 'var(--color-ok)' : 'var(--color-warn)' }}
         />
-        Browser
+        {t('browser')}
       </button>
     </footer>
   )

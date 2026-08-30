@@ -7,6 +7,7 @@ import { uniquePath } from './naming.ts'
 import { buildHeaders, probeUrl } from './probe.ts'
 import { Segmenter } from './segmenter.ts'
 import { AbortedError, HttpStatusError, NotResumableError, ServerBusyError, runSegment } from './worker.ts'
+import { preparedYouTubeUrl } from '../youtube-url.ts'
 
 /**
  * Drives one download: probe, resume-or-start, keep the connection pool fed,
@@ -74,6 +75,7 @@ export class TaskRunner {
    * whenever the server says it will not take another connection.
    */
   private connectionCap = 1
+  private busyRetries = 0
 
   running = false
 
@@ -109,6 +111,7 @@ export class TaskRunner {
     this.urlRefreshPromise = null
     this.lastRefreshedUrl = null
     this.forcedProbeUrl = null
+    this.busyRetries = 0
 
     const lifecycle = this.runLifecycle()
     this.lifecyclePromise = lifecycle
@@ -153,7 +156,7 @@ export class TaskRunner {
 
         await this.teardown()
 
-        if (error instanceof AbortedError) {
+        if ((error instanceof AbortedError || this.controller.signal.aborted) && !this.fatal) {
           // A pause is not a failure; pause() has already set the status.
           this.deps.onFinished(this.task, null)
         } else {
@@ -230,27 +233,50 @@ export class TaskRunner {
     let probeTarget = this.task.url
     if (this.task.youtube && this.deps.refreshYouTube) {
       /*
-       * A YouTube task holds the watch page, never a signed media URL: those
-       * expire, so storing one only means the task is born with a fuse. The
-       * real URL is looked up here, at the moment bytes are about to be asked
-       * for, from the lookup the confirm window primed - which is why this is
-       * unforced and normally costs nothing.
+       * New YouTube tasks already carry the signed resource prepared before the
+       * final confirmation, so the common path goes straight into the probe.
+       * Old/restored tasks may still carry only the watch page; those use the
+       * extractor fallback, and expired prepared URLs refresh after HTTP errors.
        */
-      if (!this.forcedProbeUrl) {
+      const requestedItag = Number(this.task.youtube.role === 'audio'
+        ? this.task.youtube.audioFormatId?.split('-')[0]
+        : this.task.youtube.videoFormatId.split('-')[0])
+      const prepared = preparedYouTubeUrl(
+        this.task.url,
+        Number.isSafeInteger(requestedItag) ? requestedItag : undefined
+      )
+
+      if (!this.forcedProbeUrl && !prepared) {
         this.task.detail = 'Getting the download link…'
         this.deps.onUpdate(this.task)
       }
-      probeTarget = this.forcedProbeUrl ?? (await this.deps.refreshYouTube(this.task, false))
+      probeTarget = this.forcedProbeUrl ?? prepared ?? (await this.deps.refreshYouTube(this.task, false))
       this.forcedProbeUrl = null
       this.task.finalUrl = probeTarget
       this.task.detail = null
     }
 
-    const probe = await probeUrl(probeTarget, {
-      headers: this.task.headers,
-      timeoutMs: this.config.timeoutMs,
-      signal: this.controller.signal
-    })
+    let probe: any
+    try {
+      probe = await probeUrl(probeTarget, {
+        headers: this.task.headers,
+        timeoutMs: this.config.timeoutMs,
+        signal: this.controller.signal
+      })
+    } catch (err) {
+      if (
+        this.task.youtube &&
+        this.deps.refreshYouTube &&
+        err instanceof HttpStatusError &&
+        [401, 403, 410].includes(err.statusCode)
+      ) {
+        if (this.urlRefreshes >= 1) throw new Error('YouTube media URL expired again after a refresh')
+        this.urlRefreshes++
+        const refreshedUrl = await this.deps.refreshYouTube(this.task, true)
+        throw new UrlRefreshError(refreshedUrl)
+      }
+      throw err
+    }
 
     this.task.finalUrl = probe.finalUrl
     this.task.size = probe.size
@@ -272,6 +298,17 @@ export class TaskRunner {
     this.connectionCap =
       this.task.resumable && this.task.size !== null ? this.config.maxConnections : 1
     this.task.connections = this.connectionCap
+
+    if (!restored && process.platform === 'win32' && this.task.size !== null && this.task.size > 0) {
+      // Must exist before fsutil can mark it
+      await open(this.partPath, 'w').then((fh) => fh.close())
+      // Native sparse support guarantees ftruncate is instant even without volume privileges.
+      await import('node:child_process').then(cp =>
+        import('node:util').then(util =>
+          util.promisify(cp.execFile)('fsutil', ['sparse', 'setflag', this.partPath], { windowsHide: true })
+        )
+      ).catch(() => {})
+    }
 
     this.fh = await open(this.partPath, restored ? 'r+' : 'w+')
 
@@ -334,8 +371,11 @@ export class TaskRunner {
     if (!segmenter) throw new Error('segmenter missing')
 
     for (;;) {
-      if (this.controller.signal.aborted) throw new AbortedError()
       if (this.fatal) throw this.fatal
+      // Worker failures abort their siblings too. Preserve the real failure;
+      // treating that shared abort as a user pause would leave the task stuck
+      // in its previous visible state and skip compatibility recovery.
+      if (this.controller.signal.aborted) throw new AbortedError()
       if (segmenter.complete) break
 
       this.fill()
@@ -446,12 +486,14 @@ export class TaskRunner {
         // The server is capping parallelism rather than failing. Give back a
         // connection and leave the range for whoever frees up next; the work is
         // not lost, it just proceeds narrower.
-        if (err instanceof ServerBusyError && this.connectionCap > 1) {
-          this.connectionCap--
+        if (err instanceof ServerBusyError && this.busyRetries < this.config.retryLimit) {
+          this.busyRetries++
+          if (this.connectionCap > 1) this.connectionCap--
           this.task.connections = this.connectionCap
           // Hold the slot open while backing off, so the loop does not spin and
           // immediately re-provoke the same refusal.
-          await delay(2000)
+          const fallback = Math.min(30_000, 1000 * 2 ** (this.busyRetries - 1))
+          await delay(err.retryAfterMs ?? fallback)
           this.fill()
           return
         }

@@ -27,6 +27,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sync"
+	"syscall"
 	"time"
 )
 
@@ -35,6 +37,8 @@ const (
 
 	// Chrome's own limit on a single native message.
 	maxFrame = 64 * 1024 * 1024
+	// Chrome limits native messages sent *to* the extension to 1MB.
+	maxWriteFrame = 1024 * 1024
 
 	// How long to keep trying after launching the app. A cold Electron start
 	// on a slow disk is comfortably under this.
@@ -60,28 +64,41 @@ func main() {
 	defer conn.close()
 
 	for {
+		// Native messaging is request/reply: Chrome sends a frame and waits for
+		// exactly one response. Keeping each pair together avoids racing a pipe
+		// read against the goroutine that writes its matching request.
 		msg, err := readFrame(os.Stdin)
-		if errors.Is(err, io.EOF) {
-			logf("browser closed the port; exiting")
-			return
-		}
 		if err != nil {
-			logf("failed to read frame: %v", err)
+			if errors.Is(err, io.EOF) {
+				logf("browser closed the port; exiting")
+			} else {
+				logf("failed to read from stdin: %v", err)
+			}
 			return
 		}
 
-		reply, err := conn.forward(msg)
-		if err != nil {
+		if err := conn.write(msg); err != nil {
 			logf("relay failed: %v", err)
-			// Answer anyway. A silent host makes the extension hang, and the
-			// extension needs a definite "not taken" so it can let the browser
-			// keep the download rather than cancelling it into nothing.
-			reply = errorReply(err)
+			if err := writeFrame(os.Stdout, errorReply(err)); err != nil {
+				logf("failed to write relay error to stdout: %v", err)
+				return
+			}
+			continue
+		}
+
+		reply, err := conn.read()
+		if err != nil {
+			logf("failed to read from pipe: %v", err)
+			if err := writeFrame(os.Stdout, errorReply(err)); err != nil {
+				logf("failed to write pipe error to stdout: %v", err)
+				return
+			}
+			continue
 		}
 
 		if err := writeFrame(os.Stdout, reply); err != nil {
-			logf("failed to write reply: %v", err)
-			return
+			logf("failed to write to stdout: %v", err)
+			os.Exit(1)
 		}
 	}
 }
@@ -109,7 +126,7 @@ func readFrame(r io.Reader) ([]byte, error) {
 }
 
 func writeFrame(w io.Writer, body []byte) error {
-	if uint64(len(body)) > uint64(maxFrame) {
+	if uint64(len(body)) > uint64(maxWriteFrame) {
 		return fmt.Errorf("frame of %d bytes exceeds the limit", len(body))
 	}
 	var header [4]byte
@@ -156,49 +173,61 @@ func errorReply(err error) []byte {
 /* ------------------------------------------------------------------ */
 
 type connection struct {
+	mu   sync.Mutex
 	pipe *os.File
 }
 
 func (c *connection) close() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	if c.pipe != nil {
 		c.pipe.Close()
 		c.pipe = nil
 	}
 }
 
-// forward sends one frame and returns the reply, reconnecting - and starting
-// the app if necessary - when the pipe is not there.
-func (c *connection) forward(msg []byte) ([]byte, error) {
-	if reply, err := c.attempt(msg); err == nil {
-		return reply, nil
-	} else {
-		logf("first attempt failed (%v); reconnecting", err)
+func (c *connection) getPipe() (*os.File, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.pipe != nil {
+		return c.pipe, nil
+	}
+
+	if err := c.dialOrLaunchLocked(); err != nil {
+		return nil, err
+	}
+	return c.pipe, nil
+}
+
+func (c *connection) write(msg []byte) error {
+	p, err := c.getPipe()
+	if err != nil {
+		return err
+	}
+
+	err = writeFrame(p, msg)
+	if err != nil {
 		c.close()
 	}
-
-	if err := c.dialOrLaunch(); err != nil {
-		return nil, err
-	}
-	return c.attempt(msg)
+	return err
 }
 
-func (c *connection) attempt(msg []byte) ([]byte, error) {
-	if c.pipe == nil {
-		if err := c.dial(); err != nil {
-			return nil, err
-		}
-	}
-
-	if err := writeFrame(c.pipe, msg); err != nil {
+func (c *connection) read() ([]byte, error) {
+	p, err := c.getPipe()
+	if err != nil {
 		return nil, err
 	}
-	return readFrame(c.pipe)
+
+	reply, err := readFrame(p)
+	if err != nil {
+		c.close()
+	}
+	return reply, err
 }
 
-// dial opens the named pipe. A named pipe on Windows behaves enough like a file
-// that the standard library can open it directly, which keeps this binary free
-// of third-party dependencies.
-func (c *connection) dial() error {
+// dial opens the named pipe.
+func (c *connection) dialLocked() error {
 	pipe, err := os.OpenFile(pipePath, os.O_RDWR, 0)
 	if err != nil {
 		return err
@@ -208,8 +237,8 @@ func (c *connection) dial() error {
 }
 
 // dialOrLaunch retries the pipe, starting Draco if it does not answer.
-func (c *connection) dialOrLaunch() error {
-	if err := c.dial(); err == nil {
+func (c *connection) dialOrLaunchLocked() error {
+	if err := c.dialLocked(); err == nil {
 		return nil
 	}
 
@@ -224,7 +253,7 @@ func (c *connection) dialOrLaunch() error {
 
 	for time.Now().Before(deadline) {
 		time.Sleep(delay)
-		if err := c.dial(); err == nil {
+		if err := c.dialLocked(); err == nil {
 			logf("connected after cold start")
 			return nil
 		}
@@ -254,6 +283,7 @@ func launchApp() error {
 	cmd.Stdin = nil
 	cmd.Stdout = nil
 	cmd.Stderr = nil
+	cmd.SysProcAttr = &syscall.SysProcAttr{CreationFlags: 0x00000008} // DETACHED_PROCESS
 	if err := cmd.Start(); err != nil {
 		return err
 	}
