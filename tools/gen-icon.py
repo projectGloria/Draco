@@ -38,6 +38,10 @@ def compact_icon(source: Image.Image, size: int) -> Image.Image:
 
 app_icon = Image.open(RESOURCES / 'appIcon.png').convert('RGBA')
 resized(app_icon, (512, 512)).save(RESOURCES / 'icon.png', optimize=True)
+# Small display-sized copy for the splash window, which shows it at 34px and
+# whose whole job is to appear quickly - the full 512px file decodes to
+# several megabytes of RGBA for a mark a fraction of that size.
+resized(app_icon, (128, 128)).save(RESOURCES / 'icon-splash.png', optimize=True)
 compact_icon(app_icon, 256).save(
     RESOURCES / 'icon.ico',
     sizes=[(size, size) for size in ICON_SIZES]

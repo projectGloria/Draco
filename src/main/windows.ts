@@ -121,12 +121,20 @@ export function getMainWindow(): BrowserWindow | null {
  * exactly the interruption IDM avoids.
  */
 const handoffWindows = new Map<string, BrowserWindow>()
+/** Each is a Chromium renderer process; a page firing a burst of downloads
+ * must not be able to open an unbounded number of them. */
+const MAX_HANDOFF_WINDOWS = 12
 
 export function createHandoffWindow(requestId: string): BrowserWindow {
   const existing = handoffWindows.get(requestId)
   if (existing && !existing.isDestroyed()) {
     existing.focus()
     return existing
+  }
+
+  if (handoffWindows.size >= MAX_HANDOFF_WINDOWS) {
+    const oldestId = handoffWindows.keys().next().value
+    if (oldestId !== undefined) closeHandoffWindow(oldestId)
   }
 
   const window = new BrowserWindow({
@@ -201,6 +209,9 @@ const progressWindows = new Map<string, BrowserWindow>()
 const progressWindowIconOrigins = new Map<string, string>()
 let handoffCounter = 0
 let progressCounter = 0
+/** Same reasoning as MAX_HANDOFF_WINDOWS: dropping 40 links must not open 40
+ * Chromium renderer processes. */
+const MAX_PROGRESS_WINDOWS = 8
 
 export function createProgressWindow(taskId: string): BrowserWindow {
   const existing = progressWindows.get(taskId)
@@ -208,6 +219,11 @@ export function createProgressWindow(taskId: string): BrowserWindow {
     if (existing.isMinimized()) existing.restore()
     existing.show()
     return existing
+  }
+
+  if (progressWindows.size >= MAX_PROGRESS_WINDOWS) {
+    const oldestId = progressWindows.keys().next().value
+    if (oldestId !== undefined) closeProgressWindow(oldestId)
   }
 
   const window = new BrowserWindow({
@@ -256,6 +272,11 @@ export function closeProgressWindow(taskId: string): void {
   const window = progressWindows.get(taskId)
   if (window && !window.isDestroyed()) window.close()
   progressWindows.delete(taskId)
+}
+
+/** The task ids that currently have an open progress window. */
+export function progressWindowTaskIds(): string[] {
+  return [...progressWindows.keys()]
 }
 
 /** Keeps Windows' taskbar hover text and progress indicator useful while the

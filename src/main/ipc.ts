@@ -67,6 +67,20 @@ export interface AppContext {
 }
 
 /**
+ * Adds a handoff request to the pending queue, dropping the oldest once it's
+ * full. The dropped request's confirm window is closed along with it - a
+ * window whose request no longer exists in `pendingHandoffs` can never be
+ * confirmed anyway, so leaving it open is just an orphaned renderer process.
+ */
+export function pushPendingHandoff(ctx: AppContext, request: HandoffRequest): void {
+  ctx.pendingHandoffs.push(request)
+  if (ctx.pendingHandoffs.length > 12) {
+    const dropped = ctx.pendingHandoffs.shift()
+    if (dropped) closeHandoffWindow(dropped.id)
+  }
+}
+
+/**
  * Builds a task from a submission, filing it into the category folder its name
  * and MIME type imply. `onProbed` runs this again once the real filename is
  * known, so a URL that gave nothing away still lands in the right place.
@@ -165,6 +179,19 @@ export function registerIpc(ctx: AppContext): void {
     ctx.manager.add(task, input.autoStart !== false)
     if (input.autoStart !== false) announce(task)
     return task
+  })
+
+  // One round-trip for a batch of URLs (a link drop, a pasted list) instead of
+  // N `tasks:add` calls that each open a progress window - dropping 40 links
+  // must not open 40 Chromium renderer processes.
+  handle('tasks:addMany', async (inputs: NewDownload[]) => {
+    const tasks = inputs.map((input) => {
+      const task = placeTask(input)
+      ctx.manager.add(task, input.autoStart !== false)
+      return task
+    })
+    if (tasks.length === 1 && inputs[0].autoStart !== false) announce(tasks[0])
+    return tasks
   })
 
   handle('tasks:get', (id: string) => ctx.manager.get(id) ?? null)

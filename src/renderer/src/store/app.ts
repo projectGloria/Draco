@@ -83,6 +83,8 @@ function provisionalSettings(): Settings {
 interface AppState {
   ready: boolean
   tasks: DownloadTask[]
+  /** Changes only when task membership or non-progress metadata changes. */
+  taskListVersion: number
   categories: Category[]
   queues: Queue[]
   settings: Settings
@@ -125,6 +127,7 @@ let initialized = false
 export const useApp = create<AppState>((set, get) => ({
   ready: false,
   tasks: [],
+  taskListVersion: 0,
   categories: [],
   queues: [],
   settings: provisionalSettings(),
@@ -144,6 +147,7 @@ export const useApp = create<AppState>((set, get) => ({
       pruneHistory(live)
       set((state) => ({
         tasks,
+        taskListVersion: state.taskListVersion + 1,
         selection: state.selection.filter((id) => live.has(id))
       }))
     })
@@ -177,6 +181,7 @@ export const useApp = create<AppState>((set, get) => ({
       set({
         settings,
         tasks,
+        taskListVersion: 1,
         categories,
         queues,
         sidebar: settings.sidebarSelection || 'all',

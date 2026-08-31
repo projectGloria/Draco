@@ -205,7 +205,9 @@ export class MpdRunner implements Runner {
     const value = line.slice(separator + 1)
     if (key === 'total_size' && /^\d+$/.test(value)) this.task.received = Number(value)
     if (key === 'out_time_us' && /^\d+$/.test(value)) this.mediaSeconds = Number(value) / 1_000_000
-    if (key === 'progress') this.context.onUpdate(this.task)
+    // Not broadcast from here: tick() already reads task.received on the
+    // manager's shared ticker, so the figure reaches the UI through the 4 Hz
+    // progress feed without a full task-list emit twice a second.
   }
 
   private killChild(): void {

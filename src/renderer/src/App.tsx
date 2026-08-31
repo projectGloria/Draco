@@ -20,6 +20,7 @@ import { resolvedLanguage } from './i18n'
 export default function App(): React.ReactElement {
   const init = useApp((s) => s.init)
   const tasks = useApp((s) => s.tasks)
+  const taskListVersion = useApp((s) => s.taskListVersion)
   const settings = useApp((s) => s.settings)
   const sidebar = useApp((s) => s.sidebar)
   const selection = useApp((s) => s.selection)
@@ -66,15 +67,25 @@ export default function App(): React.ReactElement {
       : settings.theme
   }, [settings.theme])
 
-  const rows = useMemo(
-    () =>
-      sortTasks(
-        filterTasks(tasks, sidebar, search),
-        settings.sortColumn,
-        settings.sortDirection
-      ),
-    [tasks, sidebar, search, settings.sortColumn, settings.sortDirection]
+  const progressSensitiveSort = ['size', 'progress', 'status', 'eta', 'speed'].includes(
+    settings.sortColumn
   )
+  const orderSource = progressSensitiveSort ? tasks : taskListVersion
+  const orderedIds = useMemo(
+    () => sortTasks(
+      filterTasks(tasks, sidebar, search),
+      settings.sortColumn,
+      settings.sortDirection
+    ).map((task) => task.id),
+    // Static sort keys only need a new order after a structural task event.
+    // Dynamic keys deliberately recompute from the 4 Hz progress snapshot.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [orderSource, sidebar, search, settings.sortColumn, settings.sortDirection]
+  )
+  const rows = useMemo(() => {
+    const byId = new Map(tasks.map((task) => [task.id, task]))
+    return orderedIds.map((id) => byId.get(id)).filter((task): task is NonNullable<typeof task> => Boolean(task))
+  }, [tasks, orderedIds])
 
   /* ---------------------------------------------------------------- */
   /* Commands                                                          */
@@ -165,7 +176,7 @@ export default function App(): React.ReactElement {
         const urls = [...new Set(raw.split(/[\r\n\s]+/).filter((value) => /^https?:\/\//i.test(value)))]
         if (urls.length === 1) setSaveAsUrl(urls[0])
         else if (urls.length > 1) {
-          void Promise.all(urls.map((url) => window.api.addDownload({ url })))
+          void window.api.addDownloads(urls.map((url) => ({ url })))
             .then(() => toast('success', `${urls.length} dropped links added`))
             .catch((error) => reportError('Could not add dropped links', error))
         } else toast('info', 'Drop an HTTP or HTTPS link')
@@ -203,7 +214,7 @@ export default function App(): React.ReactElement {
               setSaveAsUrl(urls[0])
               return
             }
-            void Promise.all(urls.map((url) => window.api.addDownload({ url })))
+            void window.api.addDownloads(urls.map((url) => ({ url })))
               .then(() => toast('success', `${urls.length} downloads added`))
               .catch((err) => reportError('Could not add the downloads', err))
           }}

@@ -28,17 +28,20 @@ import {
  * uses the `@shared` alias.
  */
 
-async function writeJsonAtomic(path: string, value: unknown): Promise<void> {
+async function writeJsonAtomic(path: string, value: unknown, pretty = true): Promise<void> {
   await mkdir(dirname(path), { recursive: true })
   // Use a unique temp path. Several IPC calls can legitimately persist the same
   // JSON file concurrently; a shared `<file>.tmp` lets one writer rename/remove
   // another writer's temp file and turns an otherwise valid save into ENOENT.
   const tmp = `${path}.${randomUUID()}.tmp`
   try {
-    await writeFile(tmp, JSON.stringify(value, null, 2), 'utf8')
+    await writeFile(tmp, JSON.stringify(value, null, pretty ? 2 : undefined), 'utf8')
     await rename(tmp, path)
-  } finally {
+  } catch (err) {
+    // On success the rename already consumed the temp file - only clean it up
+    // when the write or rename actually failed and left it behind.
     await rm(tmp, { force: true }).catch(() => {})
+    throw err
   }
 }
 
@@ -186,7 +189,7 @@ export function persistTasks(tasks: DownloadTask[]): void {
     pendingTasks = null
     if (!snapshot) return
 
-    taskWritePromise = writeJsonAtomic(getPaths().tasksFile, snapshot)
+    taskWritePromise = writeJsonAtomic(getPaths().tasksFile, snapshot, false)
       .catch(() => {})
       .finally(() => {
         taskWritePromise = null
@@ -209,7 +212,7 @@ export async function flushTasks(): Promise<void> {
   if (pendingTasks) {
     const snapshot = pendingTasks
     pendingTasks = null
-    await writeJsonAtomic(getPaths().tasksFile, snapshot).catch(() => {})
+    await writeJsonAtomic(getPaths().tasksFile, snapshot, false).catch(() => {})
   }
 }
 

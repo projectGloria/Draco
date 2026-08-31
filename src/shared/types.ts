@@ -505,6 +505,9 @@ export interface RendererApi {
   /** One task, for the windows that show a single download rather than the list. */
   getTask(id: string): Promise<DownloadTask | null>
   addDownload(input: NewDownload): Promise<DownloadTask>
+  /** Adds many URLs as one IPC round-trip and opens at most one progress
+   * window, instead of the caller firing N `addDownload`s that each open one. */
+  addDownloads(inputs: NewDownload[]): Promise<DownloadTask[]>
   probe(url: string, headers?: RequestHeaders): Promise<ProbeResult>
   startTasks(ids: string[]): Promise<void>
   pauseTasks(ids: string[]): Promise<void>

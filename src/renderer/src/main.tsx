@@ -13,10 +13,13 @@ import App from './App'
  * `url(./files/...)` references would then resolve relative to theme.css
  * instead of the package.
  */
-import '@fontsource/inter/400.css'
-import '@fontsource/inter/500.css'
-import '@fontsource/inter/600.css'
-import '@fontsource/inter/700.css'
+// Latin-only entry points: the app has no need for cyrillic, greek or
+// vietnamese subsets, and Chromium's own unicode-range logic means it never
+// requested most of them anyway - this just stops them shipping in the asar.
+import '@fontsource/inter/latin-400.css'
+import '@fontsource/inter/latin-500.css'
+import '@fontsource/inter/latin-600.css'
+import '@fontsource/inter/latin-700.css'
 import './styles/theme.css'
 
 createRoot(document.getElementById('root')!).render(

@@ -36,6 +36,7 @@ const api: RendererApi = {
   listTasks: () => ipcRenderer.invoke('tasks:list'),
   getTask: (id: string) => ipcRenderer.invoke('tasks:get', id),
   addDownload: (input: NewDownload) => ipcRenderer.invoke('tasks:add', input),
+  addDownloads: (inputs: NewDownload[]) => ipcRenderer.invoke('tasks:addMany', inputs),
   probe: (url: string, headers?: RequestHeaders) => ipcRenderer.invoke('tasks:probe', url, headers),
   startTasks: (ids: string[]) => ipcRenderer.invoke('tasks:start', ids),
   pauseTasks: (ids: string[]) => ipcRenderer.invoke('tasks:pause', ids),

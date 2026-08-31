@@ -15,6 +15,7 @@ import type { DownloadTask, Segment } from '@shared/types'
 import { getDispatcher } from '../engine/http.ts'
 import type { RateLimiter } from '../engine/limiter.ts'
 import { uniquePath } from '../engine/naming.ts'
+import { mapConcurrent } from '../engine/concurrency.ts'
 import { buildHeaders } from '../engine/probe.ts'
 import type { Runner } from '../engine/runner.ts'
 import { AbortedError } from '../engine/worker.ts'
@@ -22,6 +23,7 @@ import { logger } from '../log.ts'
 import { ensureFfmpeg } from './ffmpeg.ts'
 import { mux } from './mux.ts'
 import { loadMediaPlaylist, type HlsSegment } from './playlist.ts'
+import { streamResponseBody } from './stream.ts'
 
 const log = logger('hls')
 
@@ -58,6 +60,7 @@ export interface HlsRunnerDeps {
 const SPEED_WINDOW_MS = 3000
 /** Enough finished pieces for an average size to mean anything. */
 const ESTIMATE_AFTER = 3
+const FILE_SCAN_CONCURRENCY = 8
 
 interface ActiveFetch {
   bytes: number
@@ -282,9 +285,13 @@ export class HlsRunner implements Runner {
         const existing = await stat(initPath).catch(() => null)
         if (!existing || existing.size === 0) {
           jobs.push(async (slot) => {
-            const body = await this.download(track.initSegment!.url, track.initSegment!.byteRange, slot)
-            await writeAtomic(initPath, body)
-            this.received += body.length
+            const bytes = await this.downloadAtomic(
+              initPath,
+              track.initSegment!.url,
+              track.initSegment!.byteRange,
+              slot
+            )
+            this.received += bytes
           })
         } else {
           totalBytes += existing.size
@@ -336,18 +343,25 @@ export class HlsRunner implements Runner {
       return { indices, bytes }
     }
 
+    const candidates: Array<{ name: string; index: number }> = []
+    const pattern = new RegExp(`^${trackType}_(\\d{6})\\.part$`)
     for (const name of entries) {
-      const match = new RegExp(`^${trackType}_(\\d{6})\\.part$`).exec(name)
+      const match = pattern.exec(name)
       if (!match) continue
 
       const index = Number(match[1])
       if (index >= totalSegments) continue
+      candidates.push({ name, index })
+    }
 
-      const info = await stat(join(this.partsDir, name)).catch(() => null)
-      if (!info || info.size === 0) continue
-
-      indices.add(index)
-      bytes += info.size
+    const found = await mapConcurrent(candidates, FILE_SCAN_CONCURRENCY, async (candidate) => ({
+      index: candidate.index,
+      size: (await stat(join(this.partsDir, candidate.name)).catch(() => null))?.size ?? 0
+    }))
+    for (const piece of found) {
+      if (piece.size === 0) continue
+      indices.add(piece.index)
+      bytes += piece.size
     }
 
     return { indices, bytes }
@@ -396,24 +410,79 @@ export class HlsRunner implements Runner {
     slot: number
   ): Promise<void> {
     const segment = track.segments[index]
-    const raw = await this.download(segment.url, segment.byteRange, slot)
-    const body = segment.key ? await this.decrypt(raw, segment.key, track.mediaSequence + index) : raw
+    const path = this.piecePath(track.type, index)
+    let bytes: number
+    if (segment.key) {
+      const raw = await this.download(segment.url, segment.byteRange, slot)
+      const body = await this.decrypt(raw, segment.key, track.mediaSequence + index)
+      await writeAtomic(path, body)
+      bytes = body.length
+    } else {
+      // Plain pieces go straight to their temp file. This keeps memory bounded
+      // to one network chunk per connection instead of one complete HLS piece.
+      bytes = await this.downloadAtomic(path, segment.url, segment.byteRange, slot)
+    }
 
-    await writeAtomic(this.piecePath(track.type, index), body)
-
-    // Count bytes only after the durable piece exists. A failed filesystem write
-    // must never make progress jump forward and later report an impossible ETA.
-    this.received += body.length
+    // Count bytes only after the complete piece has been renamed into place. A
+    // failed write must never make progress jump forward and report a false ETA.
+    this.received += bytes
     this.completed++
-    this.deps.onUpdate(this.task)
   }
 
-  /** One piece, with the same backoff discipline the byte-range worker uses. */
+  /** Buffers an encrypted piece while still throttling each incoming chunk. */
   private async download(
     url: string,
     byteRange: { offset: number; length: number } | null,
     slot: number
   ): Promise<Buffer> {
+    let chunks: Buffer[] = []
+    await this.transfer(url, byteRange, slot, {
+      reset: () => { chunks = [] },
+      write: (chunk) => { chunks.push(chunk) }
+    })
+    return Buffer.concat(chunks)
+  }
+
+  /** Streams an unencrypted piece to a temp name and atomically publishes it. */
+  private async downloadAtomic(
+    path: string,
+    url: string,
+    byteRange: { offset: number; length: number } | null,
+    slot: number
+  ): Promise<number> {
+    const tmp = temporaryPath(path)
+    const handle = await open(tmp, 'w')
+    let offset = 0
+    try {
+      const bytes = await this.transfer(url, byteRange, slot, {
+        reset: async () => {
+          offset = 0
+          await handle.truncate(0)
+        },
+        write: async (chunk) => {
+          await writeAtFully(handle, chunk, offset)
+          offset += chunk.length
+        }
+      })
+      await handle.close()
+      await rename(tmp, path)
+      return bytes
+    } catch (err) {
+      // On success the rename already consumed the temp file - only clean it
+      // up when the transfer, close or rename actually failed.
+      await handle.close().catch(() => {})
+      await rm(tmp, { force: true }).catch(() => {})
+      throw err
+    }
+  }
+
+  /** One piece, with the same backoff discipline the byte-range worker uses. */
+  private async transfer(
+    url: string,
+    byteRange: { offset: number; length: number } | null,
+    slot: number,
+    sink: { reset(): void | Promise<void>; write(chunk: Buffer): void | Promise<void> }
+  ): Promise<number> {
     let lastError: Error | null = null
 
     for (let attempt = 0; attempt < this.config.retryLimit; attempt++) {
@@ -427,6 +496,9 @@ export class HlsRunner implements Runner {
       }
 
       try {
+        await sink.reset()
+        const state = this.active.get(slot)
+        if (state) state.bytes = 0
         const headers = buildHeaders(this.task.headers)
         if (byteRange) {
           headers.range = `bytes=${byteRange.offset}-${byteRange.offset + byteRange.length - 1}`
@@ -463,16 +535,21 @@ export class HlsRunner implements Runner {
           }
         }
 
-        const body = Buffer.from(await res.arrayBuffer())
-        if (byteRange && body.length !== byteRange.length) {
-          throw new Error(`HLS byte-range returned ${body.length} bytes, expected ${byteRange.length}`)
+        if (!res.body) throw new Error('HLS response had no body')
+        // Applying the budget per chunk propagates backpressure to the body
+        // stream instead of downloading a whole piece in an unbounded burst.
+        const received = await streamResponseBody(
+          res.body,
+          (chunk) => sink.write(chunk),
+          (bytes) => this.deps.limiter.consume(bytes, this.controller.signal),
+          this.controller.signal,
+          (bytes) => { if (state) state.bytes = bytes }
+        )
+
+        if (byteRange && received !== byteRange.length) {
+          throw new Error(`HLS byte-range returned ${received} bytes, expected ${byteRange.length}`)
         }
-
-        const state = this.active.get(slot)
-        if (state) state.bytes = body.length
-        await this.deps.limiter.consume(body.length, this.controller.signal)
-
-        return body
+        return received
       } catch (err) {
         if (this.controller.signal.aborted) throw new AbortedError()
         lastError = err instanceof Error ? err : new Error(String(err))
@@ -728,25 +805,35 @@ function muxTempPath(target: string): string {
 
 /** Write to a temp name and rename, so a piece file only ever exists complete. */
 async function writeAtomic(path: string, body: Buffer): Promise<void> {
-  const tmp = `${path}.${process.pid}.${Date.now()}.${Math.random().toString(16).slice(2)}.tmp`
+  const tmp = temporaryPath(path)
   const handle = await open(tmp, 'w')
   try {
-    let offset = 0
-    while (offset < body.length) {
-      const result = await handle.write(body, offset, body.length - offset, offset)
-      const written = result.bytesWritten
-      if (!Number.isSafeInteger(written) || written <= 0) throw new Error('File write made no progress')
-      offset += written
-    }
-    await handle.sync()
+    await writeAtFully(handle, body, 0)
   } finally {
     await handle.close().catch(() => {})
   }
 
   try {
     await rename(tmp, path)
-  } finally {
+  } catch (err) {
+    // On success the rename already consumed the temp file - only clean it up
+    // when the rename itself failed and left it behind.
     await rm(tmp, { force: true }).catch(() => {})
+    throw err
+  }
+}
+
+function temporaryPath(path: string): string {
+  return `${path}.${process.pid}.${Date.now()}.${Math.random().toString(16).slice(2)}.tmp`
+}
+
+async function writeAtFully(handle: FileHandle, body: Buffer, position: number): Promise<void> {
+  let offset = 0
+  while (offset < body.length) {
+    const result = await handle.write(body, offset, body.length - offset, position + offset)
+    const written = result.bytesWritten
+    if (!Number.isSafeInteger(written) || written <= 0) throw new Error('File write made no progress')
+    offset += written
   }
 }
 

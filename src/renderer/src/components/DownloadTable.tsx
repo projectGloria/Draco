@@ -1,7 +1,7 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { ColumnId, DownloadTask, TaskStatus } from '@shared/types'
 import { formatBytes, formatEta, formatPercent, formatSpeed, formatWhen, percent } from '../lib/format'
-import { queueName, useApp } from '../store/app'
+import { useApp } from '../store/app'
 import { reportError, toast } from '../store/toasts'
 import ContextMenu, { type MenuItem, type MenuPosition } from './ContextMenu'
 import { SiteIcon } from './FileIcon'
@@ -22,6 +22,8 @@ const HEADINGS: Record<ColumnId, string> = {
 
 /** Numeric columns are right-aligned so their digits line up down the column. */
 const RIGHT: ReadonlySet<ColumnId> = new Set<ColumnId>(['size', 'eta', 'speed'])
+const ROW_HEIGHT = 30
+const OVERSCAN_ROWS = 8
 
 const STATUS_LABEL: Record<TaskStatus, string> = {
   queued: 'Queued',
@@ -63,11 +65,45 @@ export default function DownloadTable({
   const toggleColumn = useApp((s) => s.toggleColumn)
 
   const [menu, setMenu] = useState<{ at: MenuPosition; items: MenuItem[] } | null>(null)
+  const [viewport, setViewport] = useState({ scrollTop: 0, height: 0 })
   const body = useRef<HTMLDivElement>(null)
+  const rowsRef = useRef(rows)
+  const selectionRef = useRef(selection)
+  const queuesRef = useRef(queues)
+  const onDetailsRef = useRef(onDetails)
+  const onDeleteRef = useRef(onDelete)
+  rowsRef.current = rows
+  selectionRef.current = selection
+  queuesRef.current = queues
+  onDetailsRef.current = onDetails
+  onDeleteRef.current = onDelete
 
   const columns = useMemo(() => settings.columns.filter((c) => c.visible), [settings.columns])
+  const columnIds = useMemo(() => columns.map((column) => column.id), [columns])
   const template = columns.map((c) => c.width + 'px').join(' ') + ' 1fr'
   const minWidth = columns.reduce((sum, c) => sum + c.width, 0)
+  const selectedIds = useMemo(() => new Set(selection), [selection])
+  const queueLabels = useMemo(
+    () => new Map(queues.map((queue) => [queue.id, queue.name])),
+    [queues]
+  )
+  const firstVisible = Math.max(0, Math.floor(Math.max(0, viewport.scrollTop - 32) / ROW_HEIGHT) - OVERSCAN_ROWS)
+  const visibleCount = Math.ceil(viewport.height / ROW_HEIGHT) + OVERSCAN_ROWS * 2
+  const lastVisible = Math.min(rows.length, firstVisible + visibleCount)
+  const visibleRows = rows.slice(firstVisible, lastVisible)
+
+  useEffect(() => {
+    const element = body.current
+    if (!element) return
+    const update = (): void => setViewport((current) => ({
+      scrollTop: element.scrollTop,
+      height: element.clientHeight || current.height
+    }))
+    update()
+    const observer = new ResizeObserver(update)
+    observer.observe(element)
+    return () => observer.disconnect()
+  }, [])
 
   /* ---------------------------------------------------------------- */
   /* Column resizing                                                   */
@@ -142,15 +178,35 @@ export default function DownloadTable({
     })
   }
 
-  function rowMenu(event: React.MouseEvent, task: DownloadTask): void {
+  const selectTask = useCallback((task: DownloadTask, event: React.MouseEvent): void => {
+    if (event.button === 2) return
+    clickRow(
+      task.id,
+      { ctrl: event.ctrlKey || event.metaKey, shift: event.shiftKey },
+      rowsRef.current
+    )
+  }, [clickRow])
+
+  const openTask = useCallback((task: DownloadTask): void => {
+    if (task.status === 'done') {
+      void window.api.openFile(task.id).catch((err) => reportError('Could not open the file', err))
+    } else {
+      onDetailsRef.current(task.id)
+    }
+  }, [])
+
+  const rowMenu = useCallback((event: React.MouseEvent, task: DownloadTask): void => {
     event.preventDefault()
+    const currentSelection = selectionRef.current
+    const currentRows = rowsRef.current
+    const currentQueues = queuesRef.current
 
     // Right-clicking outside the selection moves it, the way Explorer does.
-    const ids = selection.includes(task.id) ? selection : [task.id]
-    if (!selection.includes(task.id)) setSelection([task.id])
+    const ids = currentSelection.includes(task.id) ? currentSelection : [task.id]
+    if (!currentSelection.includes(task.id)) setSelection([task.id])
 
     const running = ids.some((id) => {
-      const t = rows.find((r) => r.id === id)
+      const t = currentRows.find((r) => r.id === id)
       return t?.status === 'downloading' || t?.status === 'queued'
     })
 
@@ -185,32 +241,39 @@ export default function DownloadTable({
       {}
     ]
 
-    for (const queue of queues) {
+    for (const queue of currentQueues) {
       items.push({
         label: 'Move to ' + queue.name,
-        checked: ids.every((id) => rows.find((r) => r.id === id)?.queueId === queue.id),
+        checked: ids.every((id) => currentRows.find((r) => r.id === id)?.queueId === queue.id),
         onClick: () => void patchQueue(ids, queue.id)
       })
     }
-    if (queues.length > 0) {
+    if (currentQueues.length > 0) {
       items.push({
         label: 'Remove from queue',
-        disabled: ids.every((id) => !rows.find((r) => r.id === id)?.queueId),
+        disabled: ids.every((id) => !currentRows.find((r) => r.id === id)?.queueId),
         onClick: () => void patchQueue(ids, null)
       })
       items.push({})
     }
 
-    items.push({ label: 'Delete', danger: true, onClick: () => onDelete(ids) })
+    items.push({ label: 'Delete', danger: true, onClick: () => onDeleteRef.current(ids) })
 
     setMenu({ at: { x: event.clientX, y: event.clientY }, items })
-  }
+  }, [setSelection])
 
   /* ---------------------------------------------------------------- */
 
   return (
     <div className="flex-1 min-h-0 min-w-0 flex flex-col">
-      <div className="flex-1 min-h-0 overflow-auto" ref={body}>
+      <div
+        className="flex-1 min-h-0 overflow-auto"
+        ref={body}
+        onScroll={(event) => setViewport((current) => ({
+          scrollTop: event.currentTarget.scrollTop,
+          height: current.height || event.currentTarget.clientHeight
+        }))}
+      >
         <div style={{ minWidth }}>
           {/* Sticky so the headings stay put while a long list scrolls. */}
           <div
@@ -252,30 +315,22 @@ export default function DownloadTable({
           {rows.length === 0 ? (
             <EmptyState />
           ) : (
-            rows.map((task) => (
-              <Row
-                key={task.id}
-                task={task}
-                columns={columns.map((c) => c.id)}
-                template={template}
-                selected={selection.includes(task.id)}
-                queueLabel={queueName(queues, task.queueId)}
-                onMouseDown={(event) => {
-                  if (event.button === 2) return
-                  clickRow(task.id, { ctrl: event.ctrlKey || event.metaKey, shift: event.shiftKey }, rows)
-                }}
-                onDoubleClick={() => {
-                  // Finished downloads open; anything else has nothing to open
-                  // yet, so the useful thing is the segment view.
-                  if (task.status === 'done') {
-                    void window.api.openFile(task.id).catch((err) => reportError('Could not open the file', err))
-                  } else {
-                    onDetails(task.id)
-                  }
-                }}
-                onContextMenu={(event) => rowMenu(event, task)}
-              />
-            ))
+            <div className="relative" style={{ height: rows.length * ROW_HEIGHT }}>
+              {visibleRows.map((task, offset) => (
+                <Row
+                  key={task.id}
+                  task={task}
+                  columns={columnIds}
+                  template={template}
+                  top={(firstVisible + offset) * ROW_HEIGHT}
+                  selected={selectedIds.has(task.id)}
+                  queueLabel={task.queueId ? queueLabels.get(task.queueId) ?? '' : ''}
+                  onSelect={selectTask}
+                  onOpen={openTask}
+                  onMenu={rowMenu}
+                />
+              ))}
+            </div>
           )}
         </div>
       </div>
@@ -297,36 +352,39 @@ const Row = memo(function Row({
   task,
   columns,
   template,
+  top,
   selected,
   queueLabel,
-  onMouseDown,
-  onDoubleClick,
-  onContextMenu
+  onSelect,
+  onOpen,
+  onMenu
 }: {
   task: DownloadTask
   columns: ColumnId[]
   template: string
+  top: number
   selected: boolean
   queueLabel: string
-  onMouseDown(event: React.MouseEvent): void
-  onDoubleClick(): void
-  onContextMenu(event: React.MouseEvent): void
+  onSelect(task: DownloadTask, event: React.MouseEvent): void
+  onOpen(task: DownloadTask): void
+  onMenu(event: React.MouseEvent, task: DownloadTask): void
 }): React.ReactElement {
   return (
     <div
       className={
-        'grid items-center border-b border-line/60 cursor-default transition-colors ' +
+        'absolute left-0 right-0 grid items-center border-b border-line/60 cursor-default transition-colors ' +
         (selected ? 'text-ink' : 'hover:bg-white/[0.035]')
       }
       style={{
         gridTemplateColumns: template,
         height: 'var(--row-h)',
+        transform: `translateY(${top}px)`,
         background: selected ? 'var(--accent-soft)' : undefined,
         boxShadow: selected ? 'inset 2px 0 0 var(--accent)' : undefined
       }}
-      onMouseDown={onMouseDown}
-      onDoubleClick={onDoubleClick}
-      onContextMenu={onContextMenu}
+      onMouseDown={(event) => onSelect(task, event)}
+      onDoubleClick={() => onOpen(task)}
+      onContextMenu={(event) => onMenu(event, task)}
     >
       {columns.map((id) => (
         <Cell key={id} id={id} task={task} queueLabel={queueLabel} />

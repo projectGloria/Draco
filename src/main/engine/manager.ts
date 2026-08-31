@@ -2,6 +2,7 @@ import { readdir, rm, stat } from 'node:fs/promises'
 import { join } from 'node:path'
 import type { DownloadTask, TaskProgress } from '../../shared/types.ts'
 import { RateLimiter, type QuotaState } from './limiter.ts'
+import { mapConcurrent } from './concurrency.ts'
 import { connectionsForUrl, type HostConnectionLimit } from './network-rules.ts'
 import { setProxyUrl } from './http.ts'
 import { readJournal, removeJournal } from './journal.ts'
@@ -13,6 +14,7 @@ import { scanFile } from '../security/scanner.ts'
 import { normalizeDownloadDirectory } from '../destination-path.ts'
 
 const log = logger('manager')
+const RECOVERY_CONCURRENCY = 8
 
 /**
  * Owns every task and decides which of them are allowed to run.
@@ -90,6 +92,7 @@ export class DownloadManager {
   private ticker: NodeJS.Timeout | null = null
   private disposed = false
   private lastQuotaSnapshotAt = 0
+  private lastQuotaUsed = -1
 
   private options: ManagerOptions
 
@@ -107,7 +110,7 @@ export class DownloadManager {
 
   /** Adopts tasks restored from disk. Anything caught mid-flight comes back paused. */
   async load(tasks: DownloadTask[]): Promise<void> {
-    for (const task of tasks) {
+    await mapConcurrent(tasks, RECOVERY_CONCURRENCY, async (task) => {
       task.dir = normalizeDownloadDirectory(task.dir)
       if (task.status === 'downloading' || task.status === 'probing' || task.status === 'queued') {
         task.status = 'paused'
@@ -120,7 +123,11 @@ export class DownloadManager {
       // tasks.json recorded, because the kill that stranded it may have come
       // several restarts ago.
       if (task.status !== 'done') await reconcileWithJournal(task)
+    })
 
+    // Reconciliation is parallel, but insertion remains deterministic so the
+    // persisted order is also the order restored into the UI.
+    for (const task of tasks) {
       this.tasks.set(task.id, task)
     }
     this.emitTasks()
@@ -476,9 +483,16 @@ export class DownloadManager {
 
       if (updates.length > 0) this.options.onProgress(updates)
       const now = Date.now()
-      if (now - this.lastQuotaSnapshotAt >= 1_000) {
-        this.lastQuotaSnapshotAt = now
-        this.options.onQuotaState?.(this.limiter.quotaState)
+      // A quota is a coarse budget - losing up to 30s of it to a crash costs
+      // nothing - and there is nothing to persist at all when no quota is set
+      // or usage hasn't moved since the last snapshot.
+      if (now - this.lastQuotaSnapshotAt >= 30_000 && this.limiter.quotaRemaining !== null) {
+        const state = this.limiter.quotaState
+        if (state.used !== this.lastQuotaUsed) {
+          this.lastQuotaSnapshotAt = now
+          this.lastQuotaUsed = state.used
+          this.options.onQuotaState?.(state)
+        }
       }
     }, TICK_MS)
 
@@ -558,12 +572,12 @@ async function reconcileHlsPieces(task: DownloadTask): Promise<void> {
     return
   }
 
-  let bytes = 0
-  for (const name of entries) {
-    if (!name.endsWith('.part')) continue
+  const partNames = entries.filter((name) => name.endsWith('.part'))
+  const sizes = await mapConcurrent(partNames, RECOVERY_CONCURRENCY, async (name) => {
     const info = await stat(join(dir, name)).catch(() => null)
-    if (info) bytes += info.size
-  }
+    return info?.size ?? 0
+  })
+  const bytes = sizes.reduce((sum, size) => sum + size, 0)
 
   if (bytes > 0) task.received = bytes
   task.segments = []

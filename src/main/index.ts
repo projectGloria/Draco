@@ -1,3 +1,10 @@
+// Must run before anything dispatches to libuv's threadpool (fs, dns): the
+// pool is sized on first use, and the default of 4 is six times narrower than
+// the 24 concurrent segment writes the engine is configured to keep busy
+// (maxConcurrentTasks x maxConnectionsPerTask), before HLS/recovery scans add
+// their own load on top.
+process.env.UV_THREADPOOL_SIZE ??= '32'
+
 import { app, ipcMain, powerSaveBlocker, Notification } from 'electron'
 import { version } from '../../package.json'
 import { randomUUID } from 'node:crypto'
@@ -5,6 +12,7 @@ import type {
   BootstrapState,
   BootstrapStep,
   BootstrapStepId,
+  DownloadTask,
   HandoffRequest,
   TaskStatus
 } from '@shared/types'
@@ -18,7 +26,7 @@ import { closeDispatchers } from './engine/http.ts'
 import { DownloadManager } from './engine/manager.ts'
 import { MpdRunner } from './dash/runner.ts'
 import { HlsRunner } from './hls/runner.ts'
-import { handoffToTask, recordMedia, refileTask, registerIpc, type AppContext } from './ipc.ts'
+import { handoffToTask, pushPendingHandoff, recordMedia, refileTask, registerIpc, type AppContext } from './ipc.ts'
 import { logger, setLogDirectory } from './log.ts'
 import { Scheduler } from './queue/scheduler.ts'
 import { SiteProjectManager } from './site-grabber/projects.ts'
@@ -45,6 +53,7 @@ import {
   createHandoffWindow,
   createMainWindow,
   createSplashWindow,
+  progressWindowTaskIds,
   send,
   sendSplash,
   showMainWindow,
@@ -88,6 +97,21 @@ const state: BootstrapState = freshState()
 let finished = false
 let powerSaveBlockerId: number | null = null
 const taskStatuses = new Map<string, TaskStatus>()
+
+/**
+ * Updates only the progress windows actually open, rather than doing a
+ * progressWindows lookup for every task in the list - the two counts diverge
+ * a lot once someone has a long download history.
+ */
+function updateOpenProgressWindows(tasks: DownloadTask[]): void {
+  const openIds = progressWindowTaskIds()
+  if (openIds.length === 0) return
+  const byId = new Map(tasks.map((t) => [t.id, t]))
+  for (const id of openIds) {
+    const task = byId.get(id)
+    if (task) updateProgressWindow(task)
+  }
+}
 
 /* ------------------------------------------------------------------ */
 /* Single instance                                                     */
@@ -156,11 +180,13 @@ async function main(): Promise<void> {
       // Broadcast rather than sent: each open progress window is watching the
       // same feed for the one task it is about.
       broadcast('tasks:changed', tasks)
-      for (const task of tasks) updateProgressWindow(task)
+      updateOpenProgressWindows(tasks)
 
       let newlyDone = 0
       let hasActive = false
+      const seen = new Set<string>()
       for (const t of tasks) {
+        seen.add(t.id)
         if (t.status === 'done' && taskStatuses.get(t.id) !== 'done') {
           newlyDone++
         }
@@ -168,6 +194,12 @@ async function main(): Promise<void> {
         if (t.status === 'downloading' || t.status === 'probing') {
           hasActive = true
         }
+      }
+      // taskStatuses otherwise remembers every task id the app has ever seen,
+      // unlike every other cache in main (pendingHandoffs, ctx.media,
+      // hostReplyCache), all of which are deliberately bounded.
+      for (const id of taskStatuses.keys()) {
+        if (!seen.has(id)) taskStatuses.delete(id)
       }
 
       if (newlyDone > 0) {
@@ -511,10 +543,7 @@ async function handleHostMessageOnce(ctx: AppContext, message: HostMessage): Pro
             pageUrl: message.referer
           }
 
-          ctx.pendingHandoffs.push(request)
-          // Bounded: a page that fires a burst of downloads must not be able to
-          // stack up an unbounded pile of windows.
-          if (ctx.pendingHandoffs.length > 12) ctx.pendingHandoffs.shift()
+          pushPendingHandoff(ctx, request)
 
           log.info(`asking about ${message.filename ?? url}`)
           // Its own small window, in front of the browser. The main window is
@@ -602,8 +631,7 @@ async function handleHostMessageOnce(ctx: AppContext, message: HostMessage): Pro
           mediaId: candidate.id
         }
 
-        ctx.pendingHandoffs.push(request)
-        if (ctx.pendingHandoffs.length > 12) ctx.pendingHandoffs.shift()
+        pushPendingHandoff(ctx, request)
 
         createHandoffWindow(request.id)
         log.info(`YouTube handoff window ready in ${Date.now() - handoffStartedAt} ms`)
@@ -656,8 +684,7 @@ async function handleHostMessageOnce(ctx: AppContext, message: HostMessage): Pro
           mediaId: candidate.id
         }
 
-        ctx.pendingHandoffs.push(request)
-        if (ctx.pendingHandoffs.length > 12) ctx.pendingHandoffs.shift()
+        pushPendingHandoff(ctx, request)
 
         createHandoffWindow(request.id)
         return { ok: true }

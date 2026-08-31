@@ -172,16 +172,24 @@ async function download(
     const lengthHeader = res.headers.get('content-length')
     const total = lengthHeader ? Number(lengthHeader) : null
     let received = 0
+    let lastEmit = 0
+    let lastPercent = -1
 
     const file = createWriteStream(destPath)
     const counter = new Writable({
       write(chunk: Buffer, _encoding, callback) {
         received += chunk.length
         resetStall()
-        onProgress?.({
-          stage: 'downloading',
-          percent: total ? Math.min(100, (received / total) * 100) : null
-        })
+        const percent = total ? Math.min(100, (received / total) * 100) : null
+        const now = Date.now()
+        // The UI only ever shows Math.round(percent), so anything finer than
+        // that or faster than 250ms is a broadcast nobody can see.
+        const roundedChanged = percent !== null && Math.round(percent) !== lastPercent
+        if (now - lastEmit >= 250 || roundedChanged) {
+          lastEmit = now
+          if (percent !== null) lastPercent = Math.round(percent)
+          onProgress?.({ stage: 'downloading', percent })
+        }
         file.write(chunk, () => callback())
       },
       final(callback) {

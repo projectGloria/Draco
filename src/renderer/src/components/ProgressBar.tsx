@@ -46,9 +46,15 @@ export default function ProgressBar({
           style={{ background: barColor(status) }}
         />
       ) : (
+        // scaleX rather than a width change: width triggers layout on every
+        // tick of the 4 Hz progress feed, while transform runs on the
+        // compositor. The clamped value doubles as the scale factor.
         <div
-          className="h-full rounded-full transition-[width] duration-200 ease-out"
-          style={{ width: Math.max(0, Math.min(100, percent)) + '%', background: barColor(status) }}
+          className="h-full w-full rounded-full origin-left transition-transform duration-200 ease-out"
+          style={{
+            transform: `scaleX(${Math.max(0, Math.min(100, percent)) / 100})`,
+            background: barColor(status)
+          }}
         />
       )}
 
@@ -56,8 +62,8 @@ export default function ProgressBar({
         // A moving sheen over the filled part, so a slow download still reads as
         // running rather than stuck.
         <div
-          className="absolute inset-y-0 left-0 pointer-events-none overflow-hidden rounded-full"
-          style={{ width: Math.max(0, Math.min(100, percent)) + '%' }}
+          className="absolute inset-y-0 left-0 w-full origin-left pointer-events-none overflow-hidden rounded-full"
+          style={{ transform: `scaleX(${Math.max(0, Math.min(100, percent)) / 100})` }}
         >
           <div
             className="shimmer h-full w-1/3"
