@@ -113,12 +113,21 @@ interface AppState {
  * locally at once and written to disk once the hand comes off the mouse.
  */
 let settingsWriteTimer: ReturnType<typeof setTimeout> | null = null
+/**
+ * Merged rather than replaced. Restarting the timer with only the newest patch
+ * dropped the previous one outright, so resizing a column and then re-sorting
+ * inside the same 400 ms lost the width.
+ */
+let settingsWritePatch: Partial<Settings> = {}
 
 function persistSoon(patch: Partial<Settings>): void {
+  settingsWritePatch = { ...settingsWritePatch, ...patch }
   if (settingsWriteTimer) clearTimeout(settingsWriteTimer)
   settingsWriteTimer = setTimeout(() => {
     settingsWriteTimer = null
-    void window.api.saveSettings(patch).catch(() => {})
+    const pending = settingsWritePatch
+    settingsWritePatch = {}
+    void window.api.saveSettings(pending).catch(() => {})
   }, 400)
 }
 

@@ -2,9 +2,32 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import {
   chosenYouTubeUrls,
+  isSupportedYouTubeUrl,
   preparedYouTubeUrl,
   variantsPreparedForStart
 } from '../src/main/youtube-url.ts'
+
+test('one YouTube page test, shared by the handoff and priming paths', () => {
+  for (const accepted of [
+    'https://www.youtube.com/watch?v=abc',
+    'https://m.youtube.com/watch?v=abc',
+    'https://music.youtube.com/watch?v=abc',
+    'https://youtu.be/abc'
+  ]) {
+    assert.equal(isSupportedYouTubeUrl(accepted), true, accepted)
+  }
+
+  for (const refused of [
+    'http://www.youtube.com/watch?v=abc',
+    'https://notyoutube.com/watch?v=abc',
+    'https://youtube.com.evil.example/watch?v=abc',
+    'file:///c:/youtube.com',
+    'not a url',
+    null
+  ]) {
+    assert.equal(isSupportedYouTubeUrl(refused), false, String(refused))
+  }
+})
 
 test('prepared YouTube resources are constrained to the expected CDN, path, and itag', () => {
   const valid = 'https://rr2---sn-x.googlevideo.com/videoplayback?expire=1&itag=399'

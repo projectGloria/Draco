@@ -97,6 +97,10 @@ export function segmentsForJournal(segments: Segment[]): Segment[] {
 export function journalSegmentsValid(segments: Segment[], size: number | null): boolean {
   if (!Array.isArray(segments) || segments.length === 0) return false
 
+  // Segments must tile the file from byte zero with no hole between them.
+  // `complete` only asks whether every segment reached its own end, so a gap
+  // would let a file with a missing middle be renamed into place as finished.
+  let expectedStart = 0
   let lastEnd = -1
   let total = 0
   for (const seg of segments) {
@@ -105,13 +109,18 @@ export function journalSegmentsValid(segments: Segment[], size: number | null): 
     if (seg.end >= 0 && seg.end < seg.start) return false
     if (seg.end >= 0 && seg.position > seg.end + 1) return false
     if (seg.start <= lastEnd) return false
+    if (seg.start !== expectedStart) return false
     if (seg.end >= 0) {
       if (size !== null && seg.end >= size) return false
       lastEnd = seg.end
+      expectedStart = seg.end + 1
     }
     total += seg.position - seg.start
     if (!Number.isSafeInteger(total)) return false
   }
 
-  return size === null || total <= size
+  if (size === null) return true
+  if (total > size) return false
+  // The last segment has to reach the end of the file, or the tail is missing.
+  return lastEnd === size - 1
 }

@@ -1,6 +1,21 @@
 import type { Segment } from '../../shared/types.ts'
 
 /**
+ * How much of a new reading is folded into a segment's smoothed rate. Low
+ * enough that one unlucky tick cannot condemn a connection, high enough that
+ * one which has genuinely gone slow is recognised in a second or two.
+ */
+const RATE_SMOOTHING = 0.3
+/** Anything shorter than this reads mostly as scheduling noise. */
+const MIN_SAMPLE_MS = 200
+
+interface RateSample {
+  at: number
+  position: number
+  rate: number
+}
+
+/**
  * IDM's actual trick, and the reason this engine is hand-written rather than a
  * wrapper around aria2.
  *
@@ -30,6 +45,13 @@ export class Segmenter {
   private size: number | null
   private readonly minSplitSize: number
 
+  /**
+   * Per-segment throughput, deliberately kept outside `Segment`: that shape is
+   * written to the journal and handed to the renderer, and a measurement that
+   * only means anything within one run belongs in neither.
+   */
+  private readonly rates = new WeakMap<Segment, RateSample>()
+
   constructor(size: number | null, minSplitSize: number) {
     this.size = size
     this.minSplitSize = minSplitSize
@@ -52,6 +74,57 @@ export class Segmenter {
       s.segments.push({ start: 0, end: size !== null && size > 0 ? size - 1 : -1, position: 0, active: false })
     }
     return s
+  }
+
+  /**
+   * Folds each segment's progress since the last call into its smoothed rate.
+   * Driven by the task's existing ticker, so nothing on the transfer path pays
+   * for the measurement.
+   */
+  observe(now: number): void {
+    for (const seg of this.segments) {
+      const previous = this.rates.get(seg)
+      if (!previous) {
+        this.rates.set(seg, { at: now, position: seg.position, rate: 0 })
+        continue
+      }
+
+      const elapsed = now - previous.at
+      if (elapsed < MIN_SAMPLE_MS) continue
+
+      const observed = ((seg.position - previous.position) / elapsed) * 1000
+      this.rates.set(seg, {
+        at: now,
+        position: seg.position,
+        rate:
+          previous.rate === 0
+            ? observed
+            : previous.rate + (observed - previous.rate) * RATE_SMOOTHING
+      })
+    }
+  }
+
+  /** A segment's measured throughput, or 0 while it is still unmeasured. */
+  private rateOf(seg: Segment): number {
+    const sample = this.rates.get(seg)
+    return sample && sample.rate > 0 ? sample.rate : 0
+  }
+
+  /**
+   * What one connection on this transfer has been worth on average - the only
+   * estimate available for a connection that has not started yet.
+   */
+  private typicalRate(): number {
+    let total = 0
+    let measured = 0
+    for (const seg of this.segments) {
+      const rate = this.rateOf(seg)
+      if (rate > 0) {
+        total += rate
+        measured++
+      }
+    }
+    return measured > 0 ? total / measured : 0
   }
 
   /** Bytes this segment still owes. An open-ended segment always owes work. */
@@ -90,28 +163,63 @@ export class Segmenter {
   }
 
   /**
-   * Splits the busiest segment and returns the new tail, or null when nothing is
-   * worth cutting. The caller hands the result to an idle connection.
+   * Splits whichever segment would otherwise finish last and returns the new
+   * tail, or null when nothing is worth cutting. The caller hands the result to
+   * an idle connection.
+   *
+   * Picking the segment with the most bytes left is only right when every
+   * connection runs at the same speed - the assumption this whole engine exists
+   * to avoid. The segment holding the most work may well be the one about to
+   * finish first. What sets the length of the download is the segment that
+   * finishes *last*, so that is the one to cut.
+   *
+   * Where to cut follows from the same reasoning. An incumbent moving at `r`,
+   * against a newcomer expected to manage `q`, should keep `r / (r + q)` of
+   * what is left for the two halves to land together; halving is that formula
+   * with the rates assumed equal. So a slow connection gives most of its work
+   * away and a fast one keeps most of its own, and before anything has been
+   * measured this behaves exactly as it always did.
    */
   split(): Segment | null {
     // Unknown length means one open-ended range; there is no midpoint to find.
     if (this.size === null) return null
 
+    const typical = this.typicalRate()
+
     let target: Segment | null = null
-    let best = 0
+    let targetRemaining = 0
+    let worstEta = 0
 
     for (const seg of this.segments) {
       const remaining = Segmenter.remaining(seg)
-      if (remaining > best) {
-        best = remaining
+      // Require room for two viable halves, so the split never produces a
+      // sliver: the extra request would cost more than the parallelism wins.
+      if (remaining < this.minSplitSize * 2) continue
+
+      const rate = this.rateOf(seg)
+      // An unmeasured segment is ranked as an ordinary one. Treating its zero
+      // as a speed would rank it infinitely slow and always pick it.
+      const eta = remaining / (rate > 0 ? rate : typical > 0 ? typical : 1)
+      if (eta > worstEta) {
+        worstEta = eta
         target = seg
+        targetRemaining = remaining
       }
     }
 
-    // Require room for two viable halves, so the split never produces a sliver.
-    if (!target || best < this.minSplitSize * 2) return null
+    if (!target) return null
 
-    const mid = target.position + Math.floor(best / 2)
+    const rate = this.rateOf(target)
+    const share = rate > 0 && typical > 0 ? rate / (rate + typical) : 0.5
+    // Both halves must clear the minimum. That also keeps the split point at
+    // least `minSplitSize` ahead of `position`, which is the margin the worker
+    // relies on to gather chunks before it writes them.
+    const keep = Math.min(
+      targetRemaining - this.minSplitSize,
+      Math.max(this.minSplitSize, Math.round(targetRemaining * share))
+    )
+
+    const mid = target.position + keep
     const tail: Segment = {
       start: mid,
       end: target.end,

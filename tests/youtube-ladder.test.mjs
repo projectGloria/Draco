@@ -432,3 +432,57 @@ test('a Premium manifest is replaced with a direct stream at the same quality', 
 
   assert.equal(format?.format_id, '137')
 })
+
+/*
+ * The page ladder and yt-dlp's ladder come from two different YouTube clients
+ * and do not always name the same itags. Observed on a real video: the page
+ * offered 720p as itag 136, and yt-dlp's list for the same video had no 136 at
+ * all - its only 720p AVC entry was 298. Refusing to substitute failed the
+ * download with "format 136 is no longer available" for a video whose 720p was
+ * sitting right there.
+ */
+test('an itag missing from the yt-dlp ladder resolves to the rung it named', () => {
+  const format = selectDirectYtFormat(
+    [audio('140'), video('298', 720, { vbr: 2500, fps: 60 }), video('302', 720, { vbr: 2000, vcodec: 'vp9' })],
+    '136',
+    { kind: 'video', height: 720 }
+  )
+
+  assert.equal(format?.format_id, '298')
+})
+
+test('a substituted rung is never quietly upgraded past the one chosen', () => {
+  const format = selectDirectYtFormat(
+    [video('271', 1440, { vbr: 9000 }), video('298', 720, { vbr: 2500 })],
+    '137',
+    { kind: 'video', height: 1080 }
+  )
+
+  assert.equal(format?.format_id, '298')
+})
+
+test('a missing audio itag falls back to a track that will still mux', () => {
+  const format = selectDirectYtFormat(
+    [video('299', 1080), audio('251', { ext: 'webm', acodec: 'opus', abr: 130 })],
+    '140',
+    { kind: 'audio' }
+  )
+
+  assert.equal(format?.format_id, '251')
+})
+
+test('an unknown itag is still refused when the caller describes nothing', () => {
+  assert.equal(selectDirectYtFormat([video('298', 720), audio('140')], '136'), null)
+})
+
+test('a video substitution is refused when the rung it should match is unknown', () => {
+  // A task saved before the rung was recorded. Guessing would mean the top of
+  // the ladder, which is not what someone who picked 360p asked for.
+  const format = selectDirectYtFormat(
+    [video('313', 2160, { vbr: 20000 }), video('298', 720, { vbr: 2500 })],
+    '136',
+    { kind: 'video', height: null }
+  )
+
+  assert.equal(format, null)
+})

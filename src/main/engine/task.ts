@@ -2,9 +2,12 @@ import { open, rename, rm, stat, type FileHandle } from 'node:fs/promises'
 import { basename, join } from 'node:path'
 import type { DownloadTask, Segment } from '../../shared/types.ts'
 import { journalMatches, journalSegmentsValid, readJournal, removeJournal, segmentsForJournal, writeJournal, JOURNAL_VERSION } from './journal.ts'
-import type { RateLimiter } from './limiter.ts'
+import { QuotaExceededError, type RateLimiter } from './limiter.ts'
 import { uniquePath } from './naming.ts'
 import { buildHeaders, probeUrl } from './probe.ts'
+import { logger } from '../log.ts'
+import { preallocate } from './preallocate.ts'
+import { ConnectionRamp } from './ramp.ts'
 import { Segmenter } from './segmenter.ts'
 import { AbortedError, HttpStatusError, NotResumableError, ServerBusyError, runSegment } from './worker.ts'
 import { preparedYouTubeUrl } from '../youtube-url.ts'
@@ -15,8 +18,16 @@ import { ensureDownloadDirectory } from '../destination-path.ts'
  * and land the finished bytes at their final name.
  */
 
+const log = logger('task')
+
 export interface TaskRunnerConfig {
   maxConnections: number
+  /**
+   * How far the ramp may climb while connections keep paying for themselves.
+   * Absent, or no higher than `maxConnections`, means the configured maximum
+   * is also the ceiling - which is the default.
+   */
+  connectionCeiling?: number
   minSplitSize: number
   retryLimit: number
   timeoutMs: number
@@ -36,9 +47,52 @@ export interface TaskRunnerDeps {
   onProbed?(task: DownloadTask): void | Promise<void>
 }
 
-/** How much can be downloaded between journal flushes before forcing one. */
+/**
+ * How much can be downloaded between journal flushes before forcing one.
+ *
+ * A flush is not just a small JSON write: it fsyncs the part file first,
+ * because the journal must never claim bytes the disk has not taken. Every
+ * connection writing into that file stalls behind the barrier.
+ *
+ * The tempting change is to flush far less often, and it backfires. The work
+ * an fsync does is proportional to the dirty pages waiting for it, so a longer
+ * interval does not remove the cost - it collects it into one barrier that
+ * blocks every writer for correspondingly longer. Measured over a throttled
+ * 400 MB transfer on eight connections, moving this to 64 MB / 5 s took the
+ * share of 250 ms progress ticks that advanced almost nothing from ~1% to
+ * 15-24%: the same total work, delivered as visible stalls instead of a smooth
+ * rate. These numbers are the ones that behave; treat them as measured rather
+ * than merely chosen.
+ */
 const FLUSH_EVERY_BYTES = 8 * 1024 * 1024
 const FLUSH_EVERY_MS = 1000
+
+/**
+ * Upper bound on what a connection may hold back before writing.
+ *
+ * Two things bound this from above. The segmenter's split point is derived
+ * from a `position` that unflushed bytes have not moved yet, so staying under
+ * one minimum split is what keeps those bytes behind it - that is the
+ * correctness bound, applied at the call site.
+ *
+ * This one is about what the number *looks* like. `onBytes` only fires when a
+ * batch lands, so the buffer size is also the granularity of every figure the
+ * UI derives from it: at one megabyte per connection, `received` advances in
+ * steps big enough that a 250 ms progress tick can show no movement at all, and
+ * a download transferring perfectly steadily reads as one that keeps stalling.
+ * Small enough that a tick always contains several batches costs a handful of
+ * extra writes and buys back a speed figure that means something.
+ */
+const MAX_WRITE_BUFFER_BYTES = 128 * 1024
+
+/**
+ * Connections a task opens before it has any evidence that more would help.
+ *
+ * Most of what parallelism is worth is already collected by the fourth
+ * connection, and starting here rather than at the configured ceiling gives
+ * `ConnectionRamp` a baseline to judge the rungs above it against.
+ */
+const RAMP_START_CONNECTIONS = 4
 /** Window the smoothed speed is measured over. */
 const SPEED_WINDOW_MS = 3000
 
@@ -76,6 +130,8 @@ export class TaskRunner {
    * whenever the server says it will not take another connection.
    */
   private connectionCap = 1
+  /** Null whenever the task is pinned to one connection and cannot climb. */
+  private ramp: ConnectionRamp | null = null
   private busyRetries = 0
 
   running = false
@@ -113,6 +169,7 @@ export class TaskRunner {
     this.lastRefreshedUrl = null
     this.forcedProbeUrl = null
     this.busyRetries = 0
+    this.ramp = null
 
     const lifecycle = this.runLifecycle()
     this.lifecyclePromise = lifecycle
@@ -156,6 +213,19 @@ export class TaskRunner {
         }
 
         await this.teardown()
+
+        // Out of budget, not broken. The partial data and its journal stay
+        // exactly as they are; the manager brings the task back when the
+        // window turns.
+        if (error instanceof QuotaExceededError) {
+          this.task.status = 'paused'
+          this.task.error = null
+          this.task.speed = 0
+          this.task.eta = null
+          this.task.detail = quotaDetail(error.resumesAt)
+          this.deps.onFinished(this.task, error)
+          return
+        }
 
         if ((error instanceof AbortedError || this.controller.signal.aborted) && !this.fatal) {
           // A pause is not a failure; pause() has already set the status.
@@ -211,12 +281,34 @@ export class TaskRunner {
     }
 
     this.task.received = this.received
-    if (this.segmenter) this.task.segments = this.segmenter.snapshot()
+    if (this.segmenter) {
+      // Per-segment rates feed the next split; see Segmenter.split.
+      this.segmenter.observe(now)
+      this.task.segments = this.segmenter.snapshot()
+    }
 
     this.task.eta =
       this.task.size !== null && this.task.speed > 1
         ? Math.max(0, Math.round((this.task.size - this.received) / this.task.speed))
         : null
+
+    // Reading the ramp off the same ticker keeps connection sizing off the hot
+    // path, exactly as speed and ETA are.
+    if (this.ramp && this.task.status === 'downloading' && this.ramp.sample(now, this.received)) {
+      const previous = this.connectionCap
+      this.connectionCap = this.ramp.cap
+      this.task.connections = this.connectionCap
+      // The only thing that changes a transfer's shape mid-flight without any
+      // error to go with it, so it does not get to be invisible either.
+      log.info(
+        `${this.task.filename}: connections ${previous} -> ${this.connectionCap}` +
+        ` at ${(this.task.speed / 1048576).toFixed(2)} MB/s` +
+        `${this.ramp.settled ? ' (settled)' : ''}`
+      )
+      // Climbing needs the new slots filled now; stepping back down needs
+      // nothing, because `fill` simply stops replacing what retires.
+      this.fill()
+    }
 
     const due =
       this.bytesSinceFlush >= FLUSH_EVERY_BYTES || now - this.lastFlush >= FLUSH_EVERY_MS
@@ -296,25 +388,28 @@ export class TaskRunner {
     const restored = await this.restoreOrReset(probe.size)
 
     // Only a server that honours ranges *and* told us the length can be split.
-    this.connectionCap =
-      this.task.resumable && this.task.size !== null ? this.config.maxConnections : 1
+    const connectionTarget =
+      this.task.resumable && this.task.size !== null
+        ? Math.max(this.config.maxConnections, this.config.connectionCeiling ?? 0)
+        : 1
+    // The configured maximum is a ceiling the ramp climbs towards on evidence,
+    // never a number of connections to open on faith.
+    this.ramp = new ConnectionRamp(RAMP_START_CONNECTIONS, connectionTarget)
+    this.connectionCap = this.ramp.cap
     this.task.connections = this.connectionCap
 
     if (!restored && process.platform === 'win32' && this.task.size !== null && this.task.size > 0) {
-      // Must exist before fsutil can mark it
-      await open(this.partPath, 'w').then((fh) => fh.close())
-      // Native sparse support guarantees ftruncate is instant even without volume privileges.
-      await import('node:child_process').then(cp =>
-        import('node:util').then(util =>
-          util.promisify(cp.execFile)('fsutil', ['sparse', 'setflag', this.partPath], { windowsHide: true })
-        )
-      ).catch(() => {})
+      // Reserving the whole range now is what keeps every segment's offset
+      // valid from the first write. Which of the two workable ways it gets is
+      // a property of the volume and the privileges to hand - see preallocate.
+      const mode = await preallocate(this.partPath, this.task.size)
+      log.info(`${this.task.filename}: reserved ${this.task.size} bytes (${mode})`)
     }
 
     this.fh = await open(this.partPath, restored ? 'r+' : 'w+')
 
-    // Preallocate. On NTFS this is a sparse extend, so it costs nothing up front
-    // but keeps every segment's offset valid from the first write.
+    // A restored file is already this long and a fresh one was just reserved,
+    // so this is the safety net for the case where neither held.
     if (this.task.size !== null && this.task.size > 0) {
       await this.fh.truncate(this.task.size)
     }
@@ -322,6 +417,7 @@ export class TaskRunner {
     this.task.status = 'downloading'
     this.task.startedAt = this.task.startedAt ?? Date.now()
     this.lastFlush = Date.now()
+    this.ramp?.begin(Date.now(), this.received)
     this.deps.onUpdate(this.task)
 
     await this.pumpUntilDone()
@@ -423,6 +519,7 @@ export class TaskRunner {
       retryLimit: this.config.retryLimit,
       expectedSize: this.task.size,
       signal: this.controller.signal,
+      writeBufferBytes: Math.min(MAX_WRITE_BUFFER_BYTES, this.config.minSplitSize),
       onBytes: (count) => {
         this.received += count
         this.bytesSinceFlush += count
@@ -464,6 +561,7 @@ export class TaskRunner {
                 throw new Error('YouTube media URL expired again after a refresh')
               }
               this.urlRefreshes++
+              log.warn(`${this.task.filename}: media URL expired mid-transfer; refreshing`)
               // Forced: the URL this task holds is the one that just 401'd.
               this.urlRefreshPromise = this.deps.refreshYouTube(this.task, true).then((refreshedUrl) => {
                 if (!/^https?:\/\//i.test(refreshedUrl)) {
@@ -489,12 +587,21 @@ export class TaskRunner {
         // not lost, it just proceeds narrower.
         if (err instanceof ServerBusyError && this.busyRetries < this.config.retryLimit) {
           this.busyRetries++
+          // An explicit refusal outranks anything throughput has to say.
+          this.ramp?.stop()
           if (this.connectionCap > 1) this.connectionCap--
           this.task.connections = this.connectionCap
           // Hold the slot open while backing off, so the loop does not spin and
           // immediately re-provoke the same refusal.
           const fallback = Math.min(30_000, 1000 * 2 ** (this.busyRetries - 1))
-          await delay(err.retryAfterMs ?? fallback)
+          const waitMs = err.retryAfterMs ?? fallback
+          // This is the one thing that can hold a transfer still for tens of
+          // seconds while nothing looks wrong, so it does not get to be silent.
+          log.warn(
+            `${this.task.filename}: server refused another connection (HTTP ${err.statusCode}); ` +
+            `backing off ${Math.round(waitMs / 1000)}s, cap now ${this.connectionCap}, refusal ${this.busyRetries}/${this.config.retryLimit}`
+          )
+          await delay(waitMs)
           this.fill()
           return
         }
@@ -613,6 +720,12 @@ export class TaskRunner {
   static isNotResumable(err: unknown): boolean {
     return err instanceof NotResumableError
   }
+}
+
+/** "Transfer quota reached - resumes at 14:30", in the row and the window. */
+export function quotaDetail(resumesAt: number): string {
+  const time = new Date(resumesAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+  return `Transfer quota reached; resumes at ${time}`
 }
 
 function delay(ms: number): Promise<void> {

@@ -1,4 +1,4 @@
-import { appendFile, mkdir } from 'node:fs/promises'
+import { appendFile, mkdir, rename, rm, stat } from 'node:fs/promises'
 import { join } from 'node:path'
 
 /**
@@ -12,9 +12,19 @@ type Level = 'info' | 'warn' | 'error'
 let queue: Promise<void> = Promise.resolve()
 let logDirectory: string | null = null
 
+/**
+ * Append-only was also append-forever. One rollover at a few megabytes keeps
+ * the log useful - the tail is the part anybody reads - without ever letting it
+ * become the largest file in the profile.
+ */
+const MAX_LOG_BYTES = 4 * 1024 * 1024
+/** Tracked rather than stat'ed per line; the file is only ours to append to. */
+let bytesWritten = -1
+
 /** Configured after Electron is ready; keeping this module Electron-free lets engine tests import it. */
 export function setLogDirectory(path: string): void {
   logDirectory = path
+  bytesWritten = -1
 }
 
 /** Waits until all queued writes have reached disk. Primarily useful for shutdown and tests. */
@@ -35,7 +45,21 @@ function write(level: Level, scope: string, message: string): void {
     .then(async () => {
       if (!logDirectory) return
       await mkdir(logDirectory, { recursive: true })
-      await appendFile(join(logDirectory, 'main.log'), line, 'utf8')
+      const path = join(logDirectory, 'main.log')
+
+      if (bytesWritten < 0) {
+        bytesWritten = (await stat(path).catch(() => null))?.size ?? 0
+      }
+      if (bytesWritten + line.length > MAX_LOG_BYTES) {
+        // One generation kept: the previous run's tail is worth having, older
+        // than that is not worth the disk.
+        await rm(path + '.1', { force: true }).catch(() => {})
+        await rename(path, path + '.1').catch(() => {})
+        bytesWritten = 0
+      }
+
+      await appendFile(path, line, 'utf8')
+      bytesWritten += Buffer.byteLength(line, 'utf8')
     })
     .catch(() => {})
 }

@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { RateLimiter } from '../src/main/engine/limiter.ts'
+import { QuotaExceededError, RateLimiter } from '../src/main/engine/limiter.ts'
 
 test('rate limiter aborts promptly while waiting for a long chunk', async () => {
   const limiter = new RateLimiter(1)
@@ -10,15 +10,22 @@ test('rate limiter aborts promptly while waiting for a long chunk', async () => 
   await assert.rejects(pending, /aborted/)
 })
 
-test('quota limiter waits for the next transfer window', async () => {
+test('an exhausted quota is reported, not waited out', async () => {
+  // Holding the connection open until the window turns is what undici's
+  // bodyTimeout kills, so the budget running out has to be an answer.
   const limiter = new RateLimiter(null)
   limiter.setQuota(10, 30)
+  const startedAt = Date.now()
   await limiter.consume(10)
 
-  const started = Date.now()
-  await limiter.consume(1)
-  assert.ok(Date.now() - started >= 20)
+  const refused = await limiter.consume(1).then(() => null, (err) => err)
+  assert.ok(refused instanceof QuotaExceededError)
+  assert.ok(refused.resumesAt >= startedAt && refused.resumesAt <= startedAt + 60)
+
+  await new Promise((resolve) => setTimeout(resolve, 40))
   assert.equal(limiter.quotaRemaining, 10)
+  await limiter.consume(1)
+  assert.equal(limiter.quotaRemaining, 9)
 })
 
 test('quota usage survives recreation of the limiter', async () => {

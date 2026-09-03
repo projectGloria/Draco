@@ -52,15 +52,38 @@ export default function ConfirmDialog({
       <p className="text-[12.5px] leading-relaxed text-muted">{request.message}</p>
 
       {request.checkbox && (
-        <label className="flex items-center gap-2.5 mt-4 text-[12.5px] cursor-pointer select-none">
-          <input
-            type="checkbox"
-            checked={checked}
-            onChange={(event) => setChecked(event.target.checked)}
-            className="w-3.5 h-3.5 accent-[var(--accent)]"
-          />
-          {request.checkbox}
-        </label>
+        // Drawn rather than a native <input>: the platform checkbox renders in
+        // the light colour scheme on this dark dialog, and an empty white box
+        // reads as ticked. An opt-in this destructive has to look unticked.
+        <button
+          type="button"
+          role="checkbox"
+          aria-checked={checked}
+          onClick={() => setChecked(!checked)}
+          className="flex items-center gap-2.5 mt-4 text-[12.5px] text-left select-none group"
+        >
+          <span
+            className="w-[15px] h-[15px] rounded-[4px] shrink-0 border flex items-center
+                       justify-center transition-colors"
+            style={{
+              background: checked ? 'var(--accent)' : 'transparent',
+              borderColor: checked ? 'var(--accent)' : 'var(--color-line)'
+            }}
+          >
+            {checked && (
+              <svg width="9" height="9" viewBox="0 0 12 12" fill="none" aria-hidden="true">
+                <path
+                  d="M2.5 6.3 4.8 8.6 9.5 3.9"
+                  stroke="#fff"
+                  strokeWidth="1.8"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                />
+              </svg>
+            )}
+          </span>
+          <span className="group-hover:text-ink transition-colors">{request.checkbox}</span>
+        </button>
       )}
     </Dialog>
   )

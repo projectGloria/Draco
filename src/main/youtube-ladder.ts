@@ -271,15 +271,41 @@ export function isDirectDownload(format: YtDlpFormat): boolean {
   return !/[.]m3u8([?#]|$)|\/manifest\//i.test(format.url ?? '')
 }
 
+/** The formats this engine can actually fetch: real files, over http(s). */
+export function directFormats(formats: YtDlpFormat[]): YtDlpFormat[] {
+  return formats.filter(
+    (candidate) => Boolean(candidate.url) && /^https?:/i.test(candidate.url!) && isDirectDownload(candidate)
+  )
+}
+
+/**
+ * What the caller actually asked for, in terms that survive a missing itag.
+ *
+ * The page ladder and yt-dlp's ladder are two different YouTube clients'
+ * answers to the same question, and they do not always name the same itags: a
+ * page offering 720p as itag 136 has been seen against a yt-dlp list whose only
+ * 720p AVC entry is 298, with no 136 in it at all. The itag is only the page's
+ * *name* for a rung; this is the rung, which is what the user actually chose
+ * and the only thing a substitution can be made against.
+ */
+export interface WantedFormat {
+  kind: 'video' | 'audio'
+  height?: number | null
+}
+
 /**
  * Finds a fetchable replacement for a page-selected itag. Premium formats can
  * share a resolution with an ordinary file while exposing only an HLS URL; the
- * latter is what the segmented downloader needs.
+ * latter is what the segmented downloader needs. And an itag the other client
+ * never listed still has to resolve to *something*, or a perfectly downloadable
+ * video fails outright on the strength of a name.
  */
-export function selectDirectYtFormat(formats: YtDlpFormat[], formatId: string): YtDlpFormat | null {
-  const direct = formats.filter(
-    (candidate) => Boolean(candidate.url) && /^https?:/i.test(candidate.url!) && isDirectDownload(candidate)
-  )
+export function selectDirectYtFormat(
+  formats: YtDlpFormat[],
+  formatId: string,
+  wanted?: WantedFormat
+): YtDlpFormat | null {
+  const direct = directFormats(formats)
   const exact = direct.find((candidate) => candidate.format_id === formatId)
   if (exact) return exact
 
@@ -290,26 +316,104 @@ export function selectDirectYtFormat(formats: YtDlpFormat[], formatId: string): 
   const alternateTracks = direct.filter((candidate) => baseFormatId(candidate.format_id) === formatId)
   if (alternateTracks.length > 0) return preferredLanguageTrack(alternateTracks)
 
+  // yt-dlp's own record of the itag describes the substitute best, since it
+  // carries the real frame and rate. `wanted` covers the case that brings most
+  // downloads here: the two ladders not sharing the itag at all.
   const requested = formats.find(
     (candidate) => candidate.format_id === formatId || baseFormatId(candidate.format_id) === formatId
   )
-  if (!requested) return null
+  if (!requested && !wanted) return null
 
-  const video = Boolean(requested.vcodec && requested.vcodec !== 'none')
-  const candidates = direct.filter((candidate) => {
-    const isVideo = Boolean(candidate.vcodec && candidate.vcodec !== 'none')
-    if (isVideo !== video) return false
-    if (video) return candidate.height === requested.height && candidate.width === requested.width
-    return candidate.ext === requested.ext
-  })
-  if (candidates.length === 0) return null
+  const video = requested ? hasVideoTrack(requested) : wanted!.kind === 'video'
+  const pool = direct.filter((candidate) => hasVideoTrack(candidate) === video)
+  if (pool.length === 0) return null
 
-  const targetRate = requested.vbr ?? requested.abr ?? requested.tbr ?? 0
+  return video
+    ? substituteVideo(pool, requested, requested?.height ?? wanted?.height ?? null)
+    : substituteAudio(pool, requested)
+}
+
+function hasVideoTrack(format: YtDlpFormat): boolean {
+  return Boolean(format.vcodec && format.vcodec !== 'none')
+}
+
+/**
+ * The rung is what the user picked; the itag was only its name. Prefer the
+ * exact frame, then the same height, then the closest rung - but never a rung
+ * *above* the request unless there is nothing below it, because a substitution
+ * that quietly doubles the file size is its own kind of wrong.
+ */
+function substituteVideo(
+  pool: YtDlpFormat[],
+  requested: YtDlpFormat | undefined,
+  height: number | null
+): YtDlpFormat | null {
+  // Nothing known about the rung - an itag with no counterpart, on a task saved
+  // before the rung was recorded. Better to fail than to guess: the guess would
+  // be the top of the ladder, and fetching 4K for someone who chose 360p is a
+  // worse answer than saying so.
+  if (!requested && height === null) return null
+
+  const frameWidth = requested?.width ?? null
+  const frameHeight = requested?.height ?? null
+  const sameFrame = frameWidth && frameHeight
+    ? pool.filter((c) => c.width === frameWidth && c.height === frameHeight)
+    : []
+  const sameHeight = height ? pool.filter((c) => c.height === height) : []
+  const tier = tierFor(height)
+  const sameTier = tier ? pool.filter((c) => tierFor(c.height ?? null, c.width ?? null) === tier) : []
+
+  let candidates = firstNonEmpty(sameFrame, sameHeight, sameTier)
+  if (!candidates && tier) {
+    const below = pool.filter((c) => (tierFor(c.height ?? null, c.width ?? null) ?? 0) < tier)
+    candidates = firstNonEmpty(below, pool)
+  }
+  if (!candidates) candidates = pool
+
+  const rate = requested ? (requested.vbr ?? requested.tbr ?? 0) : 0
+  if (rate > 0) return nearestRate(candidates, rate)
+
+  // Nothing to aim at, so take the best of what is left the way the ladder
+  // itself would: highest rung first, then the richest copy of it.
+  return [...candidates].sort(
+    (a, b) =>
+      (b.height ?? 0) - (a.height ?? 0) ||
+      (b.vbr ?? b.tbr ?? 0) - (a.vbr ?? a.tbr ?? 0)
+  )[0] ?? null
+}
+
+/**
+ * Any audio track will mux, so the only question is which. The same container
+ * family as the missing one where possible - that is what keeps an .mp4 an
+ * .mp4 - and otherwise the ladder's own preference: the plain track over its
+ * -drc twin, the original language, the highest rate.
+ */
+function substituteAudio(pool: YtDlpFormat[], requested: YtDlpFormat | undefined): YtDlpFormat | null {
+  const ext = requested?.ext ?? null
+  const sameExt = ext ? pool.filter((c) => c.ext === ext) : []
+  const candidates = firstNonEmpty(sameExt, pool) ?? pool
+
+  const rate = requested?.abr ?? requested?.tbr ?? 0
+  if (rate > 0) return nearestRate(candidates, rate)
+
+  return [...candidates].sort(
+    (a, b) =>
+      (/-drc/i.test(a.format_id ?? '') ? 1 : 0) - (/-drc/i.test(b.format_id ?? '') ? 1 : 0) ||
+      (b.language_preference ?? 0) - (a.language_preference ?? 0) ||
+      (b.abr ?? b.tbr ?? 0) - (a.abr ?? a.tbr ?? 0)
+  )[0] ?? null
+}
+
+function nearestRate(candidates: YtDlpFormat[], targetRate: number): YtDlpFormat | null {
   return [...candidates].sort((a, b) => {
     const aRate = a.vbr ?? a.abr ?? a.tbr ?? 0
     const bRate = b.vbr ?? b.abr ?? b.tbr ?? 0
     return Math.abs(aRate - targetRate) - Math.abs(bRate - targetRate)
-  })[0]
+  })[0] ?? null
+}
+
+function firstNonEmpty(...groups: YtDlpFormat[][]): YtDlpFormat[] | null {
+  return groups.find((group) => group.length > 0) ?? null
 }
 
 function baseFormatId(formatId: string | undefined): string | null {

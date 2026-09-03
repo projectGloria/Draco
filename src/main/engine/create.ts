@@ -19,7 +19,7 @@ export function createTask(input: {
   description?: string
   kind?: TaskKind
   audioUrl?: string | null
-  youtube?: { pageUrl: string; videoFormatId: string; audioFormatId?: string | null }
+  youtube?: { pageUrl: string; videoFormatId: string; audioFormatId?: string | null; height?: number | null }
 }): DownloadTask {
   const kind = input.kind ?? 'file'
   // Applied to the URL-derived fallback too, not just to a name the caller
@@ -44,6 +44,7 @@ export function createTask(input: {
     queueId: input.queueId ?? null,
     queueRetryCount: 0,
     nextQueueAttemptAt: null,
+    manualPause: false,
     kind,
     size: null,
     received: 0,

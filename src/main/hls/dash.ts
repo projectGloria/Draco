@@ -1,7 +1,8 @@
 import { basename, extname, join } from 'node:path'
-import { rename, rm } from 'node:fs/promises'
+import { rename, rm, stat } from 'node:fs/promises'
 import type { DownloadTask } from '@shared/types'
-import { TaskRunner } from '../engine/task.ts'
+import { QuotaExceededError } from '../engine/limiter.ts'
+import { TaskRunner, quotaDetail } from '../engine/task.ts'
 import type { Runner } from '../engine/runner.ts'
 import type { RunnerContext } from '../engine/manager.ts'
 import { uniquePath } from '../engine/naming.ts'
@@ -21,6 +22,10 @@ export class DashRunner implements Runner {
    * would overwrite the mux status four times a second.
    */
   private muxing = false
+  /** The temp file the mux is writing, so the error path deletes the real one. */
+  private muxTemp: string | null = null
+  /** Set when a child stopped on the transfer quota rather than on a failure. */
+  private quotaError: QuotaExceededError | null = null
   running = false
 
   constructor(task: DownloadTask, context: RunnerContext) {
@@ -51,6 +56,10 @@ export class DashRunner implements Runner {
       onUpdate: () => this.tick(),
       onFinished: (childTask, error) => {
         if (!error) return
+        // The budget belongs to the whole app, so a half that ran out of it
+        // stops the pair. Kept so `start` can report it as a hold rather than
+        // letting the mux run on a file that was never finished.
+        if (error instanceof QuotaExceededError) this.quotaError = error
         // Stop the sibling, but do not abort the parent controller. An abort
         // is a user pause in the parent's catch path and would hide this real
         // child failure by leaving the composite task stuck on "probing".
@@ -75,20 +84,32 @@ export class DashRunner implements Runner {
     if (this.running) return
     this.running = true
     this.muxing = false
+    this.quotaError = null
     this.controller = new AbortController()
 
     try {
       this.task.status = 'probing'
       this.deps.onUpdate(this.task)
 
-      // Start both runners concurrently
-      const vPromise = this.videoRunner.start()
-      const aPromise = this.audioRunner.start()
+      // Start both runners concurrently - unless a half is already sitting there
+      // finished from an attempt whose mux failed.
+      const vPromise = (await this.adoptFinishedHalf(this.videoRunner))
+        ? Promise.resolve()
+        : this.videoRunner.start()
+      const aPromise = (await this.adoptFinishedHalf(this.audioRunner))
+        ? Promise.resolve()
+        : this.audioRunner.start()
 
       await Promise.all([vPromise, aPromise])
+      if (this.quotaError) throw this.quotaError
       if (this.videoRunner.task.status === 'error') throw new Error(this.videoRunner.task.error || 'Video fetch failed')
       if (this.audioRunner.task.status === 'error') throw new Error(this.audioRunner.task.error || 'Audio fetch failed')
       if (this.controller.signal.aborted) throw new AbortedError()
+
+      // Neither half may be short of its final name here. Muxing a stream that
+      // stopped early would produce a truncated file that still looks finished.
+      const unfinished = [this.videoRunner.task, this.audioRunner.task].find((t) => t.status !== 'done')
+      if (unfinished) throw new AbortedError()
 
       this.muxing = true
       this.task.status = 'downloading'
@@ -114,6 +135,7 @@ export class DashRunner implements Runner {
       const audioPath = join(this.task.dir, this.audioRunner.task.filename)
       const targetPath = await uniquePath(this.task.dir, this.task.filename)
       const muxTemp = muxTempPath(targetPath)
+      this.muxTemp = muxTemp
       await rm(muxTemp, { force: true }).catch(() => {})
 
       await mux({
@@ -142,9 +164,19 @@ export class DashRunner implements Runner {
 
       this.deps.onFinished(this.task, null)
     } catch (err) {
-      const target = join(this.task.dir, this.task.filename)
-      await rm(muxTempPath(target), { force: true }).catch(() => {})
-      if (err instanceof AbortedError || this.controller.signal.aborted) {
+      // The temp is named after the path `uniquePath` handed out, which is not
+      // always `task.filename` - deleting the guess left the real one behind,
+      // taking up exactly the space the next attempt needs.
+      const temp = this.muxTemp ?? muxTempPath(join(this.task.dir, this.task.filename))
+      await rm(temp, { force: true }).catch(() => {})
+      if (err instanceof QuotaExceededError) {
+        this.task.status = 'paused'
+        this.task.error = null
+        this.task.speed = 0
+        this.task.eta = null
+        this.task.detail = quotaDetail(err.resumesAt)
+        this.deps.onFinished(this.task, err)
+      } else if (err instanceof AbortedError || this.controller.signal.aborted) {
         this.task.speed = 0
         this.task.eta = null
         this.deps.onFinished(this.task, null)
@@ -157,6 +189,34 @@ export class DashRunner implements Runner {
       }
     } finally {
       this.running = false
+    }
+  }
+
+  /**
+   * A half only reaches its own name once every byte is written - `TaskRunner`
+   * renames it there from `.dracodl` - so the file existing *is* the record
+   * that the half is finished, the same rule the HLS pieces run on.
+   *
+   * Without this, a mux that failed (out of disk, most often) meant the next
+   * attempt re-fetched both streams and, since the old halves are still there,
+   * landed them beside as `… (1)`. The retry then needed three copies of the
+   * video to succeed where two had not fit, so freeing "enough" space never
+   * helped.
+   */
+  private async adoptFinishedHalf(runner: TaskRunner): Promise<boolean> {
+    const path = join(this.task.dir, runner.task.filename)
+    try {
+      const info = await stat(path)
+      if (!info.isFile() || info.size === 0) return false
+      runner.task.size = info.size
+      runner.task.received = info.size
+      runner.task.status = 'done'
+      runner.task.speed = 0
+      runner.task.eta = null
+      runner.task.detail = null
+      return true
+    } catch {
+      return false
     }
   }
 

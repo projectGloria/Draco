@@ -16,6 +16,22 @@ test('journal segment validation rejects overlap and out-of-bounds records', () 
   ], 200), false)
 })
 
+test('journal segment validation rejects a snapshot with a hole in it', () => {
+  // Every segment reached its own end, so `Segmenter.complete` would say the
+  // file is finished - while bytes 100-149 were never fetched at all.
+  assert.equal(journalSegmentsValid([
+    { start: 0, end: 99, position: 100, active: false },
+    { start: 150, end: 199, position: 200, active: false }
+  ], 200), false)
+  // Missing the head and missing the tail are the same mistake.
+  assert.equal(journalSegmentsValid([
+    { start: 50, end: 199, position: 200, active: false }
+  ], 200), false)
+  assert.equal(journalSegmentsValid([
+    { start: 0, end: 149, position: 150, active: false }
+  ], 200), false)
+})
+
 test('journal matching refuses weak validators and changed sizes', () => {
   const base = { url: 'https://cdn.example/file', finalUrl: 'https://cdn.example/file', filename: 'x.bin', size: 100, etag: null, lastModified: null, segments: [], updatedAt: 1 }
   assert.equal(journalMatches({ ...base, etag: 'W/"abc"' }, { finalUrl: base.finalUrl, filename: base.filename, size: 100, resumable: true, etag: '"abc"', lastModified: null, mimeType: null, statusCode: 206 }), false)

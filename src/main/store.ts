@@ -78,6 +78,7 @@ export function defaultSettings(): Settings {
     downloadDir: getPaths().defaultDownloadDir,
     maxConcurrentTasks: 3,
     maxConnectionsPerTask: 8,
+    adaptiveConnectionCeiling: null,
     minSplitSize: 1024 * 1024,
     speedLimit: null,
     proxyUrl: null,

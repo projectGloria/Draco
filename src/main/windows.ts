@@ -13,7 +13,32 @@ function getIconPath(): string {
 /**
  * Window creation. The renderer runs with no Node integration and context
  * isolation on - everything privileged is reached through the preload bridge.
+ *
+ * `sandbox: true` throughout, which is affordable precisely because that bridge
+ * is the whole surface: the preload asks for nothing but `electron`'s
+ * `ipcRenderer`, and a sandboxed preload can still have that. It puts every
+ * renderer in an OS-level sandbox, so a bug in one of them is not a bug with
+ * the run of the machine.
  */
+
+/**
+ * Hands a link to the desktop, but only ever a web link.
+ *
+ * `shell.openExternal` will launch whatever protocol handler Windows has
+ * registered, so passing it an unfiltered string means a page-supplied
+ * `ms-something:` or `file:` URL would be executed by the shell rather than
+ * opened by a browser. Nothing renders anchors today; this keeps that from
+ * being the only thing standing between a page and the shell.
+ */
+function openExternally(url: string): void {
+  try {
+    const parsed = new URL(url)
+    if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') return
+  } catch {
+    return
+  }
+  void shell.openExternal(url)
+}
 
 let mainWindow: BrowserWindow | null = null
 let splashWindow: BrowserWindow | null = null
@@ -38,7 +63,7 @@ export function createSplashWindow(): BrowserWindow {
     show: true,
     backgroundColor: '#0b0e14',
     icon: getIconPath(),
-    webPreferences: { preload, sandbox: false, contextIsolation: true }
+    webPreferences: { preload, sandbox: true, contextIsolation: true }
   })
 
   const target = rendererUrl('splash')
@@ -72,7 +97,7 @@ export function createMainWindow(startMinimized: boolean): BrowserWindow {
     backgroundColor: '#0b0e14',
     titleBarStyle: 'hidden',
     icon: getIconPath(),
-    webPreferences: { preload, sandbox: false, contextIsolation: true }
+    webPreferences: { preload, sandbox: true, contextIsolation: true }
   })
 
   mainWindow.once('ready-to-show', () => {
@@ -83,7 +108,7 @@ export function createMainWindow(startMinimized: boolean): BrowserWindow {
   // Downloads are full of outbound links; none of them should ever open inside
   // the app's own window.
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
-    void shell.openExternal(url)
+    openExternally(url)
     return { action: 'deny' }
   })
 
@@ -155,7 +180,7 @@ export function createHandoffWindow(requestId: string): BrowserWindow {
     // one another in exactly the same spot.
     x: undefined,
     y: undefined,
-    webPreferences: { preload, sandbox: false, contextIsolation: true }
+    webPreferences: { preload, sandbox: true, contextIsolation: true }
   })
 
   const offset = (handoffCounter++ % 10) * 26
@@ -165,7 +190,7 @@ export function createHandoffWindow(requestId: string): BrowserWindow {
   }
 
   window.webContents.setWindowOpenHandler(({ url }) => {
-    void shell.openExternal(url)
+    openExternally(url)
     return { action: 'deny' }
   })
 
@@ -240,7 +265,7 @@ export function createProgressWindow(taskId: string): BrowserWindow {
     show: true,
     backgroundColor: '#0b0e14',
     icon: getIconPath(),
-    webPreferences: { preload, sandbox: false, contextIsolation: true }
+    webPreferences: { preload, sandbox: true, contextIsolation: true }
   })
 
   // Same reason the confirm windows stagger: a handful of downloads started in
@@ -252,7 +277,7 @@ export function createProgressWindow(taskId: string): BrowserWindow {
   }
 
   window.webContents.setWindowOpenHandler(({ url }) => {
-    void shell.openExternal(url)
+    openExternally(url)
     return { action: 'deny' }
   })
 

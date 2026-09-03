@@ -1,7 +1,7 @@
 import { readdir, rm, stat } from 'node:fs/promises'
 import { join } from 'node:path'
 import type { DownloadTask, TaskProgress } from '../../shared/types.ts'
-import { RateLimiter, type QuotaState } from './limiter.ts'
+import { QuotaExceededError, RateLimiter, type QuotaState } from './limiter.ts'
 import { mapConcurrent } from './concurrency.ts'
 import { connectionsForUrl, type HostConnectionLimit } from './network-rules.ts'
 import { setProxyUrl } from './http.ts'
@@ -27,6 +27,8 @@ const RECOVERY_CONCURRENCY = 8
 export interface EngineSettings {
   maxConcurrentTasks: number
   maxConnectionsPerTask: number
+  /** Optional: how far the adaptive ramp may climb past the line above. */
+  adaptiveConnectionCeiling?: number | null
   minSplitSize: number
   retryLimit: number
   timeoutMs: number
@@ -93,6 +95,9 @@ export class DownloadManager {
   private disposed = false
   private lastQuotaSnapshotAt = 0
   private lastQuotaUsed = -1
+  /** Tasks stopped by the transfer quota, to be started again by `quotaTimer`. */
+  private quotaHeld = new Set<string>()
+  private quotaTimer: NodeJS.Timeout | null = null
 
   private options: ManagerOptions
 
@@ -137,6 +142,8 @@ export class DownloadManager {
     this.disposed = true
     if (this.ticker) clearInterval(this.ticker)
     this.ticker = null
+    if (this.quotaTimer) clearTimeout(this.quotaTimer)
+    this.quotaTimer = null
   }
 
   /** Pauses everything and waits for the journals to land. Used on quit. */
@@ -196,6 +203,7 @@ export class DownloadManager {
       if (task.status === 'done') continue
 
       log.info(`Queued task ${task.id} (${task.filename})`)
+      task.manualPause = false
       if (!preserveQueueRetry) {
         task.queueRetryCount = 0
         task.nextQueueAttemptAt = null
@@ -207,13 +215,21 @@ export class DownloadManager {
     this.schedule()
   }
 
-  async pause(ids: string[]): Promise<void> {
+  /**
+   * @param byUser Distinguishes "the person pressed Stop" from the scheduler
+   *   parking a queue that left its time window. Only the first outranks the
+   *   queue, which is otherwise entitled to start a paused task straight back up.
+   */
+  async pause(ids: string[], byUser = false): Promise<void> {
     log.info(`Pause requested for ${ids.length} tasks`)
     const waits: Promise<void>[] = []
 
     for (const id of ids) {
       const task = this.tasks.get(id)
       if (!task) continue
+      // An explicit pause outranks the quota hold; the timer must not undo it.
+      this.quotaHeld.delete(id)
+      if (byUser) task.manualPause = true
 
       const runner = this.runners.get(id)
       if (runner) {
@@ -228,8 +244,8 @@ export class DownloadManager {
     this.schedule()
   }
 
-  async pauseAll(): Promise<void> {
-    await this.pause([...this.tasks.keys()])
+  async pauseAll(byUser = false): Promise<void> {
+    await this.pause([...this.tasks.keys()], byUser)
   }
 
   async remove(ids: string[], deleteFiles: boolean): Promise<void> {
@@ -246,6 +262,11 @@ export class DownloadManager {
       await removeJournal(part + '.json').catch(() => {})
       
       if (task.audioUrl) {
+        // The muxed halves are Draco's own intermediates. They outlive a failed
+        // merge on purpose - the retry adopts them - so removing the task is the
+        // point they stop being anybody's, files and partials alike.
+        await rm(join(task.dir, task.filename + '.v.mp4'), { force: true }).catch(() => {})
+        await rm(join(task.dir, task.filename + '.a.m4a'), { force: true }).catch(() => {})
         await rm(join(task.dir, task.filename + '.v.mp4.dracodl'), { force: true }).catch(() => {})
         await removeJournal(join(task.dir, task.filename + '.v.mp4.dracodl.json')).catch(() => {})
         await rm(join(task.dir, task.filename + '.a.m4a.dracodl'), { force: true }).catch(() => {})
@@ -256,6 +277,8 @@ export class DownloadManager {
         recursive: true,
         force: true
       }).catch(() => {})
+      // The playlist runner's joined halves, left behind when a merge failed.
+      await rm(join(task.dir, task.filename + '.dracodl.audio'), { force: true }).catch(() => {})
 
       if (deleteFiles && task.status === 'done') {
         await rm(join(task.dir, task.filename), { force: true }).catch(() => {})
@@ -263,6 +286,7 @@ export class DownloadManager {
 
       this.tasks.delete(id)
       this.runners.delete(id)
+      this.quotaHeld.delete(id)
     }
 
     this.emitTasks()
@@ -308,6 +332,14 @@ export class DownloadManager {
       settings.hostConnectionLimits
     )
     const effectiveConnections = task.singleConnectionFallback ? 1 : maxConnections
+    // The ramp may be let past the configured maximum, but never past a
+    // per-host rule: that one was written for this origin on purpose.
+    const ceiling = connectionsForUrl(
+      task.youtube?.pageUrl ?? task.url,
+      Math.max(settings.maxConnectionsPerTask, settings.adaptiveConnectionCeiling ?? 0),
+      settings.hostConnectionLimits
+    )
+    const connectionCeiling = task.singleConnectionFallback ? 1 : ceiling
 
     const context: RunnerContext = {
       limiter: this.limiter,
@@ -358,6 +390,7 @@ export class DownloadManager {
         task,
         {
           maxConnections: effectiveConnections,
+          connectionCeiling,
           minSplitSize: settings.minSplitSize,
           retryLimit: settings.retryLimit,
           timeoutMs: settings.timeoutMs
@@ -418,6 +451,18 @@ export class DownloadManager {
       }
     }
 
+    if (error instanceof QuotaExceededError) {
+      // Not a failure and not the user's doing: hold the task and bring it back
+      // when the window turns, so an overnight queue survives its own budget.
+      log.info(`Task ${task.id} (${task.filename}) held: transfer quota reached`)
+      task.status = 'paused'
+      task.error = null
+      this.holdForQuota(task.id, error.resumesAt)
+      this.emitTasks()
+      this.schedule()
+      return
+    }
+
     if (error) {
       log.error(`Task ${task.id} (${task.filename}) failed`, error)
     } else if (task.status === 'done') {
@@ -446,6 +491,41 @@ export class DownloadManager {
 
     this.emitTasks()
     this.schedule()
+  }
+
+  /**
+   * Parks a task until the transfer window rolls over and starts it again.
+   *
+   * One timer for all of them: the window is global, so every held task comes
+   * back at the same moment. A second of slack keeps the restart on the far
+   * side of the rollover rather than racing it.
+   */
+  private holdForQuota(id: string, resumesAt: number): void {
+    this.quotaHeld.add(id)
+    if (this.quotaTimer || this.disposed) return
+
+    const wait = Math.min(6 * 3600_000, Math.max(1000, resumesAt - Date.now() + 1000))
+    this.quotaTimer = setTimeout(() => {
+      this.quotaTimer = null
+      const held = [...this.quotaHeld]
+      this.quotaHeld.clear()
+      if (this.disposed || held.length === 0) return
+
+      // Still no budget - the user may have narrowed the quota while we waited.
+      const remaining = this.limiter.quotaRemaining
+      if (remaining !== null && remaining <= 0) {
+        for (const heldId of held) this.holdForQuota(heldId, Date.now() + 60_000)
+        return
+      }
+
+      for (const heldId of held) {
+        const task = this.tasks.get(heldId)
+        if (task && task.status === 'paused') task.detail = null
+      }
+      log.info(`transfer quota window rolled over; resuming ${held.length} task(s)`)
+      this.start(held, true)
+    }, wait)
+    this.quotaTimer.unref?.()
   }
 
   /* ---------------------------------------------------------------- */
@@ -527,6 +607,16 @@ async function reconcileWithJournal(task: DownloadTask): Promise<void> {
     
     task.received = 0
     task.segments = []
+
+    // A half that finished has no journal left - it was renamed to its own name
+    // and its journal removed. Its size on disk is the progress it represents,
+    // and without it a pair waiting only to be merged came back reading 0%.
+    let finishedBytes = 0
+    for (const half of ['.v.mp4', '.a.m4a']) {
+      const info = await stat(join(task.dir, task.filename + half)).catch(() => null)
+      if (info?.isFile()) finishedBytes += info.size
+    }
+    task.received += finishedBytes
     
     if (vJournal && vJournal.segments.length > 0) {
       const vSegs = vJournal.segments.map((seg) => ({ ...seg, active: false }))
@@ -542,6 +632,9 @@ async function reconcileWithJournal(task: DownloadTask): Promise<void> {
     
     if (vJournal?.size !== null && vJournal?.size !== undefined && aJournal?.size !== null && aJournal?.size !== undefined) {
       task.size = vJournal.size + aJournal.size
+    } else if (finishedBytes > 0 && task.size !== null && task.size < task.received) {
+      // The recorded total predates the halves that are now complete.
+      task.size = task.received
     }
     return
   }

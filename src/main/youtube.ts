@@ -1,14 +1,18 @@
 import { chmod, mkdir, rename, rm, stat, writeFile } from 'node:fs/promises'
 import { dirname } from 'node:path'
 import { spawn } from 'node:child_process'
+import { createHash } from 'node:crypto'
 import { getPaths } from './bootstrap/paths.ts'
 import { logger } from './log.ts'
+import { parseSha256, parseYtDlpVersion } from './tools-version.ts'
 import type { MediaVariant, PageFormat, RequestHeaders } from '../shared/types.ts'
 import {
   buildVariants,
+  directFormats,
   formatsFromPage,
   formatsFromYtDlp,
   selectDirectYtFormat,
+  type WantedFormat,
   type YtDlpFormat
 } from './youtube-ladder.ts'
 import { electronNodeRuntimeArgs, electronNodeRuntimeEnv } from './youtube-runtime.ts'
@@ -16,6 +20,10 @@ import { electronNodeRuntimeArgs, electronNodeRuntimeEnv } from './youtube-runti
 const log = logger('youtube')
 
 const YTDLP_URL = 'https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe'
+/** Metadata for the same release, which is where the version number lives. */
+const YTDLP_RELEASE_URL = 'https://api.github.com/repos/yt-dlp/yt-dlp/releases/latest'
+/** The digests GitHub publishes as an asset of that release. */
+const YTDLP_SUMS_URL = 'https://github.com/yt-dlp/yt-dlp/releases/latest/download/SHA2-256SUMS'
 const MIN_YTDLP_BYTES = 2_000_000
 // A normal metadata lookup takes a few seconds. A longer wait gives slow
 // connections room while ensuring a task cannot stay on "Getting the download
@@ -100,7 +108,8 @@ export async function refreshYouTubeFormat(
   pageUrl: string,
   headers: RequestHeaders | undefined,
   formatId: string,
-  force = true
+  force = true,
+  wanted?: WantedFormat
 ): Promise<string> {
   // Forced only when the URL Draco holds has expired, because the cached lookup
   // is where that expired URL came from. A download that is merely starting
@@ -115,20 +124,30 @@ export async function refreshYouTubeFormat(
   // The same guard the ladder applies, repeated at the point of use: this is
   // the only place a YouTube download URL comes from, and what reaches the
   // engine must be a file it can fetch rather than an HLS or DASH manifest.
-  let format = selectDirectYtFormat(info.formats ?? [], formatId)
+  let format = selectDirectYtFormat(info.formats ?? [], formatId, wanted)
   if (!format?.url && headers?.cookie) {
     // The real fallback case now: a video that genuinely needs the signed-in
     // session (age-gated, private, members-only) and only reveals this format
     // to an authenticated request.
     log.warn(`YouTube format ${formatId} was unavailable anonymously; retrying with the browser session`)
     info = await loadInfo(pageUrl, headers, true)
-    format = selectDirectYtFormat(info.formats ?? [], formatId)
+    format = selectDirectYtFormat(info.formats ?? [], formatId, wanted)
   }
   if (!format?.url) {
-    throw new Error(`YouTube format ${formatId} is no longer available`)
+    // Two very different failures used to share one message, and the one that
+    // actually happens is the second: yt-dlp answering with a ladder that has
+    // no fetchable media in it at all, which no choice of itag would have
+    // survived and which says nothing about the format the user picked.
+    const fetchable = directFormats(info.formats ?? []).length
+    throw new Error(
+      fetchable === 0
+        ? 'YouTube returned no downloadable media for this video. It may need a signed-in session, ' +
+          'or YouTube is asking for a token yt-dlp could not produce - updating yt-dlp usually fixes it.'
+        : `YouTube no longer offers format ${formatId}, and nothing comparable was on offer either`
+    )
   }
   if (format.format_id !== formatId) {
-    log.warn(`replacing non-direct YouTube format ${formatId} with ${format.format_id}`)
+    log.warn(`YouTube format ${formatId} unavailable; substituting ${format.format_id}`)
   }
   return format.url
 }
@@ -261,6 +280,57 @@ export async function ensureYtDlp(): Promise<string> {
   return ytdlpProvision
 }
 
+/**
+ * Replaces the copy in `%APPDATA%/Draco/bin` whatever is there already.
+ *
+ * yt-dlp is the part of this app with the shortest shelf life - YouTube changes
+ * and a build from three months ago starts answering "no downloadable formats".
+ * `ensureYtDlp` deliberately takes any working copy, so updating needs a door
+ * that does not.
+ */
+export async function reinstallYtDlp(): Promise<string> {
+  if (ytdlpProvision) return ytdlpProvision
+  ytdlpProvision = downloadYtDlp(getPaths().ytDlpExe).finally(() => {
+    ytdlpProvision = null
+  })
+  return ytdlpProvision
+}
+
+/** Where yt-dlp would come from right now, and whether Draco owns that copy. */
+export async function locateYtDlp(): Promise<{ path: string; managed: boolean } | null> {
+  const onPath = await findOnPath('yt-dlp.exe').catch(() => null)
+  if (onPath && (await usable(onPath))) return { path: onPath, managed: false }
+  const target = getPaths().ytDlpExe
+  if (await usable(target)) return { path: target, managed: true }
+  return null
+}
+
+/** The build's own version string, e.g. `2025.08.11`. */
+export async function ytDlpVersion(path: string): Promise<string | null> {
+  const { stdout } = await runCapture(path, ['--version'], 15_000).catch(() => ({ stdout: '' }))
+  return parseYtDlpVersion(stdout)
+}
+
+/** The version GitHub is currently calling latest, or null if it would not say. */
+export async function latestYtDlpVersion(): Promise<string | null> {
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), 20_000)
+  try {
+    const res = await fetch(YTDLP_RELEASE_URL, {
+      headers: { accept: 'application/vnd.github+json', 'user-agent': 'Draco' },
+      redirect: 'follow',
+      signal: controller.signal
+    })
+    if (!res.ok) return null
+    const body = JSON.parse((await res.text()).slice(0, 200_000)) as Record<string, unknown>
+    return typeof body.tag_name === 'string' ? parseYtDlpVersion(body.tag_name) : null
+  } catch {
+    return null
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
 async function provisionYtDlp(): Promise<string> {
   const existing = await findOnPath('yt-dlp.exe').catch(() => null)
   if (existing && await usable(existing)) {
@@ -271,6 +341,10 @@ async function provisionYtDlp(): Promise<string> {
   const target = getPaths().ytDlpExe
   if (await usable(target)) return target
 
+  return downloadYtDlp(target)
+}
+
+async function downloadYtDlp(target: string): Promise<string> {
   await mkdir(dirname(target), { recursive: true })
   const tmp = `${target}.download`
 
@@ -302,6 +376,8 @@ async function provisionYtDlp(): Promise<string> {
       throw new Error(`yt-dlp download was only ${body.length} bytes`)
     }
 
+    await verifyYtDlpDigest(body)
+
     await writeFile(tmp, body)
     await rm(target, { force: true })
     await rename(tmp, target)
@@ -316,6 +392,48 @@ async function provisionYtDlp(): Promise<string> {
   } finally {
     await rm(tmp, { force: true }).catch(() => {})
   }
+}
+
+/**
+ * Checks the executable against the digest list published with the release.
+ *
+ * This binary is downloaded and then run, so "it came over HTTPS" is not the
+ * whole story worth telling. An unreachable list is not fatal - it is a side
+ * file, not part of the download - but a list that disagrees is.
+ */
+async function verifyYtDlpDigest(body: Buffer): Promise<void> {
+  let expected: string | null = null
+  try {
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(), 20_000)
+    try {
+      const res = await fetch(YTDLP_SUMS_URL, {
+        redirect: 'follow',
+        headers: { 'user-agent': 'Draco' },
+        signal: controller.signal
+      })
+      if (res.ok) {
+        const text = (await res.text()).slice(0, 100_000)
+        const line = text.split('\n').find((entry) => /\syt-dlp\.exe\s*$/i.test(entry.trim()))
+        expected = line ? parseSha256(line) : null
+      }
+    } finally {
+      clearTimeout(timer)
+    }
+  } catch {
+    // Unverifiable, not wrong.
+  }
+
+  if (!expected) {
+    log.warn('no published digest for yt-dlp.exe; installing unverified')
+    return
+  }
+
+  const actual = createHash('sha256').update(body).digest('hex')
+  if (actual !== expected) {
+    throw new Error(`yt-dlp digest ${actual.slice(0, 16)}… does not match the published ${expected.slice(0, 16)}…`)
+  }
+  log.info('yt-dlp.exe matches its published sha256')
 }
 
 async function findOnPath(command: string): Promise<string | null> {

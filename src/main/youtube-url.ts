@@ -17,6 +17,25 @@ export function preparedYouTubeUrl(value: unknown, itag?: number): string | null
   }
 }
 
+/**
+ * The one answer to "is this a YouTube page we handle?".
+ *
+ * There used to be two, and they disagreed: the handoff path took `http:` but
+ * refused `music.youtube.com`, while the priming path did the opposite - so a
+ * video could be primed and then declined, or vice versa. Subdomains are in
+ * (music, m, www), other protocols are not.
+ */
+export function isSupportedYouTubeUrl(value: unknown): boolean {
+  if (typeof value !== 'string') return false
+  try {
+    const url = new URL(value)
+    if (url.protocol !== 'https:') return false
+    return /(^|\.)youtube\.com$/i.test(url.hostname) || /(^|\.)youtu\.be$/i.test(url.hostname)
+  } catch {
+    return false
+  }
+}
+
 export function variantsPreparedForStart(variants: MediaVariant[]): boolean {
   return variants.length > 0 && variants.every((variant) =>
     Boolean(variant.url) && (!variant.youtube?.audioFormatId || Boolean(variant.audioUrl))

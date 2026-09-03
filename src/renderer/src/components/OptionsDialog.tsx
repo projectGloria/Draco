@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import type { Category } from '@shared/types'
+import type { Category, ToolStatus } from '@shared/types'
 import { formatBytes, formatWhen } from '../lib/format'
 import { useApp } from '../store/app'
 import { reportError, toast } from '../store/toasts'
@@ -18,7 +18,14 @@ const TABS: Array<{ id: Tab; label: string }> = [
   { id: 'appearance', label: 'Appearance' }
 ]
 
-export default function OptionsDialog({ onClose }: { onClose(): void }): React.ReactElement {
+export default function OptionsDialog({
+  onClose,
+  onShowTools
+}: {
+  onClose(): void
+  /** Hands the helper-tool list to the one dialog that offers the update. */
+  onShowTools(tools: ToolStatus[]): void
+}): React.ReactElement {
   const [tab, setTab] = useState<Tab>('general')
 
   return (
@@ -46,7 +53,7 @@ export default function OptionsDialog({ onClose }: { onClose(): void }): React.R
         </aside>
 
         <div className="flex-1 min-w-0">
-          {tab === 'general' && <GeneralTab />}
+          {tab === 'general' && <GeneralTab onShowTools={onShowTools} />}
           {tab === 'connection' && <ConnectionTab />}
           {tab === 'categories' && <CategoriesTab />}
           {tab === 'browser' && <BrowserTab />}
@@ -119,11 +126,13 @@ function NumberField({
 
 /* ------------------------------------------------------------------ */
 
-function GeneralTab(): React.ReactElement {
+function GeneralTab({ onShowTools }: { onShowTools(tools: ToolStatus[]): void }): React.ReactElement {
   const settings = useApp((s) => s.settings)
   const categories = useApp((s) => s.categories)
   const patch = useApp((s) => s.patchSettings)
   const [checkingUpdate, setCheckingUpdate] = useState(false)
+  const [checkingTools, setCheckingTools] = useState(false)
+  const [toolSummary, setToolSummary] = useState<string | null>(null)
   const t = useT()
 
   return (
@@ -230,8 +239,42 @@ function GeneralTab(): React.ReactElement {
       <Toggle
         checked={settings.autoCheckUpdates}
         onChange={(next) => void patch({ autoCheckUpdates: next })}
-        label="Check the configured feed at startup"
+        label="Check for updates at startup"
+        hint="The feed above, and the versions of the helper tools below."
       />
+
+      <Field
+        label="Helper tools"
+        hint="ffmpeg and yt-dlp are fetched on first use rather than shipped. yt-dlp especially goes stale - YouTube changes, and an old copy starts reporting that a video has no downloadable formats."
+      >
+        <div className="flex items-center gap-2">
+          <div className="flex-1 text-[11.5px] text-faint leading-snug">
+            {toolSummary ?? 'Not checked yet'}
+          </div>
+          <GhostButton
+            disabled={checkingTools}
+            onClick={() => {
+              setCheckingTools(true)
+              void window.api
+                .getToolStatus(true)
+                .then((tools) => {
+                  setToolSummary(
+                    tools
+                      .map((tool) => `${tool.name} ${tool.installedVersion ?? 'not installed'}`)
+                      .join(' · ')
+                  )
+                  // The same dialog the startup check raises, so an update is
+                  // only ever offered from one place.
+                  onShowTools(tools)
+                })
+                .catch((error) => reportError('Could not check the helper tools', error))
+                .finally(() => setCheckingTools(false))
+            }}
+          >
+            {checkingTools ? 'Checking…' : 'Check'}
+          </GhostButton>
+        </div>
+      </Field>
 
       <div className="pt-1 border-t border-line">
         <Toggle
@@ -273,6 +316,9 @@ function ConnectionTab(): React.ReactElement {
   const [limitText, setLimitText] = useState(
     settings.speedLimit ? String(Math.round(settings.speedLimit / 1024)) : ''
   )
+  const [ceilingText, setCeilingText] = useState(
+    settings.adaptiveConnectionCeiling ? String(settings.adaptiveConnectionCeiling) : ''
+  )
   const [proxyText, setProxyText] = useState(settings.proxyUrl ?? '')
   const [quotaText, setQuotaText] = useState(
     settings.quotaBytes ? String(Math.round(settings.quotaBytes / (1024 * 1024))) : ''
@@ -282,6 +328,11 @@ function ConnectionTab(): React.ReactElement {
   )
 
   useEffect(() => setProxyText(settings.proxyUrl ?? ''), [settings.proxyUrl])
+  useEffect(() => {
+    setCeilingText(
+      settings.adaptiveConnectionCeiling ? String(settings.adaptiveConnectionCeiling) : ''
+    )
+  }, [settings.adaptiveConnectionCeiling])
   useEffect(() => {
     setQuotaText(settings.quotaBytes ? String(Math.round(settings.quotaBytes / (1024 * 1024))) : '')
   }, [settings.quotaBytes])
@@ -303,15 +354,33 @@ function ConnectionTab(): React.ReactElement {
           label="Connections per download"
           value={settings.maxConnectionsPerTask}
           min={1}
-          max={16}
+          max={64}
           onCommit={(next) => void patch({ maxConnectionsPerTask: next })}
         />
       </div>
       <p className="text-[11px] text-faint leading-relaxed -mt-2">
-        Connections are handed out as they free up, not split evenly up front. More than eight
-        rarely helps and some servers answer the extras with 429 — Draco backs off on its own when
-        that happens.
+        Connections are handed out as they free up, not split evenly up front, and Draco climbs to
+        this number only while the extra ones measurably raise throughput — a server that saturates
+        on four keeps four. So a high number costs a measurement rather than the connections, and
+        is worth trying on a host that throttles each one separately. It also backs off on its own
+        when a server answers with 429.
       </p>
+
+      <Field
+        label="Adaptive ceiling"
+        hint="Leave empty to stop at the number above. Set it higher to let Draco keep climbing past that on servers that reward it; a per-host rule still wins."
+      >
+        <input
+          value={ceilingText}
+          onChange={(event) => setCeilingText(event.target.value.replace(/[^0-9]/g, ''))}
+          onBlur={() => {
+            const next = Number(ceilingText)
+            void patch({ adaptiveConnectionCeiling: next > 0 ? next : null })
+          }}
+          placeholder="Same as above"
+          className="field text-[12.5px] tnum"
+        />
+      </Field>
 
       <div className="grid grid-cols-2 gap-3">
         <NumberField

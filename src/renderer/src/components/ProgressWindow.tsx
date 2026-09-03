@@ -198,13 +198,15 @@ function Body({ task, onClose }: { task: DownloadTask; onClose(): void }): React
         {done ? (
           <>
             <GhostButton onClick={onClose}>Close</GhostButton>
-            <GhostButton onClick={() => void window.api.revealFile(task.id)}>
+            <GhostButton onClick={() => void openThen(window.api.revealFile(task.id), onClose)}>
               <span className="flex items-center gap-1.5">
                 <FolderIcon className="w-3.5 h-3.5" />
                 Open folder
               </span>
             </GhostButton>
-            <PrimaryButton onClick={() => void window.api.openFile(task.id)}>Open</PrimaryButton>
+            <PrimaryButton onClick={() => void openThen(window.api.openFile(task.id), onClose)}>
+              Open
+            </PrimaryButton>
           </>
         ) : (
           <>
@@ -243,6 +245,20 @@ function Body({ task, onClose }: { task: DownloadTask; onClose(): void }): React
       </div>
     </>
   )
+}
+
+/**
+ * Handing the file to the shell is the end of this window's job, so it leaves.
+ *
+ * Only on success, though: a file that has been moved or deleted since it
+ * finished resolves false, and main has just flipped the task to `missing`.
+ * Closing then would take away the one card that says so, leaving a click that
+ * looks like it did nothing at all.
+ */
+function openThen(opened: Promise<boolean>, close: () => void): Promise<void> {
+  return opened.then((ok) => {
+    if (ok) close()
+  }).catch(() => {})
 }
 
 function Fact({ label, value }: { label: string; value: string }): React.ReactElement {

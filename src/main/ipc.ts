@@ -13,7 +13,8 @@ import type {
   RequestHeaders,
   Settings,
   SiteGrabOptions,
-  SiteGrabResult
+  SiteGrabResult,
+  ToolId
 } from '@shared/types'
 import { getPaths } from './bootstrap/paths.ts'
 import { checkRegistered, ensureRegistered, readExtensionId } from './bridge/integration.ts'
@@ -25,6 +26,7 @@ import { sanitizeFilename, uniquePath } from './engine/naming.ts'
 import type { DownloadManager } from './engine/manager.ts'
 import { probeUrl } from './engine/probe.ts'
 import { resolveVariants } from './hls/playlist.ts'
+import { getToolStatus, updateTool } from './tools.ts'
 import { checkForUpdates } from './update.ts'
 import { chosenYouTubeUrls } from './youtube-url.ts'
 import { getYouTubePrimeStatus } from './youtube.ts'
@@ -64,6 +66,12 @@ export interface AppContext {
   pendingHandoffs: HandoffRequest[]
   lastHandoffAt: number | null
   quit(): void
+  /**
+   * Starts or stops the clipboard poller. Injected for the same reason `quit`
+   * is: the watcher is owned by `index.ts`, and reaching back for it with a
+   * `require` produced a specifier no bundle ever contains.
+   */
+  setClipboardWatch(enabled: boolean): void
 }
 
 /**
@@ -201,8 +209,8 @@ export function registerIpc(ctx: AppContext): void {
   )
 
   handle('tasks:start', (ids: string[]) => ctx.manager.start(ids))
-  handle('tasks:pause', (ids: string[]) => ctx.manager.pause(ids))
-  handle('tasks:pauseAll', () => ctx.manager.pauseAll())
+  handle('tasks:pause', (ids: string[]) => ctx.manager.pause(ids, true))
+  handle('tasks:pauseAll', () => ctx.manager.pauseAll(true))
   handle('tasks:remove', (ids: string[], deleteFiles: boolean) =>
     ctx.manager.remove(ids, deleteFiles)
   )
@@ -266,32 +274,31 @@ export function registerIpc(ctx: AppContext): void {
       queueId: task.queueId,
       kind: task.kind,
       audioUrl: task.audioUrl,
-      youtube: task.youtube ? { pageUrl: task.youtube.pageUrl, videoFormatId: task.youtube.videoFormatId, audioFormatId: task.youtube.audioFormatId ?? null } : undefined
+      youtube: task.youtube ? { pageUrl: task.youtube.pageUrl, videoFormatId: task.youtube.videoFormatId, audioFormatId: task.youtube.audioFormatId ?? null, height: task.youtube.height ?? null } : undefined
     })
     ctx.manager.add(fresh, true)
     announce(fresh)
   })
 
+  /*
+   * Both of these answer whether the file was actually handed to the shell.
+   * The progress window closes itself on a true - that is what finishing a
+   * download and pressing Open means - and stays put on a false, because the
+   * window has just become the only place the "missing" state is visible.
+   */
   handle('tasks:open', async (id: string) => {
-    const task = ctx.manager.get(id)
-    if (!task) return
-    const target = join(task.dir, task.filename)
-    // openPath on a missing file silently does nothing, which reads as a broken
-    // button; surfacing the state is better.
-    try {
-      await access(target, constants.F_OK)
-    } catch {
-      task.status = 'missing'
-      broadcast('tasks:changed', ctx.manager.list())
-      return
-    }
-    await shell.openPath(target)
+    const target = await openable(ctx, id)
+    if (!target) return false
+    // openPath resolves to an error string rather than rejecting; an empty one
+    // is the only success.
+    return (await shell.openPath(target)) === ''
   })
 
-  handle('tasks:reveal', (id: string) => {
-    const task = ctx.manager.get(id)
-    if (!task) return
-    shell.showItemInFolder(join(task.dir, task.filename))
+  handle('tasks:reveal', async (id: string) => {
+    const target = await openable(ctx, id)
+    if (!target) return false
+    shell.showItemInFolder(target)
+    return true
   })
 
   /* the confirm window */
@@ -349,6 +356,12 @@ export function registerIpc(ctx: AppContext): void {
     // placeholder. The engine resolves those itags after this window closes,
     // so an unavoidable player challenge never traps the user in a modal.
     const urls = resolveChosenUrls(candidate, opts)
+    // The rung behind the chosen itag, kept so a refresh can still find this
+    // quality if yt-dlp turns out not to list that itag at all.
+    const chosenFormatId = opts.youtube?.videoFormatId
+    const chosen = chosenFormatId
+      ? candidate.variants.find((v) => v.youtube?.videoFormatId === chosenFormatId)
+      : undefined
 
     takeHandoff(id)
 
@@ -356,7 +369,14 @@ export function registerIpc(ctx: AppContext): void {
       url: urls.url,
       sourceUrl: candidate.pageUrl,
       audioUrl: urls.audioUrl,
-      youtube: opts.youtube ? { pageUrl: candidate.pageUrl, videoFormatId: opts.youtube.videoFormatId, audioFormatId: opts.youtube.audioFormatId ?? null } : undefined,
+      youtube: opts.youtube
+        ? {
+            pageUrl: candidate.pageUrl,
+            videoFormatId: opts.youtube.videoFormatId,
+            audioFormatId: opts.youtube.audioFormatId ?? null,
+            height: chosen?.height ?? null
+          }
+        : undefined,
       filename: opts.filename,
       dir: opts.dir,
       categoryId: opts.categoryId,
@@ -408,10 +428,7 @@ export function registerIpc(ctx: AppContext): void {
     }
     const next = await saveSettings(patch)
     ctx.manager.applySettings()
-    if (patch.watchClipboard !== undefined) {
-      const { updateClipboardWatcher } = require('./index.ts')
-      updateClipboardWatcher(patch.watchClipboard)
-    }
+    if (patch.watchClipboard !== undefined) ctx.setClipboardWatch(patch.watchClipboard === true)
     return next
   })
 
@@ -446,6 +463,9 @@ export function registerIpc(ctx: AppContext): void {
       lastHandoffAt: ctx.lastHandoffAt
     }
   })
+
+  handle('tools:status', (checkLatest: boolean) => getToolStatus(checkLatest === true))
+  handle('tools:update', (id: ToolId) => updateTool(id))
 
   handle('clipboard:write', (text: string) => clipboard.writeText(String(text)))
   handle('updates:check', () => checkForUpdates(getSettings().updateFeedUrl))
@@ -491,6 +511,28 @@ export function registerIpc(ctx: AppContext): void {
   ipcMain.handle('window:closeSelf', (event) => {
     BrowserWindow.fromWebContents(event.sender)?.close()
   })
+}
+
+/**
+ * The path to hand the shell, or null when there is nothing to hand it.
+ *
+ * openPath and showItemInFolder both fail silently on a file that is no longer
+ * there, which reads as a broken button. Checking first turns that into the
+ * `missing` state the list and the progress window already know how to show.
+ */
+async function openable(ctx: AppContext, id: string): Promise<string | null> {
+  const task = ctx.manager.get(id)
+  if (!task) return null
+
+  const target = join(task.dir, task.filename)
+  try {
+    await access(target, constants.F_OK)
+  } catch {
+    task.status = 'missing'
+    broadcast('tasks:changed', ctx.manager.list())
+    return null
+  }
+  return target
 }
 
 function persistTaskSnapshot(ctx: AppContext): void {

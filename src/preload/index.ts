@@ -10,7 +10,8 @@ import type {
   RequestHeaders,
   Settings,
   TaskProgress,
-  Toast
+  Toast,
+  ToolStatus
 } from '@shared/types'
 
 /**
@@ -84,6 +85,9 @@ const api: RendererApi = {
   registerIntegration: () => ipcRenderer.invoke('integration:register'),
   copyToClipboard: (text: string) => ipcRenderer.invoke('clipboard:write', text),
   checkForUpdates: () => ipcRenderer.invoke('updates:check'),
+  getToolStatus: (checkLatest: boolean) => ipcRenderer.invoke('tools:status', checkLatest),
+  updateTool: (id) => ipcRenderer.invoke('tools:update', id),
+  onToolUpdates: (cb) => subscribe<ToolStatus[]>('tools:updates', cb),
   openUpdate: (url: string) => ipcRenderer.invoke('updates:open', url),
   startSiteGrab: (options) => ipcRenderer.invoke('siteGrabber:start', options),
   listSiteGrabs: () => ipcRenderer.invoke('siteGrabber:list'),

@@ -1,4 +1,5 @@
-import { createWriteStream } from 'node:fs'
+import { createHash } from 'node:crypto'
+import { createReadStream, createWriteStream } from 'node:fs'
 import { mkdir, mkdtemp, readdir, rename, rm, stat } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
@@ -7,6 +8,7 @@ import { pipeline } from 'node:stream/promises'
 import { spawn } from 'node:child_process'
 import { getPaths } from '../bootstrap/paths.ts'
 import { logger } from '../log.ts'
+import { parseFfmpegVersion, parseSha256 } from '../tools-version.ts'
 
 const log = logger('ffmpeg')
 
@@ -25,10 +27,19 @@ const log = logger('ffmpeg')
  * fallback: a stable URL worth having, but 170 MB is a lot of transfer to ask a
  * flaky connection to complete in one piece.
  */
-const SOURCES = [
-  'https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip',
-  'https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip'
+const SOURCES: Array<{ url: string; sha256Url?: string }> = [
+  {
+    url: 'https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip',
+    // Published beside the archive, so the thing we are about to run can be
+    // checked against what the publisher says it should be rather than trusted
+    // on the strength of the transport alone.
+    sha256Url: 'https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip.sha256'
+  },
+  { url: 'https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip' }
 ]
+
+/** Where the release channel publishes the version number on its own. */
+const VERSION_URL = 'https://www.gyan.dev/ffmpeg/builds/release-version'
 
 /** Anything smaller is a redirect stub or an error page, not a build archive. */
 const MIN_ZIP_BYTES = 10_000_000
@@ -76,17 +87,68 @@ async function provision(onProgress?: (p: ProvisionProgress) => void): Promise<s
     return onPath
   }
 
+  return installFromSources(target, onProgress)
+}
+
+/**
+ * Fetches a build into `%APPDATA%/Draco/bin`, whatever is there already.
+ *
+ * Separate from `provision` because updating is the one caller that must not
+ * take the copy in hand as an answer - that copy is the thing being replaced.
+ */
+export async function reinstallFfmpeg(onProgress?: (p: ProvisionProgress) => void): Promise<string> {
+  if (inFlight) return inFlight
+  inFlight = installFromSources(getPaths().ffmpegExe, onProgress).finally(() => {
+    inFlight = null
+  })
+  return inFlight
+}
+
+/** Where ffmpeg would come from right now, and whether Draco owns that copy. */
+export async function locateFfmpeg(): Promise<{ path: string; managed: boolean } | null> {
+  const target = getPaths().ffmpegExe
+  if (await isUsable(target)) return { path: target, managed: true }
+  const onPath = await findOnPath('ffmpeg.exe')
+  if (onPath && (await isUsable(onPath))) return { path: onPath, managed: false }
+  return null
+}
+
+/** The version string of a build, e.g. `7.1` from ffmpeg's own banner. */
+export async function ffmpegVersion(path: string): Promise<string | null> {
+  const output = await capture(path, ['-version'])
+  return parseFfmpegVersion(output)
+}
+
+/** The version the release channel is publishing, or null if it would not say. */
+export async function latestFfmpegVersion(): Promise<string | null> {
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), CONNECT_TIMEOUT_MS)
+  try {
+    const res = await fetch(VERSION_URL, { redirect: 'follow', signal: controller.signal })
+    if (!res.ok) return null
+    return parseFfmpegVersion((await res.text()).slice(0, 200))
+  } catch {
+    return null
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+async function installFromSources(
+  target: string,
+  onProgress?: (p: ProvisionProgress) => void
+): Promise<string> {
   await mkdir(dirname(target), { recursive: true })
 
   let lastError: Error | null = null
-  for (const url of SOURCES) {
+  for (const source of SOURCES) {
     try {
-      await install(url, target, onProgress)
-      log.info(`installed ffmpeg from ${url}`)
+      await install(source, target, onProgress)
+      log.info(`installed ffmpeg from ${source.url}`)
       return target
     } catch (err) {
       lastError = err instanceof Error ? err : new Error(String(err))
-      log.warn(`ffmpeg source failed (${url}): ${lastError.message}`)
+      log.warn(`ffmpeg source failed (${source.url}): ${lastError.message}`)
     }
   }
 
@@ -94,10 +156,11 @@ async function provision(onProgress?: (p: ProvisionProgress) => void): Promise<s
 }
 
 async function install(
-  url: string,
+  source: { url: string; sha256Url?: string },
   target: string,
   onProgress?: (p: ProvisionProgress) => void
 ): Promise<void> {
+  const url = source.url
   const work = await mkdtemp(join(tmpdir(), 'draco-ffmpeg-'))
   const zipPath = join(work, 'build.zip')
 
@@ -107,6 +170,8 @@ async function install(
     // ("Muxing") is left on screen describing the wrong thing entirely.
     onProgress?.({ stage: 'downloading', percent: null })
     await download(url, zipPath, onProgress)
+
+    if (source.sha256Url) await verifyDigest(zipPath, source.sha256Url)
 
     onProgress?.({ stage: 'extracting', percent: null })
 
@@ -219,6 +284,56 @@ async function download(
   } finally {
     clearTimeout(stall)
   }
+}
+
+/**
+ * Checks the archive against the digest its publisher lists beside it.
+ *
+ * HTTPS says the bytes came from that host unaltered; it says nothing about
+ * whether the host is serving what it published. This is one extra request for
+ * a file that is about to be executed on the user's machine, so it is cheap at
+ * the price. A digest that cannot be fetched is not fatal - the publisher's
+ * side file is not part of the contract - but one that disagrees is.
+ */
+async function verifyDigest(archivePath: string, sha256Url: string): Promise<void> {
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), CONNECT_TIMEOUT_MS)
+
+  let published: string | null = null
+  try {
+    const res = await fetch(sha256Url, { redirect: 'follow', signal: controller.signal })
+    if (res.ok) published = parseSha256(await res.text())
+  } catch {
+    // Fall through: unverifiable, not wrong.
+  } finally {
+    clearTimeout(timer)
+  }
+
+  if (!published) {
+    log.warn(`no published digest for ${sha256Url}; installing unverified`)
+    return
+  }
+
+  const hash = createHash('sha256')
+  await pipeline(createReadStream(archivePath), hash)
+  const actual = hash.digest('hex')
+  if (actual !== published) {
+    throw new Error(`Archive digest ${actual.slice(0, 16)}… does not match the published ${published.slice(0, 16)}…`)
+  }
+  log.info('ffmpeg archive matches its published sha256')
+}
+
+/** Runs a binary for its own output; used only for version banners. */
+function capture(command: string, args: string[]): Promise<string> {
+  return new Promise((resolve) => {
+    const child = spawn(command, args, { shell: false, windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'] })
+    let stdout = ''
+    child.stdout.on('data', (chunk: Buffer) => {
+      stdout = (stdout + chunk.toString('utf8')).slice(0, 4096)
+    })
+    child.on('error', () => resolve(''))
+    child.on('close', () => resolve(stdout))
+  })
 }
 
 /** Depth-first search for a filename inside an extracted tree. */

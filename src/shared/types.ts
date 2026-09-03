@@ -88,8 +88,21 @@ export interface DownloadTask {
   sourceUrl?: string
   /** The separate audio stream URL to fetch and mux, if any. */
   audioUrl?: string | null
-  /** Stable source identity for expiring signed streams (currently YouTube). */
-  youtube?: { pageUrl: string; videoFormatId: string; audioFormatId?: string | null; role?: 'video' | 'audio' }
+  /**
+   * Stable source identity for expiring signed streams (currently YouTube).
+   *
+   * `height` is the rung the user actually chose. The itags beside it are the
+   * *page's* names for it, and yt-dlp - a different YouTube client - does not
+   * always list the same ones, so the rung is what a refresh falls back to when
+   * an itag has no counterpart in yt-dlp's ladder.
+   */
+  youtube?: {
+    pageUrl: string
+    videoFormatId: string
+    audioFormatId?: string | null
+    height?: number | null
+    role?: 'video' | 'audio'
+  }
   /** Where the redirects actually landed; this is what the workers request. */
   finalUrl: string
   filename: string
@@ -104,6 +117,12 @@ export interface DownloadTask {
   queueId: string | null
   queueRetryCount: number
   nextQueueAttemptAt: number | null
+  /**
+   * The user stopped this one by hand, so a running queue must leave it alone.
+   * Without it the scheduler treated every `paused` task as "waiting its turn"
+   * and started it again within the half-minute.
+   */
+  manualPause: boolean
   kind: TaskKind
   /** Total bytes, or null when the server would not say. */
   size: number | null
@@ -157,7 +176,7 @@ export interface NewDownload {
   sourceUrl?: string
   audioUrl?: string | null
   /** Stable YouTube format identity used to refresh expiring signed URLs. */
-  youtube?: { pageUrl: string; videoFormatId: string; audioFormatId?: string | null }
+  youtube?: { pageUrl: string; videoFormatId: string; audioFormatId?: string | null; height?: number | null }
   filename?: string
   dir?: string
   categoryId?: string | null
@@ -300,6 +319,13 @@ export interface Settings {
   maxConcurrentTasks: number
   /** Connection budget per task - IDM's "max connections". */
   maxConnectionsPerTask: number
+  /**
+   * How far the adaptive ramp may climb when the extra connections keep
+   * earning their keep, or null to stop at `maxConnectionsPerTask`. It is only
+   * ever reached on a server that measurably rewards them; a per-host rule
+   * still overrides it.
+   */
+  adaptiveConnectionCeiling: number | null
   /** A segment is only split when its remaining bytes exceed this. */
   minSplitSize: number
   /** Global cap in bytes/sec, or null for unlimited. */
@@ -453,6 +479,24 @@ export interface UpdateInfo {
   notes: string | null
 }
 
+/** The external binaries Draco fetches on demand rather than shipping. */
+export type ToolId = 'ffmpeg' | 'yt-dlp'
+
+export interface ToolStatus {
+  id: ToolId
+  name: string
+  /** One line on what breaks without it, for the panel that offers the update. */
+  purpose: string
+  /** Where the copy in use lives, or null when there is not one yet. */
+  path: string | null
+  /** True only for the copy under %APPDATA%/Draco/bin - the one Draco may replace. */
+  managed: boolean
+  installedVersion: string | null
+  latestVersion: string | null
+  updateAvailable: boolean
+  error: string | null
+}
+
 export interface SiteGrabOptions {
   startUrl: string
   maxDepth: number
@@ -516,8 +560,9 @@ export interface RendererApi {
   removeCompleted(): Promise<void>
   updateTask(id: string, patch: Partial<DownloadTask>): Promise<DownloadTask | null>
   redownload(id: string): Promise<void>
-  openFile(id: string): Promise<void>
-  revealFile(id: string): Promise<void>
+  /** Both resolve false when the file is gone, having marked the task missing. */
+  openFile(id: string): Promise<boolean>
+  revealFile(id: string): Promise<boolean>
   onTasksChanged(cb: (tasks: DownloadTask[]) => void): () => void
   onProgress(cb: (updates: TaskProgress[]) => void): () => void
 
@@ -556,6 +601,11 @@ export interface RendererApi {
   copyToClipboard(text: string): Promise<void>
   checkForUpdates(): Promise<UpdateInfo>
   openUpdate(url: string): Promise<void>
+  /** `checkLatest: false` reads the disk only; true also asks the publishers. */
+  getToolStatus(checkLatest: boolean): Promise<ToolStatus[]>
+  updateTool(id: ToolId): Promise<ToolStatus>
+  /** Fired once per run when a fetched-on-demand binary has fallen behind. */
+  onToolUpdates(cb: (tools: ToolStatus[]) => void): () => void
   startSiteGrab(options: SiteGrabOptions): Promise<SiteGrabResult>
   listSiteGrabs(): Promise<SiteGrabProject[]>
   runSiteGrab(id: string): Promise<SiteGrabResult>

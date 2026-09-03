@@ -2,7 +2,8 @@ import type { FileHandle } from 'node:fs/promises'
 import { request } from 'undici'
 import type { Segment } from '../../shared/types.ts'
 import { getDispatcher } from './http.ts'
-import type { RateLimiter } from './limiter.ts'
+import { QuotaExceededError, type RateLimiter } from './limiter.ts'
+import { logger } from '../log.ts'
 import { Segmenter } from './segmenter.ts'
 
 /**
@@ -12,6 +13,8 @@ import { Segmenter } from './segmenter.ts'
  * connections share a single file handle without seeking over each other -
  * segments never overlap, so there is nothing to lock.
  */
+
+const log = logger('worker')
 
 export class AbortedError extends Error {
   constructor() {
@@ -83,6 +86,11 @@ export interface SegmentContext {
   retryLimit: number
   expectedSize: number | null
   signal: AbortSignal
+  /**
+   * How much this connection may hold back before issuing one positioned
+   * write. Never larger than the segmenter's minimum split - see the read loop.
+   */
+  writeBufferBytes: number
   /** Called after every write so the task can update speed and journal state. */
   onBytes(count: number): void
 }
@@ -99,6 +107,10 @@ export async function runSegment(seg: Segment, ctx: SegmentContext): Promise<voi
     } catch (err) {
       if (err instanceof AbortedError || ctx.signal.aborted) throw new AbortedError()
       if (err instanceof NotResumableError) throw err
+
+      // Retrying would only spend the budget that is already gone, five times
+      // over. The task stops and the manager restarts it when the window turns.
+      if (err instanceof QuotaExceededError) throw err
 
       // Do not burn this segment's retry budget arguing with a connection
       // limit. Hand it back so the task can drop a connection and requeue it.
@@ -121,6 +133,9 @@ export async function runSegment(seg: Segment, ctx: SegmentContext): Promise<voi
       // Exponential backoff with jitter, so a flaky server does not get hit by
       // every segment in lockstep on the same schedule.
       const backoff = Math.min(30_000, 500 * 2 ** (attempt - 1))
+      log.warn(
+        `segment ${seg.start}-${seg.end} retry ${attempt}/${ctx.retryLimit} in ${backoff}ms: ${err instanceof Error ? err.message : String(err)}`
+      )
       await delay(backoff + Math.random() * 250, ctx.signal)
     }
   }
@@ -207,6 +222,65 @@ async function attemptSegment(seg: Segment, ctx: SegmentContext): Promise<void> 
   // A socket close during an async gap becomes a normal stream error instead
   // of a fatal assertion.
   const reader = ReadableStream.from(res.body).getReader()
+
+  /*
+   * Socket chunks are gathered and landed with a single vectored write.
+   *
+   * undici hands over 16-64 KB at a time. Writing each one straight through
+   * costs its own libuv threadpool round-trip and, on the sparse part file,
+   * its own NTFS extent - thousands of both per second at a gigabit, across
+   * every segment of every task. `writev` takes the chunks as they are, so the
+   * batching costs no copying: the saving is in syscalls and in an extent map
+   * that stays small enough not to punish whoever reads the file afterwards.
+   *
+   * Holding chunks back means `seg.position` lags reality, and `Segmenter.split`
+   * picks its midpoint from exactly that number. The caller therefore caps a
+   * batch at the segmenter's minimum split size: a split always leaves at
+   * least that much room ahead of the position it read, so bytes in hand stay
+   * behind the new end. `commit` re-checks anyway, because `end` can also move
+   * while a write is in flight.
+   */
+  const capacity = Math.max(1, Math.floor(ctx.writeBufferBytes))
+  let pending: Uint8Array[] = []
+  let buffered = 0
+
+  /**
+   * Lands one contiguous run at `seg.position` and accounts for it.
+   *
+   * The advance is clamped to what the segment still owns once the write
+   * returns, not to what it owned when the run was gathered. Anything past
+   * that was handed to another connection in the meantime; it is written but
+   * not claimed, and the connection that now owns it writes the same bytes at
+   * the same offsets. Returns false when the run was cut short that way.
+   */
+  const commit = async (chunks: Uint8Array[], total: number): Promise<boolean> => {
+    if (total === 0) return true
+
+    const at = seg.position
+    await writeAtFully(ctx.fh, chunks, at)
+
+    const room = seg.end < 0 ? total : Math.max(0, seg.end - at + 1)
+    const landed = Math.min(total, room)
+    if (landed <= 0) return false
+
+    seg.position = at + landed
+    ctx.onBytes(landed)
+
+    // Pay for the bytes only after they are safely written. Awaiting here is
+    // what applies backpressure all the way down to the socket.
+    await ctx.limiter.consume(landed, ctx.signal)
+    return landed === total
+  }
+
+  const flushPending = async (): Promise<boolean> => {
+    if (buffered === 0) return true
+    const chunks = pending
+    const total = buffered
+    pending = []
+    buffered = 0
+    return commit(chunks, total)
+  }
+
   try {
     for (;;) {
       if (ctx.signal.aborted) throw new AbortedError()
@@ -214,26 +288,29 @@ async function attemptSegment(seg: Segment, ctx: SegmentContext): Promise<void> 
       const { done, value } = await reader.read()
       if (done) break
 
-      const buf = value as Buffer
+      const buf = value as Uint8Array
 
       // The segment's `end` can move backwards underneath us: the segmenter
       // shrinks it when it hands our tail to a newly-idle connection. Anything
-      // past the current end now belongs to another worker.
-      const allowed = seg.end < 0 ? buf.length : Math.min(buf.length, seg.end - seg.position + 1)
+      // past the current end now belongs to another worker. Gathered chunks
+      // have not moved `position` yet, so they count against the room this one
+      // has left.
+      const room = seg.end < 0 ? buf.length : seg.end - (seg.position + buffered) + 1
+      const allowed = Math.min(buf.length, Math.max(0, room))
       if (allowed <= 0) break
 
-      const slice = allowed === buf.length ? buf : buf.subarray(0, allowed)
-      await writeAtFully(ctx.fh, slice, seg.position)
+      pending.push(allowed === buf.length ? buf : buf.subarray(0, allowed))
+      buffered += allowed
 
-      seg.position += slice.length
-      ctx.onBytes(slice.length)
-
-      // Pay for the bytes only after they are safely written. Awaiting here is
-      // what applies backpressure all the way down to the socket.
-      await ctx.limiter.consume(slice.length, ctx.signal)
+      if (buffered >= capacity && !(await flushPending())) break
 
       if (allowed < buf.length) break
     }
+
+    // Only on the way out cleanly. An abort or a stream error drops whatever is
+    // still gathered, which costs at most one batch of re-downloading and keeps
+    // `position` describing bytes that reached the disk and nothing else.
+    await flushPending()
   } finally {
     reader.releaseLock()
     await res.body.dump().catch(() => {})
@@ -246,15 +323,43 @@ async function attemptSegment(seg: Segment, ctx: SegmentContext): Promise<void> 
   }
 }
 
-async function writeAtFully(fh: FileHandle, buffer: Buffer, position: number): Promise<void> {
+/**
+ * Writes every gathered chunk at `position`, retrying whatever a short write
+ * leaves behind. One chunk goes through `write`, which skips assembling the
+ * iovec for the common case of a batch that filled on its first read.
+ */
+async function writeAtFully(fh: FileHandle, chunks: Uint8Array[], position: number): Promise<void> {
+  let index = 0
+  let within = 0
   let offset = 0
-  while (offset < buffer.length) {
-    const result = await fh.write(buffer, offset, buffer.length - offset, position + offset)
-    const written = result.bytesWritten
+  const total = chunks.reduce((sum, chunk) => sum + chunk.length, 0)
+
+  while (offset < total) {
+    const head = chunks[index]
+    const rest = within > 0 ? [head.subarray(within), ...chunks.slice(index + 1)] : chunks.slice(index)
+
+    const written = rest.length === 1
+      ? (await fh.write(rest[0], 0, rest[0].length, position + offset)).bytesWritten
+      : (await fh.writev(rest, position + offset)).bytesWritten
+
     if (!Number.isSafeInteger(written) || written <= 0) {
       throw new Error('File write made no progress')
     }
     offset += written
+
+    // Walk the cursor past whatever the short write did land.
+    let remaining = written
+    while (remaining > 0) {
+      const left = chunks[index].length - within
+      if (remaining < left) {
+        within += remaining
+        remaining = 0
+      } else {
+        remaining -= left
+        index++
+        within = 0
+      }
+    }
   }
 }
 

@@ -46,6 +46,7 @@ import {
   saveSiteProjects
 } from './store.ts'
 import { createTray, destroyTray } from './tray.ts'
+import { getToolStatus } from './tools.ts'
 import { checkForUpdates } from './update.ts'
 import {
   broadcast,
@@ -67,6 +68,7 @@ import {
   resolveYouTube,
   resolveYouTubeInstant
 } from './youtube.ts'
+import { isSupportedYouTubeUrl } from './youtube-url.ts'
 
 const log = logger('main')
 
@@ -244,9 +246,15 @@ async function main(): Promise<void> {
     createDashRunner: (task, context) => new DashRunner(task, context),
     refreshYouTube: async (task, force) => {
       if (!task.youtube) throw new Error('Missing YouTube source metadata')
-      const formatId = task.youtube.role === 'audio' ? task.youtube.audioFormatId : task.youtube.videoFormatId
+      const audio = task.youtube.role === 'audio'
+      const formatId = audio ? task.youtube.audioFormatId : task.youtube.videoFormatId
       if (!formatId) throw new Error('Missing YouTube format identity')
-      return refreshYouTubeFormat(task.youtube.pageUrl, task.headers, formatId, force)
+      // What the itag was a name for, so a format yt-dlp has never heard of
+      // resolves to the same quality rather than failing the download.
+      return refreshYouTubeFormat(task.youtube.pageUrl, task.headers, formatId, force, {
+        kind: audio ? 'audio' : 'video',
+        height: audio ? null : task.youtube.height ?? null
+      })
     }
   })
 
@@ -287,7 +295,8 @@ async function main(): Promise<void> {
     media: [],
     pendingHandoffs: [],
     lastHandoffAt: null,
-    quit
+    quit,
+    setClipboardWatch: updateClipboardWatcher
   }
 
   registerIpc(ctx)
@@ -372,12 +381,36 @@ function finish(): void {
       })
       .catch((error) => log.warn(`automatic update check failed: ${String(error)}`))
   }
+
+  if (updateSettings.autoCheckUpdates) void announceToolUpdates()
   log.info('ready')
 }
 
 /* ------------------------------------------------------------------ */
 /* Bootstrap plumbing                                                  */
 /* ------------------------------------------------------------------ */
+
+/**
+ * Asks the two fetched binaries' publishers whether they have moved on, and
+ * tells the window if they have.
+ *
+ * Delayed and fire-and-forget: it is two HTTPS requests and two `-version`
+ * spawns, none of which anybody is waiting for, and startup is already busy.
+ * Only ever announced - nothing installs itself, the same rule the app's own
+ * update check follows.
+ */
+async function announceToolUpdates(): Promise<void> {
+  await new Promise((resolve) => setTimeout(resolve, 10_000))
+  try {
+    const tools = await getToolStatus(true)
+    const behind = tools.filter((tool) => tool.updateAvailable)
+    if (behind.length === 0) return
+    log.info(`tool updates available: ${behind.map((t) => `${t.name} ${t.latestVersion}`).join(', ')}`)
+    send('tools:updates', behind)
+  } catch (error) {
+    log.warn(`tool update check failed: ${String(error)}`)
+  }
+}
 
 function freshState(): BootstrapState {
   return {
@@ -565,7 +598,7 @@ async function handleHostMessageOnce(ctx: AppContext, message: HostMessage): Pro
     case 'youtube': {
       try {
         const handoffStartedAt = Date.now()
-        if (!/^https?:\/\/(?:www\.|m\.)?(?:youtube\.com)(?:\/|$)|^https?:\/\/youtu\.be\//i.test(message.pageUrl)) {
+        if (!isSupportedYouTubeUrl(message.pageUrl)) {
           return { ok: false, error: 'Not a supported YouTube URL' }
         }
 
@@ -695,18 +728,6 @@ async function handleHostMessageOnce(ctx: AppContext, message: HostMessage): Pro
 
     default:
       return { ok: false, error: 'unknown message type' }
-  }
-}
-
-function isSupportedYouTubeUrl(value: string): boolean {
-  try {
-    const url = new URL(value)
-    return url.protocol === 'https:' && (
-      /(^|\.)youtube\.com$/i.test(url.hostname) ||
-      /(^|\.)youtu\.be$/i.test(url.hostname)
-    )
-  } catch {
-    return false
   }
 }
 

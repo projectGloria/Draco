@@ -1,5 +1,6 @@
 import { spawn, type ChildProcess } from 'node:child_process'
-import { rm } from 'node:fs/promises'
+import { rm, stat, statfs } from 'node:fs/promises'
+import { dirname } from 'node:path'
 import { logger } from '../log.ts'
 
 const log = logger('mux')
@@ -52,8 +53,53 @@ export async function mux(options: MuxOptions): Promise<void> {
 
   args.push(outputPath)
 
+  await ensureSpaceFor([inputPath, ...(audioInputPath ? [audioInputPath] : [])], outputPath)
+
   await runFfmpeg(ffmpegPath, args, signal, outputPath)
   log.info(`muxed ${outputPath}`)
+}
+
+/**
+ * `-c copy` writes a second copy of every byte it was given, so the merge needs
+ * as much free space again as the parts already take. Out of space, ffmpeg only
+ * says "Invalid argument" on the last line of its log, and the download that
+ * did finish looks like it failed - so ask the volume first and say plainly
+ * what is missing.
+ */
+async function ensureSpaceFor(inputs: string[], outputPath: string): Promise<void> {
+  let needed = 0
+  for (const path of inputs) {
+    try {
+      needed += (await stat(path)).size
+    } catch {
+      return
+    }
+  }
+
+  let free: number
+  try {
+    const fs = await statfs(dirname(outputPath))
+    free = Number(fs.bsize) * Number(fs.bavail)
+  } catch {
+    return
+  }
+
+  if (free >= needed) return
+  throw new MuxError(
+    `Not enough free space to merge: needs ${formatBytes(needed)}, ` +
+      `${formatBytes(free)} free. Free up space and start the download again.`
+  )
+}
+
+function formatBytes(bytes: number): string {
+  const units = ['B', 'KB', 'MB', 'GB', 'TB']
+  let value = bytes
+  let unit = 0
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024
+    unit++
+  }
+  return `${value < 10 && unit > 0 ? value.toFixed(1) : Math.round(value)} ${units[unit]}`
 }
 
 function runFfmpeg(

@@ -11,6 +11,26 @@ export interface QuotaState {
   startedAt: number
 }
 
+/**
+ * The rolling transfer budget is spent.
+ *
+ * Thrown rather than waited out. Sitting on the budget until the window rolls
+ * over can mean an hour of holding an open socket that reads nothing, and
+ * undici's `bodyTimeout` kills that long before the quota returns - so the user
+ * lost the download to a timeout that had nothing to do with what happened.
+ * Failing fast lets the manager park the task and start it again itself.
+ */
+export class QuotaExceededError extends Error {
+  /** When the current window rolls over and the budget is whole again. */
+  readonly resumesAt: number
+
+  constructor(resumesAt: number) {
+    super('Transfer quota reached')
+    this.name = 'QuotaExceededError'
+    this.resumesAt = resumesAt
+  }
+}
+
 export class RateLimiter {
   private bytesPerSecond = Infinity
   private tokens = Infinity
@@ -101,10 +121,8 @@ export class RateLimiter {
     if (this.quotaBytes !== Infinity) {
       this.refillQuota()
       this.quotaUsed += bytes
-      while (this.quotaUsed > this.quotaBytes) {
-        const waitMs = this.quotaStartedAt + this.quotaWindowMs - Date.now()
-        await delay(Math.min(Math.max(waitMs, 5), 250), signal)
-        this.refillQuota()
+      if (this.quotaUsed > this.quotaBytes) {
+        throw new QuotaExceededError(this.quotaStartedAt + this.quotaWindowMs)
       }
     }
   }

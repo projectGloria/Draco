@@ -128,3 +128,33 @@ test('a restored quality still knows the container it will be saved as', () => {
   assert.equal(candidate.variants[1].container, null)
   assert.equal(candidate.variants[2].container, null)
 })
+
+test('the adaptive ceiling is off by default and only ever bounded, not second-guessed', () => {
+  const base = defaults()
+  const columns = () => base.columns
+
+  // Absent, zero and nonsense all mean the same thing: stop at the configured
+  // connection count.
+  assert.equal(sanitizeSettings({}, base, columns).adaptiveConnectionCeiling, null)
+  assert.equal(sanitizeSettings({ adaptiveConnectionCeiling: 0 }, base, columns).adaptiveConnectionCeiling, null)
+  assert.equal(sanitizeSettings({ adaptiveConnectionCeiling: -4 }, base, columns).adaptiveConnectionCeiling, null)
+  assert.equal(sanitizeSettings({ adaptiveConnectionCeiling: 'lots' }, base, columns).adaptiveConnectionCeiling, null)
+  assert.equal(sanitizeSettings({ adaptiveConnectionCeiling: Infinity }, base, columns).adaptiveConnectionCeiling, null)
+
+  // A deliberate opt-in is kept, including well past maxConnectionsPerTask -
+  // exceeding it is the entire point of the setting.
+  assert.equal(sanitizeSettings({ adaptiveConnectionCeiling: 32 }, base, columns).adaptiveConnectionCeiling, 32)
+  assert.equal(sanitizeSettings({ adaptiveConnectionCeiling: 12.7 }, base, columns).adaptiveConnectionCeiling, 12)
+  assert.equal(sanitizeSettings({ adaptiveConnectionCeiling: 5000 }, base, columns).adaptiveConnectionCeiling, 64)
+})
+
+test('the connection ceiling is generous because the ramp decides what is opened', () => {
+  const base = defaults()
+  const columns = () => base.columns
+
+  assert.equal(sanitizeSettings({ maxConnectionsPerTask: 32 }, base, columns).maxConnectionsPerTask, 32)
+  assert.equal(sanitizeSettings({ maxConnectionsPerTask: 64 }, base, columns).maxConnectionsPerTask, 64)
+  // Still bounded - a number this large is a typo, not an intention.
+  assert.equal(sanitizeSettings({ maxConnectionsPerTask: 5000 }, base, columns).maxConnectionsPerTask, 64)
+  assert.equal(sanitizeSettings({ maxConnectionsPerTask: 0 }, base, columns).maxConnectionsPerTask, 1)
+})

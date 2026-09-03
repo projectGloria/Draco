@@ -43,6 +43,9 @@ const (
 	// How long to keep trying after launching the app. A cold Electron start
 	// on a slow disk is comfortably under this.
 	coldStartBudget = 15 * time.Second
+
+	// Size at which host.log is rolled over to host.log.1.
+	maxLogBytes = 2 * 1024 * 1024
 )
 
 // hostConfig is written by the app next to the native-messaging manifest, so

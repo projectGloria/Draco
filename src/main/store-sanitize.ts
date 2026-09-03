@@ -90,6 +90,14 @@ export function sanitizeSettings(input: unknown, base: Settings, defaultColumns:
   const speedLimit = typeof source.speedLimit === 'number' && Number.isFinite(source.speedLimit) && source.speedLimit > 0
     ? source.speedLimit
     : null
+  // Null is the default and means "stop at maxConnectionsPerTask". Anything
+  // else is a deliberate opt-in, so it is only bounded, never second-guessed.
+  const adaptiveConnectionCeiling =
+    typeof source.adaptiveConnectionCeiling === 'number' &&
+    Number.isFinite(source.adaptiveConnectionCeiling) &&
+    source.adaptiveConnectionCeiling > 0
+      ? Math.min(64, Math.max(1, Math.floor(source.adaptiveConnectionCeiling)))
+      : null
   const accent = typeof source.accent === 'string' && /^#[0-9a-f]{6}$/i.test(source.accent)
     ? source.accent.toLowerCase()
     : base.accent
@@ -105,7 +113,11 @@ export function sanitizeSettings(input: unknown, base: Settings, defaultColumns:
     theme: source.theme === 'light' || source.theme === 'system' ? source.theme : 'dark',
     downloadDir: safeDownloadDirectory(source.downloadDir, base.downloadDir),
     maxConcurrentTasks: clamp(source.maxConcurrentTasks, 1, 20, base.maxConcurrentTasks),
-    maxConnectionsPerTask: clamp(source.maxConnectionsPerTask, 1, 16, base.maxConnectionsPerTask),
+    // The ramp is what decides how many of these are actually opened, so the
+    // ceiling can be generous: asking for more than a server rewards costs a
+    // rung's measurement, not the connections.
+    maxConnectionsPerTask: clamp(source.maxConnectionsPerTask, 1, 64, base.maxConnectionsPerTask),
+    adaptiveConnectionCeiling,
     minSplitSize: clamp(source.minSplitSize, 64 * 1024, 256 * 1024 * 1024, base.minSplitSize),
     speedLimit,
     proxyUrl,
@@ -255,6 +267,7 @@ export function sanitizeTasks(input: unknown, defaultDir: string): DownloadTask[
       queueId: typeof raw.queueId === 'string' ? raw.queueId : null,
       queueRetryCount: clamp(raw.queueRetryCount, 0, 20, 0),
       nextQueueAttemptAt: safeTimestamp(raw.nextQueueAttemptAt, null),
+      manualPause: raw.manualPause === true,
       kind,
       size,
       received,
@@ -312,7 +325,10 @@ function sanitizeYouTube(input: unknown): DownloadTask['youtube'] | undefined {
     ? null
     : typeof input.audioFormatId === 'string' ? input.audioFormatId.slice(0, 200) : null
   const role = input.role === 'audio' || input.role === 'video' ? input.role : undefined
-  return { pageUrl, videoFormatId, audioFormatId, ...(role ? { role } : {}) }
+  const height = typeof input.height === 'number' && Number.isFinite(input.height) && input.height > 0
+    ? Math.min(Math.round(input.height), 100_000)
+    : null
+  return { pageUrl, videoFormatId, audioFormatId, height, ...(role ? { role } : {}) }
 }
 
 export function sanitizeQueues(input: unknown): Queue[] {

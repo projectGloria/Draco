@@ -11,6 +11,76 @@
  */
 
 /* ------------------------------------------------------------------ */
+/* 0. Surviving the extension being reloaded                           */
+/* ------------------------------------------------------------------ */
+
+/**
+ * A content script outlives the extension that injected it.
+ *
+ * Reloading the extension at chrome://extensions - or Chrome updating it -
+ * leaves this script running in the page attached to a chrome.runtime that has
+ * been cut off from it. Every call through it then throws "Extension context
+ * invalidated." *synchronously*, before there is a promise to reject, so a
+ * .catch() on the returned value never sees it and the failure escapes as an
+ * uncaught rejection instead.
+ *
+ * There is nothing here to reconnect: a fresh copy of this script is injected
+ * on the next navigation and owns the page from then on. What the orphan must
+ * not do is keep its timers running and its buttons on screen, throwing every
+ * five seconds while its replacement works beside it. So the first call that
+ * fails for that reason is the signal to take the UI down and go quiet.
+ */
+let orphaned = false
+let stateTimer = null
+let pageObserver = null
+
+function extensionAlive() {
+  if (orphaned) return false
+  try {
+    // runtime.id is the cheapest thing that goes undefined on invalidation,
+    // and reading it can throw in its own right once the context is gone.
+    return Boolean(chrome.runtime?.id)
+  } catch {
+    return false
+  }
+}
+
+/**
+ * The only way this file talks to the service worker. Never throws and never
+ * rejects: a null reply means "no answer", which every caller already handles
+ * for the ordinary case of Draco not running.
+ */
+async function sendToExtension(message) {
+  if (!extensionAlive()) {
+    // Reaching here on an already-dead context is the same verdict as a
+    // failed call, and it is the path an orphan normally takes: nothing
+    // throws, so without this it would go quiet but never actually retire.
+    standDown()
+    return null
+  }
+
+  try {
+    return await chrome.runtime.sendMessage(message)
+  } catch {
+    // A closed port is routine - an MV3 worker is killed whenever it goes idle,
+    // and the next message wakes it again. An invalidated context is the one
+    // that is permanent, and runtime.id is what tells the two apart.
+    if (!extensionAlive()) standDown()
+    return null
+  }
+}
+
+/** Retires this copy of the script in favour of the one that replaced it. */
+function standDown() {
+  if (orphaned) return
+  orphaned = true
+  clearInterval(stateTimer)
+  pageObserver?.disconnect()
+  clearOverlays()
+  removePanel()
+}
+
+/* ------------------------------------------------------------------ */
 /* 1. Link interception                                                */
 /* ------------------------------------------------------------------ */
 
@@ -89,12 +159,12 @@ addEventListener(
       }
     }
 
-    chrome.runtime
-      .sendMessage({ type: 'draco:link-click', url, filename: suggested || undefined })
+    void sendToExtension({ type: 'draco:link-click', url, filename: suggested || undefined })
       .then((reply) => {
+        // No answer means the same as a refusal here. The navigation has
+        // already been cancelled, so it has to be given back either way.
         if (!reply?.taken) replay()
       })
-      .catch(() => replay())
   },
   true
 )
@@ -690,6 +760,7 @@ function clearOverlays() {
 }
 
 function scan() {
+  if (orphaned) return
   checkNavigation()
 
   if (!dracoState.active || dismissedPageKey === pageKey || !pageWantsButtons()) {
@@ -740,8 +811,7 @@ function primeYouTubeIfNeeded() {
   if (!videoId || videoId === primedVideoId || videoId === primingVideoId) return
 
   primingVideoId = videoId
-  void chrome.runtime
-    .sendMessage({ type: 'draco:prime-youtube' })
+  void sendToExtension({ type: 'draco:prime-youtube' })
     .then((reply) => {
       if (currentYouTubeVideoId() !== videoId) return
 
@@ -809,9 +879,7 @@ function ensurePanel() {
       return
     }
 
-    const reply = await chrome.runtime
-      .sendMessage({ type: 'draco:grab-best', videoSrc: '', adaptive: false })
-      .catch(() => null)
+    const reply = await sendToExtension({ type: 'draco:grab-best', videoSrc: '', adaptive: false })
 
     if (reply?.ok) takenOver = true
     panelShadow.querySelector('.label').textContent = reply?.ok
@@ -880,7 +948,7 @@ chrome.runtime.onMessage.addListener((message) => {
  * querySelectorAll on every mutation batch is a real cost on a page like
  * YouTube. One scan per frame at most.
  */
-new MutationObserver(() => {
+pageObserver = new MutationObserver(() => {
   if (scanScheduled) return
   scanScheduled = true
   requestAnimationFrame(() => {
@@ -888,7 +956,8 @@ new MutationObserver(() => {
     scan()
     updatePanel()
   })
-}).observe(document.documentElement, { childList: true, subtree: true })
+})
+pageObserver.observe(document.documentElement, { childList: true, subtree: true })
 
 addEventListener('scroll', schedule, { capture: true, passive: true })
 addEventListener('resize', schedule, { passive: true })
@@ -936,18 +1005,16 @@ void loadPlacement().then(() => {
 })
 
 async function refreshDracoState(force = false) {
-  const state = await chrome.runtime
-    .sendMessage({ type: 'draco:page-state', force })
-    .catch(() => null)
+  const state = await sendToExtension({ type: 'draco:page-state', force })
   if (state) dracoState = state
   scan()
   updatePanel()
 }
 
 void Promise.all([
-  chrome.runtime.sendMessage({ type: 'draco:list-media' }).then((reply) => {
+  sendToExtension({ type: 'draco:list-media' }).then((reply) => {
     mediaCount = reply?.media?.length ?? 0
-  }).catch(() => {}),
+  }),
   refreshDracoState(true)
 ]).finally(() => {
   scan()
@@ -957,6 +1024,14 @@ void Promise.all([
 // A content script can outlive the app. A lightweight native-host probe keeps
 // stale controls from remaining visible after Draco exits and makes them appear
 // when it is started without requiring a page reload.
-setInterval(() => {
+stateTimer = setInterval(() => {
+  // standDown clears this, but it can also run before this line does - the
+  // probe below is the first thing an orphan touches. Checking here means the
+  // ticker retires itself whichever order those two happen in.
+  if (orphaned) {
+    clearInterval(stateTimer)
+    return
+  }
+
   if (document.visibilityState === 'visible') void refreshDracoState(true)
 }, 5000)

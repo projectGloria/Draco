@@ -30,9 +30,12 @@ export function getDispatcher(timeoutMs: number): Dispatcher {
   if (existing) return existing
 
   const options = {
-    // Must comfortably exceed maxConnectionsPerTask, or segments of the same
-    // file would queue behind each other instead of running in parallel.
-    connections: 64,
+    // Must comfortably exceed maxConnectionsPerTask x maxConcurrentTasks, or
+    // segments of the same file - and of different files on the same host -
+    // would queue behind each other instead of running in parallel. This is a
+    // per-origin pool, and an idle slot costs nothing, so it is sized for the
+    // largest settings the sanitizer permits rather than the default ones.
+    connections: 256,
     keepAliveTimeout: 30_000,
     keepAliveMaxTimeout: 120_000,
     headersTimeout: timeoutMs,

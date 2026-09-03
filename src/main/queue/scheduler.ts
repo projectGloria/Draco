@@ -217,6 +217,10 @@ export class Scheduler {
     for (const task of tasks) {
       if (room <= 0) break
       if (task.status === 'paused') {
+        // Someone pressed Stop on this row. The queue owns the order, not the
+        // user's hand: starting it again here is what made an individual pause
+        // impossible for anything inside a running queue.
+        if (task.manualPause) continue
         startable.push(task.id)
         room--
       } else if (task.status === 'error' && task.queueRetryCount < queue.retryLimit) {

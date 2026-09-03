@@ -13,11 +13,12 @@ import {
 import { basename, join } from 'node:path'
 import type { DownloadTask, Segment } from '@shared/types'
 import { getDispatcher } from '../engine/http.ts'
-import type { RateLimiter } from '../engine/limiter.ts'
+import { QuotaExceededError, type RateLimiter } from '../engine/limiter.ts'
 import { uniquePath } from '../engine/naming.ts'
 import { mapConcurrent } from '../engine/concurrency.ts'
 import { buildHeaders } from '../engine/probe.ts'
 import type { Runner } from '../engine/runner.ts'
+import { quotaDetail } from '../engine/task.ts'
 import { AbortedError } from '../engine/worker.ts'
 import { logger } from '../log.ts'
 import { ensureFfmpeg } from './ffmpeg.ts'
@@ -129,7 +130,16 @@ export class HlsRunner implements Runner {
     } catch (err) {
       const error = err as Error
 
-      if (error instanceof AbortedError || this.controller.signal.aborted) {
+      if (error instanceof QuotaExceededError) {
+        // The pieces already on disk are the record, so this costs nothing but
+        // the wait; the manager starts the stream again when the window turns.
+        this.task.status = 'paused'
+        this.task.error = null
+        this.task.speed = 0
+        this.task.eta = null
+        this.task.detail = quotaDetail(error.resumesAt)
+        this.deps.onFinished(this.task, error)
+      } else if (error instanceof AbortedError || this.controller.signal.aborted) {
         this.task.speed = 0
         this.task.eta = null
         this.deps.onFinished(this.task, null)
@@ -552,6 +562,9 @@ export class HlsRunner implements Runner {
         return received
       } catch (err) {
         if (this.controller.signal.aborted) throw new AbortedError()
+        // Retrying cannot conjure budget that is already spent, and burning the
+        // attempts here would turn the hold into "failed after 5 attempts".
+        if (err instanceof QuotaExceededError) throw err
         lastError = err instanceof Error ? err : new Error(String(err))
       }
     }
@@ -700,6 +713,19 @@ export class HlsRunner implements Runner {
       if (this.controller.signal.aborted) throw new AbortedError()
 
       const reason = err instanceof Error ? err.message : String(err)
+
+      /*
+       * With a separate audio track there is no raw stream to fall back to: the
+       * video half alone is a silent file, and deleting the audio to produce it
+       * throws away a track that downloaded perfectly. Keep both joined halves
+       * *and* the pieces - `assemble` only clears those on success - and report
+       * the failure, so Start re-runs the merge rather than the download.
+       */
+      if (this.tracks.some((track) => track.type === 'audio')) {
+        this.task.detail = null
+        throw new Error(`Could not merge the video and audio tracks: ${reason}`)
+      }
+
       log.warn(`mux unavailable or failed, keeping the raw stream: ${reason}`)
       this.task.detail = null
 

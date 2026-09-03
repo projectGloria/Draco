@@ -14,8 +14,10 @@ import StatusBar from './components/StatusBar'
 import TaskDetailDialog from './components/TaskDetailDialog'
 import TitleBar from './components/TitleBar'
 import Toasts from './components/Toasts'
+import ToolUpdateDialog from './components/ToolUpdateDialog'
 import Toolbar, { type ToolbarActions } from './components/Toolbar'
 import { resolvedLanguage } from './i18n'
+import type { ToolStatus } from '@shared/types'
 
 export default function App(): React.ReactElement {
   const init = useApp((s) => s.init)
@@ -35,6 +37,7 @@ export default function App(): React.ReactElement {
   const [siteGrabberOpen, setSiteGrabberOpen] = useState(false)
   const [optionsOpen, setOptionsOpen] = useState(false)
   const [confirm, setConfirm] = useState<ConfirmRequest | null>(null)
+  const [toolUpdates, setToolUpdates] = useState<ToolStatus[] | null>(null)
   const [draggingUrl, setDraggingUrl] = useState(false)
 
   useEffect(() => {
@@ -50,9 +53,15 @@ export default function App(): React.ReactElement {
     // with the URL filled in, and Escape is the whole cost of ignoring it.
     const offClipboard = window.api.onClipboardUrl((url) => setSaveAsUrl(url))
 
+    // ffmpeg and yt-dlp are fetched, not shipped, and yt-dlp in particular goes
+    // stale against YouTube. Main only ever announces; the dialog is where the
+    // user decides.
+    const offTools = window.api.onToolUpdates((tools) => setToolUpdates(tools))
+
     return () => {
       offToast()
       offClipboard()
+      offTools()
     }
   }, [init])
 
@@ -225,8 +234,21 @@ export default function App(): React.ReactElement {
       {detailId && <TaskDetailDialog id={detailId} onClose={() => setDetailId(null)} />}
       {schedulerOpen && <SchedulerDialog onClose={() => setSchedulerOpen(false)} />}
       {siteGrabberOpen && <SiteGrabberDialog onClose={() => setSiteGrabberOpen(false)} />}
-      {optionsOpen && <OptionsDialog onClose={() => setOptionsOpen(false)} />}
+      {optionsOpen && (
+        <OptionsDialog onClose={() => setOptionsOpen(false)} onShowTools={setToolUpdates} />
+      )}
       {confirm && <ConfirmDialog request={confirm} onClose={() => setConfirm(null)} />}
+      {toolUpdates && (
+        <ToolUpdateDialog
+          tools={toolUpdates}
+          onClose={() => setToolUpdates(null)}
+          onUpdated={(next) =>
+            setToolUpdates((current) =>
+              current ? current.map((tool) => (tool.id === next.id ? next : tool)) : current
+            )
+          }
+        />
+      )}
 
       {pending && <PendingActionBar pending={pending} />}
       <Toasts />
