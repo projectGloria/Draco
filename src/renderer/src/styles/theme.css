@@ -240,6 +240,21 @@ select.field option {
     transform: none;
   }
 }
+
+@keyframes loading-sweep {
+  from { transform: translateX(-120%); }
+  to { transform: translateX(420%); }
+}
+
+.media-loader {
+  background:
+    radial-gradient(circle at 14% 30%, var(--accent-soft), transparent 40%),
+    rgba(255, 255, 255, 0.025);
+}
+
+.loading-sweep {
+  animation: loading-sweep 1.25s ease-in-out infinite;
+}
 @utility fade-up {
   animation: fade-up 240ms cubic-bezier(0.22, 1, 0.36, 1) both;
 }

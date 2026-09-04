@@ -70,9 +70,36 @@ export function formatPercent(received: number, size: number | null): string {
 export function looksLikeUrl(value: string): boolean {
   const trimmed = value.trim()
   if (!trimmed || /\s/.test(trimmed)) return false
+  if (/^[0-9a-fA-F]{40}$/.test(trimmed)) return true
   try {
     const parsed = new URL(trimmed)
-    return parsed.protocol === 'http:' || parsed.protocol === 'https:'
+    return parsed.protocol === 'http:' || parsed.protocol === 'https:' || parsed.protocol === 'magnet:'
+  } catch {
+    return false
+  }
+}
+
+export function looksLikeTorrentInput(value: string): boolean {
+  const trimmed = value.trim()
+  if (!trimmed || /\s/.test(trimmed)) return false
+  if (/^[0-9a-f]{40}$/i.test(trimmed)) return true
+  try {
+    const parsed = new URL(trimmed)
+    if (parsed.protocol === 'magnet:') return true
+    return (parsed.protocol === 'http:' || parsed.protocol === 'https:') &&
+      /\.torrent$/i.test(parsed.pathname)
+  } catch {
+    return false
+  }
+}
+
+export function looksLikeYouTubeInput(value: string): boolean {
+  const trimmed = value.trim()
+  if (!trimmed || /\s/.test(trimmed)) return false
+  try {
+    const parsed = new URL(trimmed)
+    return parsed.protocol === 'https:' &&
+      (/(^|\.)youtube\.com$/i.test(parsed.hostname) || /(^|\.)youtu\.be$/i.test(parsed.hostname))
   } catch {
     return false
   }

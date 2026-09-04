@@ -5,9 +5,10 @@ import { createHash } from 'node:crypto'
 import { getPaths } from './bootstrap/paths.ts'
 import { logger } from './log.ts'
 import { parseSha256, parseYtDlpVersion } from './tools-version.ts'
-import type { MediaVariant, PageFormat, RequestHeaders } from '../shared/types.ts'
+import type { MediaVariant, PageFormat, RequestHeaders, YouTubeResolution } from '../shared/types.ts'
 import {
   buildVariants,
+  buildAudioVariants,
   directFormats,
   formatsFromPage,
   formatsFromYtDlp,
@@ -16,6 +17,9 @@ import {
   type YtDlpFormat
 } from './youtube-ladder.ts'
 import { electronNodeRuntimeArgs, electronNodeRuntimeEnv } from './youtube-runtime.ts'
+import { isSunoUrl } from './media-url.ts'
+import { resolveSuno } from './suno.ts'
+import { resolveHtmlPageMedia } from './page-media.ts'
 
 const log = logger('youtube')
 
@@ -35,6 +39,7 @@ let ytdlpProvision: Promise<string> | null = null
 interface YtDlpInfo {
   id?: string
   title?: string
+  thumbnail?: string
   duration?: number
   formats?: YtDlpFormat[]
 }
@@ -51,7 +56,8 @@ export function resolveYouTubeInstant(
 ): { id: string; title: string; variants: MediaVariant[] } | null {
   if (!pageFormats || pageFormats.length === 0) return null
 
-  const variants = buildVariants(formatsFromPage(pageFormats))
+  const formats = formatsFromPage(pageFormats)
+  const variants = [...buildVariants(formats), ...buildAudioVariants(formats)]
   if (variants.length === 0) return null
 
   return {
@@ -86,9 +92,10 @@ export async function primeYouTube(
 export async function resolveYouTube(
   pageUrl: string,
   headers: RequestHeaders | undefined
-): Promise<{ id: string; title: string; variants: MediaVariant[] }> {
+): Promise<{ id: string; title: string; variants: MediaVariant[]; thumbnailUrl: string }> {
   const info = await loadInfo(pageUrl, withoutCookie(headers))
-  const variants = buildVariants(formatsFromYtDlp(Array.isArray(info.formats) ? info.formats : []))
+  const formats = formatsFromYtDlp(Array.isArray(info.formats) ? info.formats : [])
+  const variants = [...buildVariants(formats), ...buildAudioVariants(formats)]
 
   if (variants.length === 0) {
     throw new Error(
@@ -97,10 +104,80 @@ export async function resolveYouTube(
     )
   }
 
+  const id = info.id?.trim() || extractYouTubeId(pageUrl)
   return {
-    id: info.id?.trim() || extractYouTubeId(pageUrl),
+    id,
     title: info.title?.trim() || 'YouTube video',
-    variants
+    variants,
+    thumbnailUrl: safeYouTubeThumbnail(info.thumbnail) ?? `https://i.ytimg.com/vi/${encodeURIComponent(id)}/hqdefault.jpg`
+  }
+}
+
+export async function resolveMediaPage(
+  pageUrl: string,
+  headers: RequestHeaders | undefined
+): Promise<YouTubeResolution> {
+  if (isSunoUrl(pageUrl)) return resolveSuno(pageUrl, headers)
+  // Run both paths: an extractor understands embedded players, while the HTML
+  // pass sees direct/lazy images and site-builder video attributes. Ordinary
+  // pages often contain both, and returning only whichever completed first
+  // would hide valid downloads from the same link.
+  const [extracted, declared] = await Promise.allSettled([
+    (async (): Promise<YouTubeResolution> => {
+      const info = await loadInfo(pageUrl, headers)
+      const formats = formatsFromYtDlp(Array.isArray(info.formats) ? info.formats : [])
+      const choices = [...buildVariants(formats), ...buildAudioVariants(formats)]
+      if (choices.length === 0) throw new Error('yt-dlp found no directly downloadable media on this page.')
+      return {
+        id: info.id?.trim() || pageUrl,
+        title: info.title?.trim() || 'Media',
+        variants: choices,
+        thumbnailUrl: safeHttpsThumbnail(info.thumbnail)
+      }
+    })(),
+    resolveHtmlPageMedia(pageUrl, headers)
+  ])
+
+  const extractorResult = extracted.status === 'fulfilled' ? extracted.value : null
+  const htmlResult = declared.status === 'fulfilled' ? declared.value : null
+  if (!extractorResult && !htmlResult) {
+    throw extracted.status === 'rejected'
+      ? extracted.reason
+      : declared.status === 'rejected' ? declared.reason : new Error('No downloadable media found')
+  }
+  if (!extractorResult) return htmlResult!
+  if (!htmlResult) return extractorResult
+
+  const variants = new Map<string, MediaVariant>()
+  for (const variant of [...extractorResult.variants, ...htmlResult.variants]) {
+    const identity = `${variant.url}\n${variant.audioUrl ?? ''}`
+    if (!variants.has(identity)) variants.set(identity, variant)
+  }
+  return {
+    id: extractorResult.id || htmlResult.id,
+    title: extractorResult.title || htmlResult.title,
+    variants: [...variants.values()],
+    thumbnailUrl: extractorResult.thumbnailUrl || htmlResult.thumbnailUrl
+  }
+}
+
+function safeYouTubeThumbnail(value: unknown): string | null {
+  if (typeof value !== 'string') return null
+  try {
+    const url = new URL(value)
+    return url.protocol === 'https:' && /(^|\.)ytimg\.com$/i.test(url.hostname) ? url.href : null
+  } catch {
+    return null
+  }
+}
+
+function safeHttpsThumbnail(value: unknown): string | null {
+  if (typeof value !== 'string') return null
+  try {
+    const url = new URL(value)
+    return url.protocol === 'https:' ? url.href : null
+  } catch {
+    return null
   }
 }
 
@@ -592,9 +669,10 @@ function runCapture(
       stdio: ['ignore', 'pipe', 'pipe']
     })
 
-    let stdout = ''
     let stderr = ''
     let settled = false
+    const stdoutChunks: Buffer[] = []
+    let stdoutBytes = 0
 
     const timer = setTimeout(() => {
       if (settled) return
@@ -604,7 +682,13 @@ function runCapture(
     }, timeoutMs)
 
     child.stdout.on('data', (chunk: Buffer) => {
-      stdout = (stdout + chunk.toString('utf8')).slice(-25 * 1024 * 1024)
+      stdoutChunks.push(chunk)
+      stdoutBytes += chunk.length
+      // Keep memory bounded, but drop old chunks efficiently
+      while (stdoutBytes > 26 * 1024 * 1024 && stdoutChunks.length > 1) {
+        const removed = stdoutChunks.shift()!
+        stdoutBytes -= removed.length
+      }
     })
     child.stderr.on('data', (chunk: Buffer) => {
       stderr = (stderr + chunk.toString('utf8')).slice(-16 * 1024)
@@ -621,7 +705,9 @@ function runCapture(
       if (settled) return
       settled = true
       clearTimeout(timer)
-      resolve({ code: code ?? -1, stdout, stderr })
+      let stdoutBuf = Buffer.concat(stdoutChunks)
+      if (stdoutBuf.length > 25 * 1024 * 1024) stdoutBuf = stdoutBuf.subarray(stdoutBuf.length - 25 * 1024 * 1024)
+      resolve({ code: code ?? -1, stdout: stdoutBuf.toString('utf8'), stderr })
     })
   })
 }

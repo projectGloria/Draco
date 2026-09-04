@@ -55,16 +55,19 @@ test('site crawler is depth-bounded, captures assets, and respects robots.txt', 
     }
   })
   const port = await listen(server)
+  let tmp = null
   try {
-    const resources = await crawlSite({
+    const { resources, tmpDir } = await crawlSite({
       startUrl: `http://127.0.0.1:${port}/`, maxDepth: 1, maxPages: 10,
       includeAssets: true, stayOnHost: true, respectRobots: true
     })
+    tmp = tmpDir
     const urls = resources.map((entry) => new URL(entry.url).pathname).sort()
     assert.deepEqual(urls, ['/', '/about', '/logo.png'])
   } finally {
     await closeDispatchers()
     await new Promise((resolve) => server.close(resolve))
+    if (tmp) await rm(tmp, { recursive: true, force: true })
   }
 })
 

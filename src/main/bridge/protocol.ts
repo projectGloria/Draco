@@ -337,7 +337,7 @@ function normalizeMediaVariant(value: unknown): {
   codecs: string | null
   estimatedSize: number | null
   container: string | null
-  youtube?: { videoFormatId: string; audioFormatId?: string | null }
+  youtube?: { videoFormatId: string; audioFormatId?: string | null; role?: 'video' | 'audio' }
 } {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Invalid media variant')
   const v = value as Record<string, unknown>
@@ -360,7 +360,7 @@ function normalizeMediaVariant(value: unknown): {
           return text
         })()
 
-  let youtube: { videoFormatId: string; audioFormatId?: string | null } | undefined
+  let youtube: { videoFormatId: string; audioFormatId?: string | null; role?: 'video' | 'audio' } | undefined
   if (v.youtube !== undefined) {
     if (!v.youtube || typeof v.youtube !== 'object' || Array.isArray(v.youtube)) throw new Error('Invalid YouTube variant')
     const y = v.youtube as Record<string, unknown>
@@ -369,7 +369,9 @@ function normalizeMediaVariant(value: unknown): {
     const audioFormatId = y.audioFormatId === undefined || y.audioFormatId === null
       ? null
       : boundedString(y.audioFormatId, 200, 'YouTube audio format id')
-    youtube = { videoFormatId, audioFormatId }
+    const role = y.role === undefined ? 'video' : boundedString(y.role, 10, 'YouTube media role')
+    if (role !== 'video' && role !== 'audio') throw new Error('Invalid YouTube media role')
+    youtube = { videoFormatId, audioFormatId, role }
   }
 
   return { url, audioUrl, label, height, bandwidth, codecs, estimatedSize, container, ...(youtube ? { youtube } : {}) }

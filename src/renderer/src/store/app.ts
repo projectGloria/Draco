@@ -1,6 +1,7 @@
 import { create } from 'zustand'
 import type {
   Category,
+  ClipboardItem,
   ColumnId,
   ColumnPref,
   DownloadTask,
@@ -36,8 +37,13 @@ function provisionalSettings(): Settings {
     language: 'system',
     theme: 'dark',
     downloadDir: '',
+    checkDiskSpace: true,
+    showDropzone: false,
+    catMode: false,
     maxConcurrentTasks: 3,
+    exponentialBackoff: true,
     maxConnectionsPerTask: 8,
+    adaptiveConnectionCeiling: null,
     minSplitSize: 1024 * 1024,
     speedLimit: null,
     proxyUrl: null,
@@ -60,7 +66,7 @@ function provisionalSettings(): Settings {
     confirmHandoff: true,
     takeoverExtensions: [],
     takeoverExcludeHosts: [],
-    watchClipboard: false,
+    watchClipboard: true,
     showProgressWindow: true,
     accent: '#38bdf8',
     columns: [
@@ -83,6 +89,7 @@ function provisionalSettings(): Settings {
 interface AppState {
   ready: boolean
   tasks: DownloadTask[]
+  clipboardItems: ClipboardItem[]
   /** Changes only when task membership or non-progress metadata changes. */
   taskListVersion: number
   categories: Category[]
@@ -136,6 +143,7 @@ let initialized = false
 export const useApp = create<AppState>((set, get) => ({
   ready: false,
   tasks: [],
+  clipboardItems: [],
   taskListVersion: 0,
   categories: [],
   queues: [],
@@ -177,13 +185,15 @@ export const useApp = create<AppState>((set, get) => ({
 
     window.api.onQueuesChanged((queues) => set({ queues }))
     window.api.onPendingAction((pending) => set({ pending }))
+    window.api.onClipboardItemsChanged((clipboardItems) => set({ clipboardItems }))
 
     try {
-      const [settings, tasks, categories, queues] = await Promise.all([
+      const [settings, tasks, categories, queues, clipboardItems] = await Promise.all([
         window.api.getSettings(),
         window.api.listTasks(),
         window.api.listCategories(),
-        window.api.listQueues()
+        window.api.listQueues(),
+        window.api.listClipboardItems()
       ])
 
       applyAccent(settings.accent)
@@ -193,6 +203,7 @@ export const useApp = create<AppState>((set, get) => ({
         taskListVersion: 1,
         categories,
         queues,
+        clipboardItems,
         sidebar: settings.sidebarSelection || 'all',
         ready: true
       })

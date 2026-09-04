@@ -1,9 +1,9 @@
 import { spawn, type ChildProcess } from 'node:child_process'
-import { basename, extname } from 'node:path'
-import { rename, rm, stat } from 'node:fs/promises'
+import { basename, extname, join } from 'node:path'
+import { rm, stat } from 'node:fs/promises'
 import type { DownloadTask } from '../../shared/types.ts'
 import type { RunnerContext } from '../engine/manager.ts'
-import { uniquePath } from '../engine/naming.ts'
+import { uniquePath, moveFile } from '../engine/naming.ts'
 import type { Runner } from '../engine/runner.ts'
 import { ensureFfmpeg } from '../hls/ffmpeg.ts'
 import { ffmpegHeaders } from './headers.ts'
@@ -127,7 +127,8 @@ export class MpdRunner implements Runner {
 
     const targetPath = await uniquePath(this.task.dir, this.task.filename)
     const extension = extname(targetPath) || '.mp4'
-    this.outputPath = `${targetPath.slice(0, -extension.length)}.draco-dash-temp${extension}`
+    const tempDir = this.context.tempDir || this.task.dir
+    this.outputPath = join(tempDir, `${basename(targetPath, extension)}.draco-dash-temp${extension}`)
     await rm(this.outputPath, { force: true }).catch(() => {})
 
     this.task.status = 'downloading'
@@ -138,7 +139,7 @@ export class MpdRunner implements Runner {
 
     await this.runFfmpeg(ffmpegPath, this.task.finalUrl, this.outputPath)
     if (this.controller.signal.aborted) throw new Error('Cancelled')
-    await rename(this.outputPath, targetPath)
+    await moveFile(this.outputPath, targetPath)
     const info = await stat(targetPath)
     this.task.filename = basename(targetPath)
     this.task.size = info.size

@@ -3,6 +3,7 @@ import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import { dirname } from 'node:path'
 import type {
   Category,
+  ClipboardItem,
   ColumnPref,
   DownloadTask,
   Queue,
@@ -54,6 +55,28 @@ async function readJson<T>(path: string): Promise<T | null> {
 }
 
 /* ------------------------------------------------------------------ */
+/* Clipboard inbox                                                     */
+/* ------------------------------------------------------------------ */
+
+export async function loadClipboardItems(): Promise<ClipboardItem[]> {
+  const stored = await readJson<unknown>(getPaths().clipboardFile)
+  if (!Array.isArray(stored)) {
+    await writeJsonAtomic(getPaths().clipboardFile, [])
+    return []
+  }
+  return stored.filter((item): item is ClipboardItem => {
+    if (!item || typeof item !== 'object') return false
+    const value = item as Partial<ClipboardItem>
+    return typeof value.id === 'string' && typeof value.url === 'string' &&
+      (value.status === 'fetching' || value.status === 'ready' || value.status === 'error')
+  }).slice(-100)
+}
+
+export async function saveClipboardItems(items: ClipboardItem[]): Promise<void> {
+  await writeJsonAtomic(getPaths().clipboardFile, items.slice(-100))
+}
+
+/* ------------------------------------------------------------------ */
 /* Settings                                                            */
 /* ------------------------------------------------------------------ */
 
@@ -76,7 +99,10 @@ export function defaultSettings(): Settings {
     language: 'system',
     theme: 'dark',
     downloadDir: getPaths().defaultDownloadDir,
+    checkDiskSpace: true,
+    catMode: false,
     maxConcurrentTasks: 3,
+    exponentialBackoff: true,
     maxConnectionsPerTask: 8,
     adaptiveConnectionCeiling: null,
     minSplitSize: 1024 * 1024,
@@ -101,7 +127,8 @@ export function defaultSettings(): Settings {
     takeoverMinSize: 1024 * 1024,
     takeoverExtensions: [],
     takeoverExcludeHosts: [],
-    watchClipboard: false,
+    watchClipboard: true,
+    showDropzone: false,
     showProgressWindow: true,
     accent: '#38bdf8',
     columns: defaultColumns(),
@@ -118,8 +145,16 @@ let settings: Settings | null = null
 
 export async function loadSettings(): Promise<Settings> {
   const base = defaultSettings()
-  const stored = await readJson<Partial<Settings>>(getPaths().settingsFile)
+  const [stored, clipboardInbox] = await Promise.all([
+    readJson<Partial<Settings>>(getPaths().settingsFile),
+    readJson<unknown>(getPaths().clipboardFile)
+  ])
   settings = stored ? sanitizeSettings(stored, base, defaultColumns) : base
+
+  // The old clipboard monitor defaulted off because it opened a modal whenever
+  // it noticed a link. The inbox is deliberately quiet, so enable it once when
+  // this new persisted store is first introduced. Later user choices survive.
+  if (!Array.isArray(clipboardInbox)) settings.watchClipboard = true
 
   // Migrate the file forward when a release adds settings, so the on-disk shape
   // matches what the app actually uses and stays hand-editable.

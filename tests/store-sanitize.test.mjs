@@ -89,6 +89,27 @@ test('a YouTube quality read from the page survives a restart without a URL', ()
   assert.equal(candidate.variants[0].youtube.videoFormatId, '248')
 })
 
+test('an audio-only media choice keeps its role across persistence', () => {
+  const [candidate] = sanitizeMedia([{
+    id: 'audio-candidate',
+    pageUrl: 'https://www.youtube.com/watch?v=abc',
+    pageTitle: 'Song',
+    mediaUrl: 'https://www.youtube.com/watch?v=abc',
+    type: 'file',
+    variants: [{
+      url: '',
+      label: 'Music · 160 kbps',
+      height: null,
+      youtube: { videoFormatId: '251', audioFormatId: null, role: 'audio' }
+    }],
+    headers: {},
+    subtitles: [],
+    discoveredAt: Date.now()
+  }])
+
+  assert.equal(candidate.variants[0].youtube.role, 'audio')
+})
+
 test('DASH task kind survives persistence sanitization', () => {
   const [task] = sanitizeTasks([{
     id: 'dash-task',
@@ -105,6 +126,25 @@ test('DASH task kind survives persistence sanitization', () => {
   assert.deepEqual(task.subtitles, [{
     url: 'https://cdn.example.test/en.vtt', label: 'English', language: 'en', format: 'vtt'
   }])
+})
+
+test('torrent identity and selected contents survive persistence sanitization', () => {
+  const url = 'magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567'
+  const selectedFiles = ['release/video.mkv', 'release/readme.txt']
+  const task = {
+    id: 'torrent-task',
+    url,
+    finalUrl: url,
+    filename: 'release',
+    kind: 'torrent',
+    status: 'paused',
+    selectedFiles
+  }
+
+  const [restored] = sanitizeTasks([task], 'C:\\Downloads')
+  assert.equal(restored.kind, 'torrent')
+  assert.equal(restored.url, task.url)
+  assert.deepEqual(restored.selectedFiles, selectedFiles)
 })
 
 test('a restored quality still knows the container it will be saved as', () => {

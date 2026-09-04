@@ -5,10 +5,20 @@ import { useT } from '../i18n'
 
 export default function TitleBar(): React.ReactElement {
   const [maximized, setMaximized] = useState(false)
-  const active = useApp((s) => s.tasks.reduce((n, t) => t.status === 'downloading' ? n + 1 : n, 0))
+  const activeTasksStr = useApp((s) => {
+    const activeTasks = s.tasks.filter((t) => t.status === 'downloading')
+    return `${activeTasks.length}:${activeTasks[0]?.filename || ''}`
+  })
+  
+  const [activeCount, firstName] = activeTasksStr.split(/:(.*)/)
+  const active = parseInt(activeCount, 10)
   const t = useT()
 
   useEffect(() => window.api.onMaximizeChange(setMaximized), [])
+
+  let titleText = t('downloadManager')
+  if (active === 1) titleText = t('downloadingSingle', { name: firstName })
+  else if (active > 1) titleText = t('downloadingMultiple', { name: firstName, count: active - 1 })
 
   return (
     <header className="drag h-9 shrink-0 flex items-center gap-2.5 pl-3 pr-1 border-b border-line bg-white/[0.015] relative z-30">
@@ -16,7 +26,7 @@ export default function TitleBar(): React.ReactElement {
       <span className="font-display text-[13px] font-bold tracking-[0.3px]">Draco</span>
 
       <div className="flex-1 text-center text-[11.5px] text-faint tracking-[0.2px] truncate max-[720px]:hidden">
-        {active > 0 ? t('inProgress', { count: active }) : t('downloadManager')}
+        {titleText}
       </div>
 
       <div className="no-drag flex">

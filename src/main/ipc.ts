@@ -4,6 +4,7 @@ import { join } from 'node:path'
 import { BrowserWindow, clipboard, dialog, ipcMain, shell } from 'electron'
 import type {
   Category,
+  ClipboardItem,
   DownloadTask,
   HandoffRequest,
   IntegrationStatus,
@@ -25,11 +26,13 @@ import { createTask, filenameForKind, kindForUrl, validateUrl } from './engine/c
 import { sanitizeFilename, uniquePath } from './engine/naming.ts'
 import type { DownloadManager } from './engine/manager.ts'
 import { probeUrl } from './engine/probe.ts'
+import { resolveTorrentItemPath } from './engine/torrent-path.ts'
 import { resolveVariants } from './hls/playlist.ts'
+import { isSupportedMediaPageUrl } from './media-url.ts'
 import { getToolStatus, updateTool } from './tools.ts'
 import { checkForUpdates } from './update.ts'
-import { chosenYouTubeUrls } from './youtube-url.ts'
-import { getYouTubePrimeStatus } from './youtube.ts'
+import { chosenYouTubeUrls, isSupportedYouTubeUrl } from './youtube-url.ts'
+import { getYouTubePrimeStatus, resolveMediaPage, resolveYouTube } from './youtube.ts'
 import { iconForExtension, iconForSite } from './icons.ts'
 import { logger } from './log.ts'
 import type { Scheduler } from './queue/scheduler.ts'
@@ -38,6 +41,7 @@ import {
   getCategories,
   getSettings,
   saveCategories,
+  saveClipboardItems,
   saveSettings,
   persistTasks
 } from './store.ts'
@@ -46,10 +50,12 @@ import {
   closeHandoffWindow,
   createProgressWindow,
   getMainWindow,
+  send,
   updateProgressWindow
 } from './windows.ts'
 
 const log = logger('ipc')
+let clipboardSave = Promise.resolve()
 
 export interface AppContext {
   manager: DownloadManager
@@ -64,6 +70,7 @@ export interface AppContext {
    * survive until there is something to show it in.
    */
   pendingHandoffs: HandoffRequest[]
+  clipboardItems: ClipboardItem[]
   lastHandoffAt: number | null
   quit(): void
   /**
@@ -72,6 +79,122 @@ export interface AppContext {
    * `require` produced a specifier no bundle ever contains.
    */
   setClipboardWatch(enabled: boolean): void
+}
+
+function publishClipboard(ctx: AppContext): void {
+  const snapshot = ctx.clipboardItems.map((item) => ({ ...item }))
+  send('clipboard:changed', snapshot)
+  clipboardSave = clipboardSave
+    .then(() => saveClipboardItems(snapshot))
+    .catch((error) => log.warn(`clipboard inbox save failed: ${String(error)}`))
+}
+
+export function prepareClipboardItem(ctx: AppContext, rawUrl: string, existingId?: string): void {
+  let url: string
+  try {
+    url = validateUrl(rawUrl)
+  } catch {
+    return
+  }
+
+  let item = existingId ? ctx.clipboardItems.find((entry) => entry.id === existingId) : undefined
+  let created = false
+  if (!item) {
+    item = ctx.clipboardItems.find((entry) => entry.url === url)
+    if (!item) {
+      const now = Date.now()
+      item = {
+        id: randomUUID(),
+        url,
+        kind: isSupportedYouTubeUrl(url)
+          ? 'youtube'
+          : isSupportedMediaPageUrl(url)
+            ? 'media'
+            : kindForUrl(url) === 'torrent' ? 'torrent' : 'file',
+        status: 'fetching',
+        createdAt: now,
+        updatedAt: now,
+        filename: null,
+        size: null,
+        mimeType: null,
+        error: null
+      }
+      created = true
+      ctx.clipboardItems.push(item)
+      if (ctx.clipboardItems.length > 100) ctx.clipboardItems.splice(0, ctx.clipboardItems.length - 100)
+    }
+  }
+
+  if (!created && item.status === 'fetching' && !existingId) {
+    // The watcher can observe the same clipboard value again while its first
+    // preparation is still running. Reuse that work rather than starting a
+    // duplicate extractor and racing two writes into the same inbox row.
+    return
+  } else {
+    item.status = 'fetching'
+    item.updatedAt = Date.now()
+    item.error = null
+  }
+  publishClipboard(ctx)
+
+  const target = item
+  void (async () => {
+    try {
+      if (target.kind === 'youtube') {
+        const youtube = await resolveYouTube(target.url, { referer: target.url })
+        const first = youtube.variants[0]
+        target.youtube = youtube
+        target.probe = undefined
+        target.filename = youtube.title
+        target.size = first?.estimatedSize ?? null
+        target.mimeType = first?.container ? `video/${first.container}` : 'video'
+      } else if (target.kind === 'media') {
+        const media = await resolveMediaPage(target.url, { referer: target.url })
+        const first = media.variants[0]
+        target.media = media
+        target.youtube = undefined
+        target.probe = undefined
+        target.filename = media.title
+        target.size = first?.estimatedSize ?? null
+        target.mimeType = first?.container
+          ? `${first.youtube?.role === 'audio' ? 'audio' : 'video'}/${first.container}`
+          : first?.youtube?.role === 'audio' ? 'audio' : 'video'
+      } else {
+        const probe = await probeUrl(target.url, { timeoutMs: getSettings().timeoutMs })
+        if (isHtmlPage(probe.mimeType)) {
+          const media = await resolveMediaPage(target.url, { referer: target.url })
+          const first = media.variants[0]
+          target.kind = 'media'
+          target.media = media
+          target.youtube = undefined
+          target.probe = undefined
+          target.filename = media.title
+          target.size = first?.estimatedSize ?? null
+          target.mimeType = first?.container
+            ? `${first.youtube?.role === 'audio' ? 'audio' : 'video'}/${first.container}`
+            : first?.youtube?.role === 'audio' ? 'audio' : 'video'
+        } else {
+          target.probe = probe
+          target.youtube = undefined
+          target.media = undefined
+          target.filename = probe.filename
+          target.size = probe.size
+          target.mimeType = probe.mimeType
+        }
+      }
+      target.status = 'ready'
+      target.error = null
+    } catch (error) {
+      target.status = 'error'
+      target.error = error instanceof Error ? error.message : String(error)
+    }
+    target.updatedAt = Date.now()
+    publishClipboard(ctx)
+  })()
+}
+
+function isHtmlPage(mimeType: string | null): boolean {
+  return Boolean(mimeType && /^(text\/html|application\/xhtml\+xml)(?:;|$)/i.test(mimeType))
 }
 
 /**
@@ -109,16 +232,26 @@ export function placeTask(input: NewDownload): DownloadTask {
     : directoryFor(
         settings.downloadDir,
         categories,
-        filename,
+        // A page batch is one user-visible unit and must share one physical
+        // folder. Do not split its videos and images back into extension-based
+        // category directories; an explicit/default/host category still wins.
+        input.groupFolder ? '' : filename,
         null,
         input.categoryId ?? settings.defaultCategoryId,
         url
       )
+  const groupFolder = input.groupFolder
+    ? sanitizeFilename(input.groupFolder).replace(/^\.+|[. ]+$/g, '').slice(0, 120)
+    : ''
+  const groupedDir = groupFolder ? normalizeDownloadDirectory(join(dir, groupFolder)) : dir
 
   return createTask({
     url,
     sourceUrl: input.sourceUrl,
-    dir,
+    groupId: input.groupId?.slice(0, 128),
+    groupName: input.groupName?.trim().slice(0, 160),
+    groupFolder: groupFolder || undefined,
+    dir: groupedDir,
     audioUrl: input.audioUrl,
     youtube: input.youtube ? { ...input.youtube } : undefined,
     filename: chosenName,
@@ -127,12 +260,17 @@ export function placeTask(input: NewDownload): DownloadTask {
     headers: input.headers,
     subtitles: input.subtitles,
     description: input.description,
+    expectedChecksum: input.expectedChecksum,
+    postProcess: input.postProcess,
+    selectedFiles: input.selectedFiles,
+    torrentFiles: input.torrentFiles,
     kind
   })
 }
 
 /** Re-files a task after the probe, unless the caller pinned a destination. */
 export function refileTask(task: DownloadTask): void {
+  if (task.groupFolder) return
   if (task.filenameLocked && task.categoryId) return
 
   const settings = getSettings()
@@ -145,7 +283,9 @@ export function refileTask(task: DownloadTask): void {
     task.url
   )
 
-  task.dir = dir
+  task.dir = task.groupFolder
+    ? normalizeDownloadDirectory(join(dir, task.groupFolder))
+    : dir
   task.categoryId = categoryId
 }
 
@@ -157,6 +297,7 @@ export function refileTask(task: DownloadTask): void {
  * pressed a button for.
  */
 function announce(task: DownloadTask): void {
+  if (task.kind === 'torrent') return
   if (!getSettings().showProgressWindow) return
   log.info(`progress window for ${task.filename || task.url}`)
   createProgressWindow(task.id)
@@ -185,7 +326,7 @@ export function registerIpc(ctx: AppContext): void {
   handle('tasks:add', async (input: NewDownload) => {
     const task = placeTask(input)
     ctx.manager.add(task, input.autoStart !== false)
-    if (input.autoStart !== false) announce(task)
+    if (input.autoStart !== false && input.suppressProgressWindow !== true) announce(task)
     return task
   })
 
@@ -198,7 +339,11 @@ export function registerIpc(ctx: AppContext): void {
       ctx.manager.add(task, input.autoStart !== false)
       return task
     })
-    if (tasks.length === 1 && inputs[0].autoStart !== false) announce(tasks[0])
+    if (
+      tasks.length === 1 &&
+      inputs[0].autoStart !== false &&
+      inputs[0].suppressProgressWindow !== true
+    ) announce(tasks[0])
     return tasks
   })
 
@@ -207,6 +352,28 @@ export function registerIpc(ctx: AppContext): void {
   handle('tasks:probe', (url: string, headers: RequestHeaders | undefined) =>
     probeUrl(validateUrl(url), { headers, timeoutMs: getSettings().timeoutMs })
   )
+
+  handle('youtube:resolve', (url: string) => {
+    const pageUrl = validateUrl(url)
+    if (!isSupportedYouTubeUrl(pageUrl)) throw new Error('Not a supported YouTube URL')
+    return resolveYouTube(pageUrl, { referer: pageUrl })
+  })
+
+  handle('media:resolvePage', (url: string) => {
+    const pageUrl = validateUrl(url)
+    if (!/^https?:/i.test(pageUrl)) throw new Error('Media pages must use HTTP or HTTPS')
+    return resolveMediaPage(pageUrl, { referer: pageUrl })
+  })
+
+  handle('clipboard:list', () => ctx.clipboardItems.map((item) => ({ ...item })))
+  handle('clipboard:retry', (id: string) => {
+    const item = ctx.clipboardItems.find((entry) => entry.id === id)
+    if (item && item.status !== 'fetching') prepareClipboardItem(ctx, item.url, id)
+  })
+  handle('clipboard:remove', (id: string) => {
+    ctx.clipboardItems = ctx.clipboardItems.filter((item) => item.id !== id)
+    publishClipboard(ctx)
+  })
 
   handle('tasks:start', (ids: string[]) => ctx.manager.start(ids))
   handle('tasks:pause', (ids: string[]) => ctx.manager.pause(ids, true))
@@ -271,10 +438,12 @@ export function registerIpc(ctx: AppContext): void {
       filename: task.filenameLocked ? task.filename : undefined,
       headers: task.headers,
       description: task.description,
+      expectedChecksum: task.expectedChecksum,
+      postProcess: task.postProcess,
       queueId: task.queueId,
       kind: task.kind,
       audioUrl: task.audioUrl,
-      youtube: task.youtube ? { pageUrl: task.youtube.pageUrl, videoFormatId: task.youtube.videoFormatId, audioFormatId: task.youtube.audioFormatId ?? null, height: task.youtube.height ?? null } : undefined
+      youtube: task.youtube ? { pageUrl: task.youtube.pageUrl, videoFormatId: task.youtube.videoFormatId, audioFormatId: task.youtube.audioFormatId ?? null, height: task.youtube.height ?? null, role: task.youtube.role } : undefined
     })
     ctx.manager.add(fresh, true)
     announce(fresh)
@@ -296,6 +465,18 @@ export function registerIpc(ctx: AppContext): void {
 
   handle('tasks:reveal', async (id: string) => {
     const target = await openable(ctx, id)
+    if (!target) return false
+    shell.showItemInFolder(target)
+    return true
+  })
+
+  handle('tasks:openTorrentItem', async (id: string, itemPath: string) => {
+    const target = await openableTorrentItem(ctx, id, itemPath)
+    return target ? (await shell.openPath(target)) === '' : false
+  })
+
+  handle('tasks:revealTorrentItem', async (id: string, itemPath: string) => {
+    const target = await openableTorrentItem(ctx, id, itemPath)
     if (!target) return false
     shell.showItemInFolder(target)
     return true
@@ -343,7 +524,7 @@ export function registerIpc(ctx: AppContext): void {
 
   handle('handoff:acceptMedia', async (
     id: string,
-    opts: { variantUrl: string; filename: string; dir?: string; categoryId?: string; queueId?: string; audioUrl?: string | null; youtube?: { videoFormatId: string; audioFormatId?: string | null } }
+    opts: { variantUrl: string; filename: string; dir?: string; categoryId?: string; queueId?: string; audioUrl?: string | null; youtube?: { videoFormatId: string; audioFormatId?: string | null; role?: 'video' | 'audio' } }
   ) => {
     // Validate the media entry before consuming the pending handoff. A media
     // list can be cleared concurrently from another window; in that case the
@@ -374,6 +555,7 @@ export function registerIpc(ctx: AppContext): void {
             pageUrl: candidate.pageUrl,
             videoFormatId: opts.youtube.videoFormatId,
             audioFormatId: opts.youtube.audioFormatId ?? null,
+            role: opts.youtube.role ?? 'video',
             height: chosen?.height ?? null
           }
         : undefined,
@@ -429,6 +611,10 @@ export function registerIpc(ctx: AppContext): void {
     const next = await saveSettings(patch)
     ctx.manager.applySettings()
     if (patch.watchClipboard !== undefined) ctx.setClipboardWatch(patch.watchClipboard === true)
+    if (patch.showDropzone !== undefined) {
+      const { syncDropzoneWindow } = require('./windows.ts')
+      syncDropzoneWindow(patch.showDropzone === true)
+    }
     return next
   })
 
@@ -467,6 +653,7 @@ export function registerIpc(ctx: AppContext): void {
   handle('tools:status', (checkLatest: boolean) => getToolStatus(checkLatest === true))
   handle('tools:update', (id: ToolId) => updateTool(id))
 
+  handle('clipboard:read', () => clipboard.readText().trim())
   handle('clipboard:write', (text: string) => clipboard.writeText(String(text)))
   handle('updates:check', () => checkForUpdates(getSettings().updateFeedUrl))
   handle('updates:open', async (raw: string) => {
@@ -535,6 +722,30 @@ async function openable(ctx: AppContext, id: string): Promise<string | null> {
   return target
 }
 
+async function openableTorrentItem(
+  ctx: AppContext,
+  id: string,
+  itemPath: string
+): Promise<string | null> {
+  const task = ctx.manager.get(id)
+  if (task?.kind !== 'torrent' || typeof itemPath !== 'string') return null
+  if (!task.torrentInfo?.files.some((file) => file.path === itemPath)) return null
+
+  const target = resolveTorrentItemPath(
+    task.dir,
+    itemPath,
+    task.torrentInfo.files.map((file) => file.path)
+  )
+  if (!target) return null
+
+  try {
+    await access(target, constants.F_OK)
+    return target
+  } catch {
+    return null
+  }
+}
+
 function persistTaskSnapshot(ctx: AppContext): void {
   // `persistTasks` is coalesced, so metadata edits remain cheap even when the
   // user is rapidly editing several rows.
@@ -594,7 +805,7 @@ function resolveChosenUrls(
   opts: {
     variantUrl: string
     audioUrl?: string | null
-    youtube?: { videoFormatId: string; audioFormatId?: string | null }
+    youtube?: { videoFormatId: string; audioFormatId?: string | null; role?: 'video' | 'audio' }
   }
 ): { url: string; audioUrl: string | null } {
   if (!opts.youtube) {

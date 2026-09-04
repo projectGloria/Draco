@@ -6,9 +6,10 @@ const en = {
   scheduler: 'Scheduler', options: 'Options', search: 'Search', allDownloads: 'All downloads',
   unfinished: 'Unfinished', finished: 'Finished', categories: 'Categories', queues: 'Queues',
   manageQueues: 'Manage queues and the scheduler', queueFailed: 'Queue command failed',
-  stopQueue: 'Stop this queue', startQueue: 'Start this queue', active: 'active', queued: 'queued',
+  stopQueue: 'Stop this queue', startQueue: 'Start queue', active: 'active', queued: 'queued',
   remaining: 'remaining', limit: 'limit', browser: 'Browser', downloadManager: 'Download Manager',
-  inProgress: '{count} download(s) in progress', minimize: 'Minimize', restore: 'Restore',
+  inProgress: '{count} download(s) in progress', downloadingSingle: 'Downloading: {name}',
+  downloadingMultiple: 'Downloading: {name} and {count} others', minimize: 'Minimize', restore: 'Restore',
   maximize: 'Maximize', close: 'Close', language: 'Language', systemLanguage: 'System language',
   english: 'English', turkish: 'Türkçe'
 } as const
@@ -21,9 +22,10 @@ const tr: Record<Key, string> = {
   scheduler: 'Zamanlayıcı', options: 'Seçenekler', search: 'Ara', allDownloads: 'Tüm indirmeler',
   unfinished: 'Tamamlanmamış', finished: 'Tamamlanmış', categories: 'Kategoriler', queues: 'Kuyruklar',
   manageQueues: 'Kuyrukları ve zamanlayıcıyı yönet', queueFailed: 'Kuyruk komutu başarısız',
-  stopQueue: 'Bu kuyruğu durdur', startQueue: 'Bu kuyruğu başlat', active: 'etkin', queued: 'kuyrukta',
+  stopQueue: 'Bu kuyruğu durdur', startQueue: 'Kuyruğu başlat', active: 'etkin', queued: 'kuyrukta',
   remaining: 'kaldı', limit: 'sınır', browser: 'Tarayıcı', downloadManager: 'İndirme Yöneticisi',
-  inProgress: '{count} indirme sürüyor', minimize: 'Küçült', restore: 'Geri yükle',
+  inProgress: '{count} indirme sürüyor', downloadingSingle: 'İndiriliyor: {name}',
+  downloadingMultiple: 'İndiriliyor: {name} ve {count} diğerleri', minimize: 'Küçült', restore: 'Geri yükle',
   maximize: 'Büyüt', close: 'Kapat', language: 'Dil', systemLanguage: 'Sistem dili',
   english: 'İngilizce', turkish: 'Türkçe'
 }

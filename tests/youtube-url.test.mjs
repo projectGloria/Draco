@@ -61,3 +61,23 @@ test('the final confirmation contract requires and returns already-prepared stre
     }
   )
 })
+
+test('an audio-only choice uses its stream as the primary download', () => {
+  const audio = {
+    url: 'https://rr1.googlevideo.com/videoplayback?itag=251',
+    audioUrl: null,
+    label: 'Music · 160 kbps',
+    height: null,
+    bandwidth: 160000,
+    codecs: 'opus',
+    estimatedSize: 100,
+    container: 'webm',
+    youtube: { videoFormatId: '251', audioFormatId: null, role: 'audio' }
+  }
+
+  assert.equal(variantsPreparedForStart([audio]), true)
+  assert.deepEqual(
+    chosenYouTubeUrls([audio], 'https://www.youtube.com/watch?v=abc', audio.youtube),
+    { url: audio.url, audioUrl: null }
+  )
+})

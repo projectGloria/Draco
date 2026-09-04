@@ -14,7 +14,7 @@ import { basename, join } from 'node:path'
 import type { DownloadTask, Segment } from '@shared/types'
 import { getDispatcher } from '../engine/http.ts'
 import { QuotaExceededError, type RateLimiter } from '../engine/limiter.ts'
-import { uniquePath } from '../engine/naming.ts'
+import { moveFile, uniquePath } from '../engine/naming.ts'
 import { mapConcurrent } from '../engine/concurrency.ts'
 import { buildHeaders } from '../engine/probe.ts'
 import type { Runner } from '../engine/runner.ts'
@@ -49,6 +49,9 @@ export interface HlsRunnerConfig {
   maxConnections: number
   retryLimit: number
   timeoutMs: number
+  tempDir?: string
+  checkDiskSpace?: boolean
+  exponentialBackoff?: boolean
 }
 
 export interface HlsRunnerDeps {
@@ -96,16 +99,20 @@ export class HlsRunner implements Runner {
     this.deps = deps
   }
 
+  private get tempDir(): string {
+    return this.config.tempDir || this.task.dir
+  }
+
   private get partsDir(): string {
-    return join(this.task.dir, this.task.filename + '.dracoparts')
+    return join(this.tempDir, this.task.filename + '.dracoparts')
   }
 
   private get joinedVideoPath(): string {
-    return join(this.task.dir, this.task.filename + '.dracodl')
+    return join(this.tempDir, this.task.filename + '.dracodl')
   }
 
   private get joinedAudioPath(): string {
-    return join(this.task.dir, this.task.filename + '.dracodl.audio')
+    return join(this.tempDir, this.task.filename + '.dracodl.audio')
   }
 
   private get manifestPath(): string {
@@ -463,17 +470,32 @@ export class HlsRunner implements Runner {
     const tmp = temporaryPath(path)
     const handle = await open(tmp, 'w')
     let offset = 0
+    let buf: Buffer[] = []
+    let bufLen = 0
+
+    const flush = async () => {
+      if (bufLen === 0) return
+      await writeAtFully(handle, Buffer.concat(buf), offset)
+      offset += bufLen
+      buf = []
+      bufLen = 0
+    }
+
     try {
       const bytes = await this.transfer(url, byteRange, slot, {
         reset: async () => {
+          buf = []
+          bufLen = 0
           offset = 0
           await handle.truncate(0)
         },
         write: async (chunk) => {
-          await writeAtFully(handle, chunk, offset)
-          offset += chunk.length
+          buf.push(chunk)
+          bufLen += chunk.length
+          if (bufLen >= 65536) await flush()
         }
       })
+      await flush()
       await handle.close()
       await rename(tmp, path)
       return bytes
@@ -703,7 +725,7 @@ export class HlsRunner implements Runner {
       })
 
       this.throwIfAborted()
-      await rename(muxTemp, target)
+      await moveFile(muxTemp, target)
       await rm(this.joinedVideoPath, { force: true }).catch(() => {})
       await rm(this.joinedAudioPath, { force: true }).catch(() => {})
       this.task.detail = null
@@ -733,7 +755,7 @@ export class HlsRunner implements Runner {
         this.task.dir,
         this.task.filename.replace(/\.([a-z0-9]+)$/i, '.ts')
       )
-      await rename(this.joinedVideoPath, fallback)
+      await moveFile(this.joinedVideoPath, fallback)
       await rm(this.joinedAudioPath, { force: true }).catch(() => {})
 
       this.task.description = this.task.description

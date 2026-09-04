@@ -1,9 +1,13 @@
-import { open, rename, rm, stat, type FileHandle } from 'node:fs/promises'
-import { basename, join } from 'node:path'
+import { createHash } from 'node:crypto'
+import { createReadStream } from 'node:fs'
+import { open, rm, stat, statfs, type FileHandle } from 'node:fs/promises'
+import { basename, join, extname } from 'node:path'
+import { spawn } from 'node:child_process'
+import { ensureFfmpeg } from '../hls/ffmpeg.ts'
 import type { DownloadTask, Segment } from '../../shared/types.ts'
 import { journalMatches, journalSegmentsValid, readJournal, removeJournal, segmentsForJournal, writeJournal, JOURNAL_VERSION } from './journal.ts'
 import { QuotaExceededError, type RateLimiter } from './limiter.ts'
-import { uniquePath } from './naming.ts'
+import { uniquePath, moveFile } from './naming.ts'
 import { buildHeaders, probeUrl } from './probe.ts'
 import { logger } from '../log.ts'
 import { preallocate } from './preallocate.ts'
@@ -31,6 +35,9 @@ export interface TaskRunnerConfig {
   minSplitSize: number
   retryLimit: number
   timeoutMs: number
+  tempDir?: string
+  checkDiskSpace?: boolean
+  exponentialBackoff?: boolean
 }
 
 export interface TaskRunnerDeps {
@@ -147,7 +154,8 @@ export class TaskRunner {
   }
 
   get partPath(): string {
-    return join(this.task.dir, this.task.filename + '.dracodl')
+    const dir = this.config.tempDir || this.task.dir
+    return join(dir, this.task.filename + '.dracodl')
   }
 
   get journalPath(): string {
@@ -331,9 +339,7 @@ export class TaskRunner {
        * Old/restored tasks may still carry only the watch page; those use the
        * extractor fallback, and expired prepared URLs refresh after HTTP errors.
        */
-      const requestedItag = Number(this.task.youtube.role === 'audio'
-        ? this.task.youtube.audioFormatId?.split('-')[0]
-        : this.task.youtube.videoFormatId.split('-')[0])
+      const requestedItag = Number(this.task.youtube.videoFormatId.split('-')[0])
       const prepared = preparedYouTubeUrl(
         this.task.url,
         Number.isSafeInteger(requestedItag) ? requestedItag : undefined
@@ -384,6 +390,20 @@ export class TaskRunner {
     await this.deps.onProbed?.(this.task)
 
     this.task.dir = await ensureDownloadDirectory(this.task.dir)
+
+    if (this.config.checkDiskSpace && this.task.size !== null && this.task.size > 0) {
+      try {
+        const stats = await statfs(this.task.dir)
+        const free = stats.bavail * stats.bsize
+        // Require at least the file size + 10MB of padding
+        if (free < this.task.size + 10 * 1024 * 1024) {
+          throw new Error(`Not enough disk space. Requires ${Math.ceil(this.task.size / (1024 * 1024))} MB.`)
+        }
+      } catch (err) {
+        if (err instanceof Error && err.message.includes('Not enough disk space')) throw err
+        // Ignore statfs errors (e.g. unsupported on some network drives)
+      }
+    }
 
     const restored = await this.restoreOrReset(probe.size)
 
@@ -517,6 +537,7 @@ export class TaskRunner {
       limiter: this.deps.limiter,
       timeoutMs: this.config.timeoutMs,
       retryLimit: this.config.retryLimit,
+      exponentialBackoff: this.config.exponentialBackoff ?? false,
       expectedSize: this.task.size,
       signal: this.controller.signal,
       writeBufferBytes: Math.min(MAX_WRITE_BUFFER_BYTES, this.config.minSplitSize),
@@ -632,12 +653,68 @@ export class TaskRunner {
     await this.fh?.close()
     this.fh = null
 
-    const target = await uniquePath(this.task.dir, this.task.filename)
-    await rename(this.partPath, target)
+    if (this.task.expectedChecksum) {
+      this.task.detail = 'Verifying checksum...'
+      this.deps.onUpdate(this.task)
+      
+      const checksumLength = this.task.expectedChecksum.trim().length
+      const algo = checksumLength === 32 ? 'md5' : checksumLength === 40 ? 'sha1' : 'sha256'
+      
+      const hash = createHash(algo)
+      const stream = createReadStream(this.partPath)
+      
+      await new Promise<void>((resolve, reject) => {
+        stream.on('data', (chunk) => hash.update(chunk))
+        stream.on('end', () => resolve())
+        stream.on('error', (err) => reject(err))
+      })
+      
+      const actual = hash.digest('hex').toLowerCase()
+      const expected = this.task.expectedChecksum.trim().toLowerCase()
+      
+      if (actual !== expected) {
+        throw new Error(`Checksum mismatch. Expected ${expected}, got ${actual}`)
+      }
+    }
+
+    let target = await uniquePath(this.task.dir, this.task.filename)
+    await moveFile(this.partPath, target)
     // The payload is already safely at its final name. Journal cleanup is
     // recovery metadata, so a transient cleanup failure must not turn a finished
     // download into a visible error.
     await removeJournal(this.journalPath).catch(() => {})
+
+    if (this.task.postProcess === 'mp4' || this.task.postProcess === 'mp3') {
+      this.task.detail = `Converting to ${this.task.postProcess.toUpperCase()}...`
+      this.deps.onUpdate(this.task)
+
+      const ffmpegPath = await ensureFfmpeg()
+      const finalExt = '.' + this.task.postProcess
+      const outPath = await uniquePath(
+        this.task.dir, 
+        basename(this.task.filename, extname(this.task.filename)) + finalExt
+      )
+      
+      const args = ['-y', '-i', target]
+      if (this.task.postProcess === 'mp4') {
+        args.push('-c:v', 'copy', '-c:a', 'copy')
+      } else if (this.task.postProcess === 'mp3') {
+        args.push('-vn', '-c:a', 'libmp3lame', '-q:a', '2')
+      }
+      args.push(outPath)
+
+      await new Promise<void>((resolve, reject) => {
+        const child = spawn(ffmpegPath, args, { windowsHide: true, stdio: 'ignore' })
+        child.on('error', reject)
+        child.on('close', (code) => {
+          if (code === 0) resolve()
+          else reject(new Error(`ffmpeg exited with code ${code}`))
+        })
+      })
+
+      await rm(target, { force: true }).catch(() => {})
+      target = outPath
+    }
 
     this.task.filename = basename(target)
     this.task.status = 'done'

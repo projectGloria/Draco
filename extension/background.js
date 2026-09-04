@@ -51,16 +51,26 @@ async function savePrefs(next) {
 
 async function probeApp(force = false) {
   if (!force && Date.now() - appStatus.checkedAt < APP_STATUS_TTL_MS) return appStatus
-  const reply = await callHost({ type: 'ping' })
-  const next = {
-    running: reply?.ok === true,
-    version: reply?.ok && typeof reply.version === 'string' ? reply.version : null,
-    checkedAt: Date.now()
-  }
-  const changed = next.running !== appStatus.running || next.version !== appStatus.version
-  appStatus = next
-  if (changed) void refreshAllTabs()
-  return appStatus
+  if (probePromise) return probePromise
+
+  probePromise = (async () => {
+    try {
+      const reply = await callHost({ type: 'ping' })
+      const next = {
+        running: reply?.ok === true,
+        version: reply?.ok && typeof reply.version === 'string' ? reply.version : null,
+        checkedAt: Date.now()
+      }
+      const changed = next.running !== appStatus.running || next.version !== appStatus.version
+      appStatus = next
+      if (changed) void refreshAllTabs()
+      return appStatus
+    } finally {
+      probePromise = null
+    }
+  })()
+  
+  return probePromise
 }
 
 async function pageIdentity(tab) {
@@ -174,42 +184,51 @@ async function setMedia(tabId, list) {
  */
 const PASSTHROUGH_EXPIRY_MS = 30_000
 
-async function addPassThrough(url) {
-  const data = await chrome.storage.session.get('passThrough')
-  const pt = data.passThrough || {}
-  pt[url] = Date.now() + PASSTHROUGH_EXPIRY_MS
+let passThroughMutex = Promise.resolve()
 
-  // Prune expired
-  const now = Date.now()
-  for (const k of Object.keys(pt)) {
-    if (pt[k] < now) delete pt[k]
-  }
+function addPassThrough(url) {
+  passThroughMutex = passThroughMutex.then(async () => {
+    const data = await chrome.storage.session.get('passThrough')
+    const pt = data.passThrough || {}
+    pt[url] = Date.now() + PASSTHROUGH_EXPIRY_MS
 
-  await chrome.storage.session.set({ passThrough: pt })
+    const now = Date.now()
+    for (const k of Object.keys(pt)) {
+      if (pt[k] < now) delete pt[k]
+    }
+    await chrome.storage.session.set({ passThrough: pt })
+  }).catch(() => {})
+  return passThroughMutex
 }
 
 async function checkAndConsumePassThrough(url) {
-  const data = await chrome.storage.session.get('passThrough')
-  const pt = data.passThrough || {}
+  let result = false
+  passThroughMutex = passThroughMutex.then(async () => {
+    const data = await chrome.storage.session.get('passThrough')
+    const pt = data.passThrough || {}
 
-  // Clean up expired ones while we're here
-  let changed = false
-  const now = Date.now()
-  for (const k of Object.keys(pt)) {
-    if (pt[k] < now) {
-      delete pt[k]
-      changed = true
+    let changed = false
+    const now = Date.now()
+    for (const k of Object.keys(pt)) {
+      if (pt[k] < now) {
+        delete pt[k]
+        changed = true
+      }
     }
-  }
 
-  if (pt[url]) {
-    delete pt[url]
-    await chrome.storage.session.set({ passThrough: pt })
-    return true
-  } else if (changed) {
-    await chrome.storage.session.set({ passThrough: pt })
-  }
-  return false
+    if (pt[url]) {
+      delete pt[url]
+      changed = true
+      result = true
+    }
+
+    if (changed) {
+      await chrome.storage.session.set({ passThrough: pt })
+    }
+  }).catch(() => {})
+  
+  await passThroughMutex
+  return result
 }
 
 /* ------------------------------------------------------------------ */
@@ -317,6 +336,11 @@ async function cookieHeaderFor(url) {
 }
 
 chrome.downloads.onCreated.addListener(async (item) => {
+  if (item.startTime) {
+    const age = Date.now() - new Date(item.startTime).getTime()
+    if (age > 10_000) return // Ignore old downloads re-emitted by the browser on startup
+  }
+
   if (item.finalUrl && await checkAndConsumePassThrough(item.finalUrl)) return
   if (item.url && await checkAndConsumePassThrough(item.url)) return
 
@@ -419,7 +443,6 @@ async function primeYouTubeUrl(url) {
   if (prefs.paused || prefs.excludedVideoIds.includes(`youtube:${videoId}`)) {
     return { ok: false, primed: false, reason: 'disabled' }
   }
-  if (!(await probeApp()).running) return { ok: false, primed: false, reason: 'offline' }
 
   const active = youtubePrimeRequests.get(videoId)
   if (active) return active

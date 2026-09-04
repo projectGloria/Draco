@@ -187,7 +187,7 @@ func messageType(body []byte) string {
 
 func shouldLaunchForMessage(body []byte) bool {
 	switch messageType(body) {
-	case "download", "media", "youtube":
+	case "download", "media", "youtube", "youtubePrime":
 		return true
 	default:
 		return false

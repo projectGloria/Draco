@@ -1,5 +1,4 @@
 import { useState } from 'react'
-import type { DownloadTask } from '@shared/types'
 import { useApp } from '../store/app'
 import { reportError } from '../store/toasts'
 import { useT } from '../i18n'
@@ -7,6 +6,7 @@ import {
   CalendarIcon,
   CheckIcon,
   ChevronIcon,
+  ClipboardIcon,
   DownloadIcon,
   FolderIcon,
   LayersIcon,
@@ -25,7 +25,6 @@ export default function Sidebar({
 }: {
   onEditQueues(): void
 }): React.ReactElement {
-  const tasks = useApp((s) => s.tasks)
   const categories = useApp((s) => s.categories)
   const queues = useApp((s) => s.queues)
   const sidebar = useApp((s) => s.sidebar)
@@ -35,18 +34,63 @@ export default function Sidebar({
   const total = useApp((s) => s.tasks.length)
   const unfinished = useApp((s) => s.tasks.filter((t) => t.status !== 'done').length)
   const finished = total - unfinished
+  const clipboardItems = useApp((s) => s.clipboardItems)
+  const clipboardFetching = clipboardItems.some((item) => item.status === 'fetching')
+
+  const queueCounts = useApp((s) => {
+    const counts = new Map<string, number>()
+    for (const q of s.queues) {
+      let n = 0
+      for (const task of s.tasks) if (task.queueId === q.id) n++
+      counts.set(q.id, n)
+    }
+    return Array.from(counts.entries()).map(([k, v]) => `${k}:${v}`).join(',')
+  })
+
+  const categoryCounts = useApp((s) => {
+    const counts = new Map<string, number>()
+    for (const c of s.categories) {
+      let n = 0
+      for (const task of s.tasks) if (task.categoryId === c.id) n++
+      counts.set(c.id, n)
+    }
+    return Array.from(counts.entries()).map(([k, v]) => `${k}:${v}`).join(',')
+  })
+
+  const getQueueCount = (id: string) => {
+    const match = new RegExp(`${id}:(\\d+)`).exec(queueCounts)
+    return match ? parseInt(match[1], 10) : 0
+  }
+
+  const getCategoryCount = (id: string) => {
+    const match = new RegExp(`${id}:(\\d+)`).exec(categoryCounts)
+    return match ? parseInt(match[1], 10) : 0
+  }
 
   const [openCategories, setOpenCategories] = useState(true)
   const [openQueues, setOpenQueues] = useState(true)
 
   return (
-    <nav className="w-[204px] shrink-0 border-r border-line bg-white/[0.012] overflow-y-auto py-2 px-2 flex flex-col gap-0.5">
+    <nav className="w-[204px] shrink-0 border-r border-line bg-white/[0.012] overflow-y-auto py-2 px-2 flex flex-col gap-0.5 max-[720px]:hidden">
       <Item
         icon={<ListIcon className="w-[15px] h-[15px]" />}
         label={t('allDownloads')}
         count={total}
         active={sidebar === 'all'}
         onClick={() => setSidebar('all')}
+      />
+      <Item
+        icon={<ClipboardIcon className="w-[15px] h-[15px]" />}
+        label="Clipboard"
+        count={clipboardItems.length}
+        active={sidebar === 'clipboard'}
+        onClick={() => setSidebar('clipboard')}
+        trailing={clipboardFetching ? (
+          <span
+            className="w-3.5 h-3.5 rounded-full border-2 border-faint border-t-[var(--accent)] animate-spin shrink-0"
+            aria-label="Preparing clipboard link"
+          />
+        ) : undefined}
       />
       <Item
         icon={<DownloadIcon className="w-[15px] h-[15px]" />}
@@ -75,11 +119,13 @@ export default function Sidebar({
             indent
             icon={<FolderIcon className="w-[15px] h-[15px]" />}
             label={category.name}
-            count={countBy(tasks, (t) => t.categoryId === category.id)}
+            count={getCategoryCount(category.id)}
             active={sidebar === 'cat:' + category.id}
             onClick={() => setSidebar('cat:' + category.id)}
           />
         ))}
+
+      <div className="h-2" />
 
       <Section label={t('queues')} open={openQueues} onToggle={() => setOpenQueues((v) => !v)}>
         <button
@@ -97,7 +143,7 @@ export default function Sidebar({
             id={queue.id}
             name={queue.name}
             running={queue.running}
-            count={countBy(tasks, (t) => t.queueId === queue.id)}
+            count={getQueueCount(queue.id)}
             active={sidebar === 'queue:' + queue.id}
             onClick={() => setSidebar('queue:' + queue.id)}
             stopLabel={t('stopQueue')}
@@ -109,11 +155,7 @@ export default function Sidebar({
   )
 }
 
-function countBy(tasks: DownloadTask[], predicate: (task: DownloadTask) => boolean): number {
-  let n = 0
-  for (const task of tasks) if (predicate(task)) n++
-  return n
-}
+
 
 function Section({
   label,

@@ -18,11 +18,11 @@ export interface MediaPlaylist {
 /** Splits `KEY=VALUE,KEY="quoted,value"` without breaking on commas inside quotes. */
 function parseAttributes(line: string): Record<string, string> {
   const out: Record<string, string> = {}
-  const re = /([A-Z0-9-]+)=("[^"]*"|[^,]*)/g
+  const re = /([a-z0-9-]+)=("[^"]*"|[^,]*)/gi
   let match: RegExpExecArray | null
 
   while ((match = re.exec(line))) {
-    out[match[1]] = match[2].replace(/^"|"$/g, '')
+    out[match[1].toUpperCase()] = match[2].replace(/^"|"$/g, '')
   }
   return out
 }
@@ -69,7 +69,7 @@ export function parseMaster(text: string, baseUrl: string): MediaVariant[] {
     if (!uri || uri.startsWith('#')) continue
 
     const resolution = attrs.RESOLUTION ?? ''
-    const height = /\d+x(\d+)/.exec(resolution)?.[1]
+    const height = /\d+x(\d+)/i.exec(resolution)?.[1]
     const bandwidth = Number(attrs['AVERAGE-BANDWIDTH'] ?? attrs.BANDWIDTH) || null
     
     let audioUrl = null

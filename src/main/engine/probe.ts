@@ -63,6 +63,8 @@ function setProbeCache(key: string, value: { result: ProbeResult; expiresAt: num
 }
 
 export async function probeUrl(url: string, options: ProbeOptions = {}): Promise<ProbeResult> {
+  if (isTorrentSource(url)) return probeTorrent(url, options)
+
   const cacheKey = url + JSON.stringify(options.headers || {})
   const cached = probeCache.get(cacheKey)
   if (cached && Date.now() < cached.expiresAt) {
@@ -110,7 +112,11 @@ export async function probeUrl(url: string, options: ProbeOptions = {}): Promise
 
   // The authoritative check. `Accept-Ranges: bytes` is advisory and regularly
   // lies, especially behind CDNs and PHP download scripts; a real 206 does not.
-  const ranged = await fetch(finalUrl, {
+  // Reopen the caller's stable URL instead of reusing the destination learned
+  // from HEAD. Some media CDNs issue method-specific or single-use redirects;
+  // a ranged GET against the HEAD destination can therefore return 404 even
+  // though following the original URL again succeeds.
+  const ranged = await fetch(url, {
     method: 'GET',
     headers: { ...headers, range: 'bytes=0-0' },
     redirect: 'follow',
@@ -182,6 +188,146 @@ export async function probeUrl(url: string, options: ProbeOptions = {}): Promise
   } finally {
     // Always drain: an unconsumed body holds its socket out of the pool.
     await ranged.body?.cancel().catch(() => {})
+  }
+}
+
+function isTorrentSource(url: string): boolean {
+  if (url.startsWith('magnet:')) return true
+  try {
+    return /\.torrent$/i.test(new URL(url).pathname)
+  } catch {
+    return false
+  }
+}
+
+async function probeTorrent(url: string, options: ProbeOptions): Promise<ProbeResult> {
+  const cacheKey = `torrent:${url}`
+  const cached = probeCache.get(cacheKey)
+  if (cached && Date.now() < cached.expiresAt) return cached.result
+
+  const { default: WebTorrent } = await import('webtorrent')
+  const client = new WebTorrent()
+  const timeoutMs = Math.max(options.timeoutMs ?? 45_000, 45_000)
+
+  try {
+    const torrent = await new Promise<TorrentProbeMetadata>((resolve, reject) => {
+      let settled = false
+      let timer: NodeJS.Timeout | undefined
+      const candidate = client.add(url)
+
+      const finish = (metadata?: TorrentProbeMetadata, error?: unknown): void => {
+        if (settled) return
+        if (!metadata && !error) return
+        settled = true
+        if (timer) clearTimeout(timer)
+        candidate.removeListener('metadata', onMetadata)
+        candidate.removeListener('error', onError)
+        client.removeListener('error', onError)
+        options.signal?.removeEventListener('abort', onAbort)
+        if (error) reject(error)
+        else resolve(metadata!)
+      }
+      const onMetadata = (): void => finish(metadataFromWebTorrent(candidate))
+      const onError = (error: unknown): void => finish(undefined, error)
+      const onAbort = (): void => finish(undefined, new Error('Torrent metadata request was cancelled'))
+
+      candidate.once('metadata', onMetadata)
+      candidate.once('error', onError)
+      client.once('error', onError)
+      options.signal?.addEventListener('abort', onAbort, { once: true })
+      timer = setTimeout(
+        () => finish(undefined, new Error(
+          'No peers currently advertise this torrent. Try again later or provide its .torrent file.'
+        )),
+        timeoutMs
+      )
+      // Public metadata caches retain the small .torrent descriptor even when
+      // a swarm temporarily has no live peer. This runs alongside DHT/tracker
+      // discovery, is size-bounded, and is accepted only when its info hash
+      // exactly matches the requested magnet.
+      void fetchCachedTorrentDescriptor(url, options.signal)
+        .then((cached) => finish(cached?.metadata))
+        .catch(() => {})
+      if (options.signal?.aborted) onAbort()
+    })
+
+    const torrentFiles = torrent.files.map((file) => ({
+      path: String(file.path),
+      size: Number(file.length)
+    }))
+    const result: ProbeResult = {
+      finalUrl: url,
+      size: Number(torrent.length),
+      resumable: true,
+      etag: null,
+      lastModified: null,
+      mimeType: 'application/x-bittorrent',
+      filename: torrent.name || 'torrent_download',
+      statusCode: 200,
+      torrentFiles
+    }
+    setProbeCache(cacheKey, { result, expiresAt: Date.now() + 5 * 60_000 })
+    return result
+  } finally {
+    client.destroy()
+  }
+}
+
+export interface TorrentProbeMetadata {
+  name: string
+  length: number
+  files: Array<{ path: string; length: number }>
+}
+
+function metadataFromWebTorrent(torrent: any): TorrentProbeMetadata {
+  return {
+    name: String(torrent.name || 'torrent_download'),
+    length: Number(torrent.length),
+    files: torrent.files.map((file: any) => ({ path: String(file.path), length: Number(file.length) }))
+  }
+}
+
+export async function fetchCachedTorrentDescriptor(
+  magnetUrl: string,
+  signal: AbortSignal | undefined
+): Promise<{ metadata: TorrentProbeMetadata; torrentId: Uint8Array } | undefined> {
+  if (!magnetUrl.startsWith('magnet:')) return undefined
+  const { default: parseTorrent } = await import('parse-torrent')
+  const requested = await parseTorrent(magnetUrl)
+  if (!/^[a-f0-9]{40}$/i.test(requested.infoHash)) return undefined
+
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), 10_000)
+  const abort = (): void => controller.abort()
+  signal?.addEventListener('abort', abort, { once: true })
+  try {
+    const response = await fetch(
+      `https://itorrents.org/torrent/${requested.infoHash.toUpperCase()}.torrent`,
+      {
+        headers: { accept: 'application/x-bittorrent', 'user-agent': DEFAULT_USER_AGENT },
+        redirect: 'follow',
+        signal: controller.signal,
+        dispatcher: getDispatcher(10_000)
+      } as RequestInit
+    )
+    if (!response.ok) return undefined
+    const declared = Number(response.headers.get('content-length') ?? 0)
+    if (declared > 10 * 1024 * 1024) return undefined
+    const bytes = new Uint8Array(await response.arrayBuffer())
+    if (bytes.length === 0 || bytes.length > 10 * 1024 * 1024) return undefined
+    const parsed = await parseTorrent(bytes)
+    if (parsed.infoHash.toLowerCase() !== requested.infoHash.toLowerCase() || !parsed.files) return undefined
+    return {
+      torrentId: bytes,
+      metadata: {
+        name: parsed.name || 'torrent_download',
+        length: Number(parsed.length ?? parsed.files.reduce((sum, file) => sum + file.length, 0)),
+        files: parsed.files.map((file) => ({ path: file.path, length: file.length }))
+      }
+    }
+  } finally {
+    clearTimeout(timer)
+    signal?.removeEventListener('abort', abort)
   }
 }
 

@@ -174,13 +174,55 @@ function GeneralTab({ onShowTools }: { onShowTools(tools: ToolStatus[]): void })
           onChange={(event) => void patch({ defaultCategoryId: event.target.value || null })}
           className="field text-[12.5px]"
         >
-          <option value="">None — save in the download folder</option>
+          <option value="">None – save in the download folder</option>
           {categories.map((category) => (
             <option key={category.id} value={category.id}>
               {category.name}
             </option>
           ))}
         </select>
+      </Field>
+
+      <Field
+        label="Cat mode 🐱"
+        hint="Keep queued downloads alive by occasionally downloading tiny 5-second chunks at low speed (prevents server timeouts)."
+      >
+        <label className="flex items-center gap-2 text-[12.5px] cursor-pointer w-max h-8">
+          <input
+            type="checkbox"
+            checked={settings.catMode}
+            onChange={(event) => void patch({ catMode: event.target.checked })}
+          />
+          Enable Cat Mode
+        </label>
+      </Field>
+
+      <Field
+        label="Disk Space Checks"
+        hint="Prevent downloads from starting if there is not enough free disk space."
+      >
+        <label className="flex items-center gap-2 text-[12.5px] cursor-pointer w-max h-8">
+          <input
+            type="checkbox"
+            checked={settings.checkDiskSpace}
+            onChange={(event) => void patch({ checkDiskSpace: event.target.checked })}
+          />
+          Verify free space before downloading
+        </label>
+      </Field>
+
+      <Field
+        label="Network Retries"
+        hint="Use exponential backoff when retrying failed connections instead of hitting the server instantly."
+      >
+        <label className="flex items-center gap-2 text-[12.5px] cursor-pointer w-max h-8">
+          <input
+            type="checkbox"
+            checked={settings.exponentialBackoff}
+            onChange={(event) => void patch({ exponentialBackoff: event.target.checked })}
+          />
+          Enable exponential backoff
+        </label>
       </Field>
 
       <Field
@@ -303,6 +345,12 @@ function GeneralTab({ onShowTools }: { onShowTools(tools: ToolStatus[]): void })
           onChange={(next) => void patch({ showProgressWindow: next })}
           label="Show a progress window for each download"
           hint="One small window per download you start, the way IDM does, with its own pause and cancel. Turn it off to keep everything in this list."
+        />
+        <Toggle
+          checked={settings.showDropzone}
+          onChange={(next) => void patch({ showDropzone: next })}
+          label="Show Dropzone Widget"
+          hint="A small floating window you can drag links into."
         />
       </div>
     </div>

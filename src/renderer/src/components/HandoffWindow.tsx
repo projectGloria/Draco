@@ -58,7 +58,7 @@ export default function HandoffWindow({ id }: { id: string }): React.ReactElemen
     }
     document.addEventListener('keydown', onKey)
     return () => document.removeEventListener('keydown', onKey)
-  })
+  }, [])
 
   return (
     <div className="app-bg h-full flex flex-col overflow-hidden border border-line-strong">
@@ -325,7 +325,7 @@ function MediaBody({
     try {
       await window.api.acceptHandoffMedia(request.id, {
         variantUrl: variant.url,
-        filename: filename.trim() || 'video.mp4',
+        filename: filename.trim() || (variant.youtube?.role === 'audio' ? 'music.m4a' : 'video.mp4'),
         dir: dir ?? undefined,
         categoryId: categoryId || undefined,
         queueId: queueId || undefined,
@@ -666,7 +666,8 @@ function containerOf(variant: MediaVariant | null, request: HandoffRequest): str
 
 /** A video's name comes from the page title; a playlist URL never describes it. */
 function suggestName(request: HandoffRequest, variant: MediaVariant | null): string {
-  let base = (request.pageTitle || hostOf(request.pageUrl ?? request.url) || 'video')
+  const audio = variant?.youtube?.role === 'audio'
+  let base = (request.pageTitle || hostOf(request.pageUrl ?? request.url) || (audio ? 'music' : 'video'))
     .replace(/[\\/:*?"<>|]/g, '')
     .trim()
     .slice(0, 80)
@@ -675,7 +676,7 @@ function suggestName(request: HandoffRequest, variant: MediaVariant | null): str
   base = base.replace(/\s*-\s*(YouTube|Vimeo|Twitch|Dailymotion)$/i, '').trim()
 
   const quality = variant?.height ? ' ' + variant.height + 'p' : ''
-  const baseName = (base || 'video') + quality
+  const baseName = (base || (audio ? 'music' : 'video')) + quality
 
   return baseName + '.' + containerOf(variant, request)
 }

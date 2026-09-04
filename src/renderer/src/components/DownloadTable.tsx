@@ -4,8 +4,8 @@ import { formatBytes, formatEta, formatPercent, formatSpeed, formatWhen, percent
 import { useApp } from '../store/app'
 import { reportError, toast } from '../store/toasts'
 import ContextMenu, { type MenuItem, type MenuPosition } from './ContextMenu'
-import { SiteIcon } from './FileIcon'
-import { DownloadIcon, SortArrow } from './Icons'
+import FileIcon, { SiteIcon } from './FileIcon'
+import { DownloadIcon, SortArrow, TorrentIcon } from './Icons'
 import ProgressBar from './ProgressBar'
 
 const HEADINGS: Record<ColumnId, string> = {
@@ -65,7 +65,7 @@ export default function DownloadTable({
   const toggleColumn = useApp((s) => s.toggleColumn)
 
   const [menu, setMenu] = useState<{ at: MenuPosition; items: MenuItem[] } | null>(null)
-  const [viewport, setViewport] = useState({ scrollTop: 0, height: 0 })
+  const [viewport, setViewport] = useState({ scrollTop: 0, height: 0, width: 0 })
   const body = useRef<HTMLDivElement>(null)
   const rowsRef = useRef(rows)
   const selectionRef = useRef(selection)
@@ -78,7 +78,18 @@ export default function DownloadTable({
   onDetailsRef.current = onDetails
   onDeleteRef.current = onDelete
 
-  const columns = useMemo(() => settings.columns.filter((c) => c.visible), [settings.columns])
+  const columns = useMemo(() => {
+    const width = viewport.width
+    let visible = settings.columns.filter((column) => column.visible)
+    if (width > 0 && width < 900) visible = visible.filter((column) => column.id !== 'added' && column.id !== 'description')
+    if (width > 0 && width < 760) visible = visible.filter((column) => !['eta', 'speed', 'queue'].includes(column.id))
+    if (width > 0 && width < 620) visible = visible.filter((column) => column.id !== 'size')
+    if (width > 0 && width < 500) visible = visible.filter((column) => column.id !== 'status')
+    const fixed = visible.reduce((sum, column) => sum + (column.id === 'name' ? 0 : column.width), 0)
+    return visible.map((column) => column.id === 'name' && width > 0
+      ? { ...column, width: Math.max(180, Math.min(column.width, width - fixed - 2)) }
+      : column)
+  }, [settings.columns, viewport.width])
   const columnIds = useMemo(() => columns.map((column) => column.id), [columns])
   const template = columns.map((c) => c.width + 'px').join(' ') + ' 1fr'
   const minWidth = columns.reduce((sum, c) => sum + c.width, 0)
@@ -97,7 +108,8 @@ export default function DownloadTable({
     if (!element) return
     const update = (): void => setViewport((current) => ({
       scrollTop: element.scrollTop,
-      height: element.clientHeight || current.height
+      height: element.clientHeight || current.height,
+      width: element.clientWidth || current.width
     }))
     update()
     const observer = new ResizeObserver(update)
@@ -187,6 +199,15 @@ export default function DownloadTable({
     )
   }, [clickRow])
 
+  const hoverRow = useCallback((task: DownloadTask, event: React.MouseEvent): void => {
+    // Buttons === 1 means primary button is held down
+    if (event.buttons === 1) {
+      if (!selectionRef.current.includes(task.id)) {
+        clickRow(task.id, { ctrl: true, shift: false }, rowsRef.current)
+      }
+    }
+  }, [clickRow])
+
   const openTask = useCallback((task: DownloadTask): void => {
     if (task.status === 'done') {
       void window.api.openFile(task.id).catch((err) => reportError('Could not open the file', err))
@@ -271,10 +292,20 @@ export default function DownloadTable({
         ref={body}
         onScroll={(event) => setViewport((current) => ({
           scrollTop: event.currentTarget.scrollTop,
-          height: current.height || event.currentTarget.clientHeight
+          height: current.height || event.currentTarget.clientHeight,
+          width: current.width || event.currentTarget.clientWidth
         }))}
+        onMouseDown={(event) => {
+          if (event.target === event.currentTarget) {
+            setSelection([])
+          }
+        }}
       >
-        <div style={{ minWidth }}>
+        <div style={{ minWidth }} onMouseDown={(event) => {
+          if (event.target === event.currentTarget) {
+            setSelection([])
+          }
+        }}>
           {/* Sticky so the headings stay put while a long list scrolls. */}
           <div
             className="grid sticky top-0 z-10 h-8 bg-surface border-b border-line-strong select-none"
@@ -323,9 +354,12 @@ export default function DownloadTable({
                   columns={columnIds}
                   template={template}
                   top={(firstVisible + offset) * ROW_HEIGHT}
+                  groupFirst={Boolean(task.groupId && rows[firstVisible + offset - 1]?.groupId !== task.groupId)}
+                  groupLast={Boolean(task.groupId && rows[firstVisible + offset + 1]?.groupId !== task.groupId)}
                   selected={selectedIds.has(task.id)}
                   queueLabel={task.queueId ? queueLabels.get(task.queueId) ?? '' : ''}
                   onSelect={selectTask}
+                  onMouseEnter={hoverRow}
                   onOpen={openTask}
                   onMenu={rowMenu}
                 />
@@ -353,9 +387,12 @@ const Row = memo(function Row({
   columns,
   template,
   top,
+  groupFirst,
+  groupLast,
   selected,
   queueLabel,
   onSelect,
+  onMouseEnter,
   onOpen,
   onMenu
 }: {
@@ -363,31 +400,33 @@ const Row = memo(function Row({
   columns: ColumnId[]
   template: string
   top: number
+  groupFirst: boolean
+  groupLast: boolean
   selected: boolean
   queueLabel: string
   onSelect(task: DownloadTask, event: React.MouseEvent): void
+  onMouseEnter(task: DownloadTask, event: React.MouseEvent): void
   onOpen(task: DownloadTask): void
   onMenu(event: React.MouseEvent, task: DownloadTask): void
 }): React.ReactElement {
   return (
     <div
-      className={
-        'absolute left-0 right-0 grid items-center border-b border-line/60 cursor-default transition-colors ' +
-        (selected ? 'text-ink' : 'hover:bg-white/[0.035]')
-      }
+      className="absolute left-0 right-0 h-[30px] border-b border-line grid select-none"
       style={{
         gridTemplateColumns: template,
-        height: 'var(--row-h)',
         transform: `translateY(${top}px)`,
-        background: selected ? 'var(--accent-soft)' : undefined,
-        boxShadow: selected ? 'inset 2px 0 0 var(--accent)' : undefined
+        background: selected ? 'var(--accent-soft)' : task.groupId ? 'rgba(56, 189, 248, 0.035)' : undefined,
+        boxShadow: task.groupId || selected ? 'inset 2px 0 0 var(--accent)' : undefined,
+        borderTopColor: groupFirst ? 'var(--accent-line)' : undefined,
+        borderBottomColor: groupLast ? 'var(--accent-line)' : undefined
       }}
       onMouseDown={(event) => onSelect(task, event)}
+      onMouseEnter={(event) => onMouseEnter(task, event)}
       onDoubleClick={() => onOpen(task)}
       onContextMenu={(event) => onMenu(event, task)}
     >
       {columns.map((id) => (
-        <Cell key={id} id={id} task={task} queueLabel={queueLabel} />
+        <Cell key={id} id={id} task={task} queueLabel={queueLabel} groupFirst={groupFirst} />
       ))}
       <div />
     </div>
@@ -397,22 +436,43 @@ const Row = memo(function Row({
 function Cell({
   id,
   task,
-  queueLabel
+  queueLabel,
+  groupFirst
 }: {
   id: ColumnId
   task: DownloadTask
   queueLabel: string
+  groupFirst: boolean
 }): React.ReactElement {
-  const base = 'px-2.5 text-[12px] truncate min-w-0 ' + (RIGHT.has(id) ? 'text-right tnum ' : '')
+  const base =
+    'px-2.5 text-[12px] truncate min-w-0 flex items-center ' +
+    (RIGHT.has(id) ? 'justify-end text-right tnum ' : '')
 
   switch (id) {
     case 'name':
       return (
         <div className={base + ' flex items-center gap-2'} title={task.filename + '\n' + task.url}>
-          <span className="shrink-0 grid place-items-center">
-            <SiteIcon url={task.sourceUrl ?? task.youtube?.pageUrl ?? task.url} className="w-4 h-4" />
+          <span className="shrink-0 flex items-center gap-1.5">
+            {task.kind === 'torrent' ? (
+              <span className="text-[var(--accent)]" title="Torrent source">
+                <TorrentIcon className="w-4 h-4" />
+              </span>
+            ) : (
+              <SiteIcon url={task.sourceUrl ?? task.youtube?.pageUrl ?? task.url} className="w-4 h-4" />
+            )}
+            <FileIcon
+              name={task.kind === 'torrent' ? representativeTorrentFile(task) : task.filename}
+              className="w-4 h-4"
+            />
           </span>
-          <span className="truncate">{task.filename}</span>
+          <span className="truncate">
+            {task.groupId && (
+              <span className="text-[var(--accent)] font-medium">
+                {groupFirst ? `${task.groupName || 'Page downloads'} / ` : '↳ '}
+              </span>
+            )}
+            {task.filename}
+          </span>
         </div>
       )
 
@@ -451,6 +511,7 @@ function Cell({
               : /* The detail says what a long stage is actually doing - fetching
                    ffmpeg, muxing - which "Downloading" on its own does not. */
                 (task.detail ?? STATUS_LABEL[task.status])}
+            {task.isCatMode ? ' 🎭' : ''}
           </span>
         </div>
       )
@@ -486,6 +547,18 @@ function Cell({
         </div>
       )
   }
+}
+
+function representativeTorrentFile(task: DownloadTask): string {
+  const selected = task.selectedFiles ? new Set(task.selectedFiles) : null
+  const files = task.torrentInfo?.files ?? task.torrentFiles ?? []
+  const largest = files
+    .filter((file) => !selected || selected.has(file.path))
+    .reduce<(typeof files)[number] | undefined>(
+      (current, file) => !current || file.size > current.size ? file : current,
+      undefined
+    )
+  return largest?.path ?? task.selectedFiles?.find((path) => /\.[a-z0-9]{1,10}$/i.test(path)) ?? task.filename
 }
 
 function EmptyState(): React.ReactElement {

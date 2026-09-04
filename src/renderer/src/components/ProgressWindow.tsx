@@ -3,7 +3,7 @@ import type { DownloadTask, Settings } from '@shared/types'
 import { formatBytes, formatEta, formatPercent, formatSpeed, hostOf, percent } from '../lib/format'
 import { applyAccent } from '../store/app'
 import { SiteIcon } from './FileIcon'
-import { CloseGlyph, FolderIcon, MinimizeGlyph, PauseIcon, PlayIcon } from './Icons'
+import { CloseGlyph, FolderIcon, MinimizeGlyph, PauseIcon, PlayIcon, TorrentIcon } from './Icons'
 import { GhostButton, PrimaryButton } from './Dialog'
 import ProgressBar from './ProgressBar'
 
@@ -98,7 +98,11 @@ export default function ProgressWindow({ id }: { id: string }): React.ReactEleme
       />
 
       <header className="drag h-9 shrink-0 flex items-center gap-2.5 pl-3 pr-1 border-b border-line bg-white/[0.02]">
-        <SiteIcon url={task?.sourceUrl ?? task?.youtube?.pageUrl ?? task?.url} className="w-4 h-4" />
+        {task?.kind === 'torrent' ? (
+          <TorrentIcon className="w-4 h-4" />
+        ) : (
+          <SiteIcon url={task?.sourceUrl ?? task?.youtube?.pageUrl ?? task?.url} className="w-4 h-4" />
+        )}
         <span className="font-display text-[12.5px] font-bold tracking-[0.3px]">
           {done ? 'Download complete' : 'Downloading'}
         </span>
@@ -187,7 +191,9 @@ function Body({ task, onClose }: { task: DownloadTask; onClose(): void }): React
                 ? task.dir
                 : task.status === 'paused'
                   ? 'Paused — nothing is being fetched.'
-                  : task.resumable
+                  : task.kind === 'torrent'
+                    ? 'BitTorrent downloads can resume from verified pieces.'
+                    : task.resumable
                     ? 'This server supports resuming.'
                     : 'This server does not support resuming.')}
           </div>

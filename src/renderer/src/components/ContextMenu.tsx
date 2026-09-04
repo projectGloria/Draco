@@ -1,4 +1,5 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 
 /**
  * A right-click menu. Positioned at the cursor and then nudged back inside the
@@ -63,7 +64,7 @@ export default function ContextMenu({
     }
   }, [onClose])
 
-  return (
+  return createPortal(
     <div
       ref={menu}
       onMouseDown={(event) => event.stopPropagation()}
@@ -100,6 +101,7 @@ export default function ContextMenu({
           </button>
         )
       )}
-    </div>
+    </div>,
+    document.body
   )
 }

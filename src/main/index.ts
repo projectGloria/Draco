@@ -26,7 +26,7 @@ import { closeDispatchers } from './engine/http.ts'
 import { DownloadManager } from './engine/manager.ts'
 import { MpdRunner } from './dash/runner.ts'
 import { HlsRunner } from './hls/runner.ts'
-import { handoffToTask, pushPendingHandoff, recordMedia, refileTask, registerIpc, type AppContext } from './ipc.ts'
+import { handoffToTask, prepareClipboardItem, pushPendingHandoff, recordMedia, refileTask, registerIpc, type AppContext } from './ipc.ts'
 import { logger, setLogDirectory } from './log.ts'
 import { Scheduler } from './queue/scheduler.ts'
 import { SiteProjectManager } from './site-grabber/projects.ts'
@@ -35,6 +35,7 @@ import {
   flushQuotaState,
   getSettings,
   loadCategories,
+  loadClipboardItems,
   loadQueues,
   loadQuotaState,
   loadSettings,
@@ -247,7 +248,7 @@ async function main(): Promise<void> {
     refreshYouTube: async (task, force) => {
       if (!task.youtube) throw new Error('Missing YouTube source metadata')
       const audio = task.youtube.role === 'audio'
-      const formatId = audio ? task.youtube.audioFormatId : task.youtube.videoFormatId
+      const formatId = task.youtube.videoFormatId
       if (!formatId) throw new Error('Missing YouTube format identity')
       // What the itag was a name for, so a format yt-dlp has never heard of
       // resolves to the same quality rather than failing the download.
@@ -280,10 +281,7 @@ async function main(): Promise<void> {
   clipboardWatcher = new ClipboardWatcher({
     enabled: () => getSettingsSafe()?.watchClipboard === true,
     onUrl: (url) => {
-      // Only a suggestion: the renderer opens Save As with it, and the user is
-      // one Escape away from ignoring it.
-      showMainWindow()
-      send('clipboard:url', url)
+      if (ctx) prepareClipboardItem(ctx, url)
     }
   })
 
@@ -294,6 +292,7 @@ async function main(): Promise<void> {
     pipe,
     media: [],
     pendingHandoffs: [],
+    clipboardItems: [],
     lastHandoffAt: null,
     quit,
     setClipboardWatch: updateClipboardWatcher
@@ -323,11 +322,18 @@ async function runBootstrap(): Promise<void> {
   })
 
   await runStep('restore', async () => {
-    const [tasks, queues] = await Promise.all([loadTasks(), loadQueues()])
+    const [tasks, queues, clipboardItems] = await Promise.all([
+      loadTasks(),
+      loadQueues(),
+      loadClipboardItems()
+    ])
     await ctx!.manager.load(tasks)
     ctx!.scheduler.load(queues)
     await ctx!.siteProjects.start()
     ctx!.media = []
+    ctx!.clipboardItems = clipboardItems.map((item) => item.status === 'fetching'
+      ? { ...item, status: 'error', error: 'Preparation was interrupted when Draco closed.' }
+      : item)
   })
 
   await runStep('bridge', async () => {
@@ -371,6 +377,8 @@ function finish(): void {
   ctx.scheduler.start()
   clipboardWatcher?.start()
   const updateSettings = getSettings()
+  const { syncDropzoneWindow } = require('./windows.ts')
+  syncDropzoneWindow(updateSettings.showDropzone)
   if (updateSettings.autoCheckUpdates && updateSettings.updateFeedUrl) {
     void checkForUpdates(updateSettings.updateFeedUrl)
       .then((info) => {

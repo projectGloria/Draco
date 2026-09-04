@@ -17,6 +17,7 @@ export interface AppPaths {
   quotaFile: string
   /** Streams the extension spotted, kept between runs so the panel survives a restart. */
   mediaFile: string
+  clipboardFile: string
   siteProjectsFile: string
   /** Empty stand-in files the shell is asked for a file-type icon against. */
   iconCache: string
@@ -31,6 +32,8 @@ export interface AppPaths {
   /** Where the generated native-messaging manifest is written. */
   hostManifest: string
   firefoxHostManifest: string
+  /** Global temp directory for incomplete downloads. */
+  tempDir: string
 }
 
 let cached: AppPaths | null = null
@@ -50,12 +53,14 @@ export function getPaths(): AppPaths {
     root,
     bin,
     logs: join(root, 'logs'),
+    tempDir: join(resourceRoot, '.dracoTemp'),
     settingsFile: join(root, 'settings.json'),
     tasksFile: join(root, 'tasks.json'),
     categoriesFile: join(root, 'categories.json'),
     queuesFile: join(root, 'queues.json'),
     quotaFile: join(root, 'quota.json'),
     mediaFile: join(root, 'media.json'),
+    clipboardFile: join(root, 'clipboard.json'),
     siteProjectsFile: join(root, 'site-projects.json'),
     iconCache: join(root, 'icon-cache'),
     ffmpegExe: join(bin, 'ffmpeg.exe'),
@@ -75,7 +80,7 @@ export function getPaths(): AppPaths {
 /** Creates the writable tree. Safe to call repeatedly. */
 export function ensureDirs(): AppPaths {
   const p = getPaths()
-  for (const dir of [p.root, p.bin, p.logs, p.iconCache]) {
+  for (const dir of [p.root, p.bin, p.logs, p.iconCache, p.tempDir]) {
     mkdirSync(dir, { recursive: true })
   }
   return p

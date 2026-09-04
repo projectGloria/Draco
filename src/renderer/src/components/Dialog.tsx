@@ -13,6 +13,7 @@ export default function Dialog({
   width = 520,
   onClose,
   showClose = true,
+  autoFocus = true,
   footer,
   children
 }: {
@@ -21,6 +22,7 @@ export default function Dialog({
   width?: number
   onClose(): void
   showClose?: boolean
+  autoFocus?: boolean
   footer?: React.ReactNode
   children: React.ReactNode
 }): React.ReactElement {
@@ -39,15 +41,19 @@ export default function Dialog({
 
   useEffect(() => {
     // The first field, or the card itself when the dialog is read-only.
-    const focusable = card.current?.querySelector<HTMLElement>(
-      'input:not([type=hidden]), select, textarea, button'
-    )
-    focusable?.focus()
-  }, [])
+    if (autoFocus) {
+      const focusable = card.current?.querySelector<HTMLElement>(
+        'input:not([type=hidden]), select, textarea, button'
+      )
+      focusable?.focus()
+    } else {
+      card.current?.focus()
+    }
+  }, [autoFocus])
 
   return (
     <div
-      className="fixed inset-0 z-[80] grid place-items-center p-6 bg-black/55 backdrop-blur-[2px]"
+      className="fixed inset-0 z-[80] grid place-items-center p-6 max-[600px]:p-2 bg-black/55 backdrop-blur-[2px]"
       onMouseDown={(event) => {
         // Only a press that both starts and ends on the scrim closes it, so a
         // text selection dragged out of an input does not dismiss the dialog.
@@ -56,11 +62,12 @@ export default function Dialog({
     >
       <div
         ref={card}
+        tabIndex={-1}
         role="dialog"
         aria-modal="true"
         aria-label={title}
         className="pop-in surface-card rounded-card w-full max-h-full flex flex-col
-                   shadow-[0_28px_80px_rgba(0,0,0,0.6)] overflow-hidden"
+                   shadow-[0_28px_80px_rgba(0,0,0,0.6)] overflow-hidden outline-none"
         style={{ maxWidth: width }}
       >
         <div className="flex items-start gap-3 px-5 py-3.5 border-b border-line shrink-0">
@@ -84,10 +91,10 @@ export default function Dialog({
           )}
         </div>
 
-        <div className="px-5 py-4 overflow-y-auto min-h-0">{children}</div>
+        <div className="px-5 py-4 max-[600px]:px-3 overflow-y-auto min-h-0">{children}</div>
 
         {footer && (
-          <div className="px-5 py-3.5 border-t border-line flex items-center justify-end gap-2 shrink-0">
+          <div className="px-5 py-3.5 max-[600px]:px-3 border-t border-line flex flex-wrap items-center justify-end gap-2 shrink-0">
             {footer}
           </div>
         )}

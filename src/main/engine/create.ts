@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto'
-import type { DownloadTask, NewDownload, RequestHeaders, SubtitleTrack, TaskKind } from '../../shared/types.ts'
+import type { DownloadTask, NewDownload, RequestHeaders, SubtitleTrack, TaskKind, TorrentFile } from '../../shared/types.ts'
 import { filenameFromUrl, sanitizeFilename } from './naming.ts'
 import { normalizeDownloadDirectory } from '../destination-path.ts'
 
@@ -10,6 +10,9 @@ import { normalizeDownloadDirectory } from '../destination-path.ts'
 export function createTask(input: {
   url: string
   sourceUrl?: string
+  groupId?: string
+  groupName?: string
+  groupFolder?: string
   dir: string
   filename?: string
   categoryId?: string | null
@@ -17,9 +20,13 @@ export function createTask(input: {
   headers?: RequestHeaders
   subtitles?: SubtitleTrack[]
   description?: string
+  expectedChecksum?: string | null
+  postProcess?: 'none' | 'mp4' | 'mp3'
+  selectedFiles?: string[]
+  torrentFiles?: TorrentFile[]
   kind?: TaskKind
   audioUrl?: string | null
-  youtube?: { pageUrl: string; videoFormatId: string; audioFormatId?: string | null; height?: number | null }
+  youtube?: { pageUrl: string; videoFormatId: string; audioFormatId?: string | null; height?: number | null; role?: 'video' | 'audio' }
 }): DownloadTask {
   const kind = input.kind ?? 'file'
   // Applied to the URL-derived fallback too, not just to a name the caller
@@ -32,8 +39,11 @@ export function createTask(input: {
     id: randomUUID(),
     url: input.url,
     sourceUrl: input.sourceUrl,
+    groupId: input.groupId,
+    groupName: input.groupName,
+    groupFolder: input.groupFolder,
     audioUrl: input.audioUrl ?? null,
-    youtube: input.youtube ? { ...input.youtube, role: 'video' } : undefined,
+    youtube: input.youtube ? { ...input.youtube, role: input.youtube.role ?? 'video' } : undefined,
     finalUrl: input.url,
     filename,
     // Only a name the caller chose is authoritative; one guessed from the URL
@@ -65,7 +75,11 @@ export function createTask(input: {
     headers: input.headers ?? {},
     subtitles: input.subtitles?.map((track) => ({ ...track })) ?? [],
     mimeType: null,
-    description: input.description ?? ''
+    description: input.description ?? '',
+    expectedChecksum: input.expectedChecksum ?? undefined,
+    postProcess: input.postProcess ?? 'none',
+    selectedFiles: input.selectedFiles,
+    torrentFiles: input.torrentFiles?.map((file) => ({ ...file }))
   }
 }
 
@@ -75,19 +89,39 @@ export function createTask(input: {
  * watcher both feed this path, and neither is a trusted source.
  */
 export function validateUrl(raw: string): string {
+  let trimmed = raw.trim()
+  if (/^[0-9a-fA-F]{40}$/.test(trimmed)) {
+    // A bare hash carries no tracker hints. DHT remains enabled, while these
+    // public fallbacks make metadata discovery much less dependent on the
+    // local DHT table already being warm.
+    const trackers = DEFAULT_TORRENT_TRACKERS
+      .map((tracker) => `&tr=${encodeURIComponent(tracker)}`)
+      .join('')
+    // Keep `urn:btih:` literal. Some BitTorrent parsers do not accept percent
+    // escapes in the exact-topic field even though URLSearchParams emits them.
+    trimmed = `magnet:?xt=urn:btih:${trimmed.toLowerCase()}${trackers}`
+  }
+
   let parsed: URL
   try {
-    parsed = new URL(raw.trim())
+    parsed = new URL(trimmed)
   } catch {
     throw new Error('That is not a valid URL')
   }
 
-  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:' && parsed.protocol !== 'magnet:') {
     throw new Error(`Unsupported protocol: ${parsed.protocol.replace(':', '')}`)
   }
 
   return parsed.toString()
 }
+
+export const DEFAULT_TORRENT_TRACKERS = [
+  'udp://tracker.opentrackr.org:1337/announce',
+  'udp://open.stealth.si:80/announce',
+  'udp://tracker.torrent.eu.org:451/announce',
+  'wss://tracker.openwebtorrent.com/'
+] as const
 
 /**
  * A URL that points at a playlist is a stream, not a file. Downloading it as a
@@ -106,7 +140,10 @@ export function kindForUrl(url: string, contentType?: string | null): TaskKind {
   if (contentType && contentType.includes('application/dash+xml')) return 'dash'
 
   try {
-    const pathname = new URL(url).pathname
+    const parsed = new URL(url)
+    if (parsed.protocol === 'magnet:') return 'torrent'
+    const pathname = parsed.pathname
+    if (/\.torrent$/i.test(pathname)) return 'torrent'
     if (/\.(m3u8|m3u)$/i.test(pathname)) return 'hls'
     if (/\.mpd$/i.test(pathname)) return 'dash'
     return 'file'
@@ -123,7 +160,7 @@ export function kindForUrl(url: string, contentType?: string | null): TaskKind {
  * good name into `video 1080p.mp4.mp4.mp4`.
  */
 export function filenameForKind(filename: string, kind: TaskKind): string {
-  if (kind === 'file') return filename
+  if (kind === 'file' || kind === 'torrent') return filename
 
   const base = filename.replace(kind === 'hls' ? /\.(m3u8|m3u)$/i : /\.mpd$/i, '')
   // A container the mux can actually produce is left alone; anything else -

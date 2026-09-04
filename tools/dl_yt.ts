@@ -41,7 +41,7 @@ async function run() {
     },
     createDashRunner: (task, context) => new DashRunner(task, context),
     refreshYouTube: async (task, force) => {
-      const formatId = task.youtube!.role === 'audio' ? task.youtube!.audioFormatId : task.youtube!.videoFormatId
+      const formatId = task.youtube!.videoFormatId
       return refreshYouTubeFormat(task.youtube!.pageUrl, task.headers, formatId!, force)
     }
   })

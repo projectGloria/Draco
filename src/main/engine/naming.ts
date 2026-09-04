@@ -150,3 +150,21 @@ export async function uniquePath(dir: string, filename: string): Promise<string>
   // Pathological case: a thousand collisions. A timestamp always terminates.
   return join(dir, `${stem} (${Date.now()})${ext}`)
 }
+
+/**
+ * Moves a file, falling back to a copy-and-delete if the source and destination
+ * are on different drives (which throws EXDEV on rename).
+ */
+export async function moveFile(src: string, dest: string): Promise<void> {
+  const { rename, copyFile, unlink } = await import('node:fs/promises')
+  try {
+    await rename(src, dest)
+  } catch (err: any) {
+    if (err && err.code === 'EXDEV') {
+      await copyFile(src, dest)
+      await unlink(src)
+    } else {
+      throw err
+    }
+  }
+}

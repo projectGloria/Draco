@@ -33,7 +33,7 @@ export default function AddUrlDialog({
   return (
     <Dialog
       title="Add download"
-      subtitle="One address per line"
+      subtitle="Paste a URL, magnet link, or torrent info hash"
       width={560}
       onClose={onClose}
       footer={
@@ -56,15 +56,15 @@ export default function AddUrlDialog({
         }}
         rows={5}
         spellCheck={false}
-        placeholder="https://example.com/file.iso"
+        placeholder="https://example.com/file.iso, magnet link, or 40-character torrent hash"
         className="field font-mono text-[12px] leading-relaxed resize-none"
       />
 
       <div className="mt-2 h-4 text-[11.5px]">
         {invalid > 0 ? (
           <span className="text-warn">
-            {invalid} line{invalid === 1 ? '' : 's'} skipped — only http and https addresses are
-            accepted
+            {invalid} line{invalid === 1 ? '' : 's'} skipped — enter a URL, magnet link, or torrent
+            info hash
           </span>
         ) : valid.length > 1 ? (
           <span className="text-faint">

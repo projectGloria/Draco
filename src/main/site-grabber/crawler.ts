@@ -1,5 +1,7 @@
 import { createHash } from 'node:crypto'
-import { posix } from 'node:path'
+import { posix, join } from 'node:path'
+import { mkdtemp, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
 import { getDispatcher } from '../engine/http.ts'
 
 export interface SiteGrabOptions {
@@ -15,14 +17,14 @@ export interface SiteResource {
   url: string
   relativePath: string
   kind: 'page' | 'asset'
-  /** Present for pages so the project can write a link-rewritten offline copy. */
-  content?: string
+  /** Points to a temporary file containing the raw downloaded HTML. */
+  tmpFile?: string
 }
 
 const PAGE_BYTES_LIMIT = 5 * 1024 * 1024
 
 /** Bounded breadth-first crawler for offline site-grabber projects. */
-export async function crawlSite(raw: SiteGrabOptions): Promise<SiteResource[]> {
+export async function crawlSite(raw: SiteGrabOptions): Promise<{ resources: SiteResource[], paths: Map<string, string>, tmpDir: string }> {
   const start = secureHttpUrl(raw.startUrl)
   const options = {
     maxDepth: clamp(raw.maxDepth, 0, 5),
@@ -36,6 +38,7 @@ export async function crawlSite(raw: SiteGrabOptions): Promise<SiteResource[]> {
   const visited = new Set<string>()
   const resources = new Map<string, SiteResource>()
   const maxResources = Math.min(10_000, options.maxPages * 50)
+  const tmpDir = await mkdtemp(join(tmpdir(), 'draco-crawler-'))
 
   while (queue.length > 0 && visited.size < options.maxPages) {
     const current = queue.shift()!
@@ -62,7 +65,10 @@ export async function crawlSite(raw: SiteGrabOptions): Promise<SiteResource[]> {
     if (declared > PAGE_BYTES_LIMIT) continue
     const html = await response.text()
     if (html.length > PAGE_BYTES_LIMIT) continue
-    resources.set(withoutHash(final), { ...resourceFor(final, 'page'), content: html })
+    
+    const tmpFile = join(tmpDir, createHash('sha1').update(final.toString()).digest('hex') + '.html')
+    await writeFile(tmpFile, html, 'utf8')
+    resources.set(withoutHash(final), { ...resourceFor(final, 'page'), tmpFile })
 
     const links = extractLinks(html, final)
     for (const link of links) {
@@ -77,9 +83,7 @@ export async function crawlSite(raw: SiteGrabOptions): Promise<SiteResource[]> {
   }
 
   const paths = new Map([...resources.values()].map((resource) => [resource.url, resource.relativePath]))
-  return [...resources.values()].map((resource) => resource.kind === 'page' && resource.content
-    ? { ...resource, content: rewriteForOffline(resource.content, new URL(resource.url), resource.relativePath, paths) }
-    : resource)
+  return { resources: [...resources.values()], paths, tmpDir }
 }
 
 export function extractLinks(html: string, base: URL): Array<{ url: URL; kind: 'page' | 'asset' }> {

@@ -2,6 +2,7 @@ import { useEffect, useMemo, useCallback, useState } from 'react'
 import { filterTasks, sortTasks, useApp } from './store/app'
 import { reportError, toast } from './store/toasts'
 import AddUrlDialog from './components/AddUrlDialog'
+import ClipboardPanel from './components/ClipboardPanel'
 import ConfirmDialog, { type ConfirmRequest } from './components/ConfirmDialog'
 import DownloadTable from './components/DownloadTable'
 import OptionsDialog from './components/OptionsDialog'
@@ -16,10 +17,16 @@ import TitleBar from './components/TitleBar'
 import Toasts from './components/Toasts'
 import ToolUpdateDialog from './components/ToolUpdateDialog'
 import Toolbar, { type ToolbarActions } from './components/Toolbar'
+import Dropzone from './components/Dropzone'
 import { resolvedLanguage } from './i18n'
-import type { ToolStatus } from '@shared/types'
+import { looksLikeTorrentInput, looksLikeYouTubeInput } from './lib/format'
+import type { ClipboardItem, ToolStatus } from '@shared/types'
 
 export default function App(): React.ReactElement {
+  if (window.location.hash === '#dropzone') {
+    return <Dropzone />
+  }
+
   const init = useApp((s) => s.init)
   const tasks = useApp((s) => s.tasks)
   const taskListVersion = useApp((s) => s.taskListVersion)
@@ -32,6 +39,7 @@ export default function App(): React.ReactElement {
   const [search, setSearch] = useState('')
   const [addOpen, setAddOpen] = useState(false)
   const [saveAsUrl, setSaveAsUrl] = useState<string | null>(null)
+  const [clipboardDownload, setClipboardDownload] = useState<ClipboardItem | null>(null)
   const [detailId, setDetailId] = useState<string | null>(null)
   const [schedulerOpen, setSchedulerOpen] = useState(false)
   const [siteGrabberOpen, setSiteGrabberOpen] = useState(false)
@@ -49,10 +57,6 @@ export default function App(): React.ReactElement {
       toast(incoming.kind === 'error' ? 'danger' : incoming.kind, incoming.message)
     })
 
-    // Clipboard watching offers the link rather than acting on it: Save As opens
-    // with the URL filled in, and Escape is the whole cost of ignoring it.
-    const offClipboard = window.api.onClipboardUrl((url) => setSaveAsUrl(url))
-
     // ffmpeg and yt-dlp are fetched, not shipped, and yt-dlp in particular goes
     // stale against YouTube. Main only ever announces; the dialog is where the
     // user decides.
@@ -60,7 +64,6 @@ export default function App(): React.ReactElement {
 
     return () => {
       offToast()
-      offClipboard()
       offTools()
     }
   }, [init])
@@ -93,7 +96,19 @@ export default function App(): React.ReactElement {
   )
   const rows = useMemo(() => {
     const byId = new Map(tasks.map((task) => [task.id, task]))
-    return orderedIds.map((id) => byId.get(id)).filter((task): task is NonNullable<typeof task> => Boolean(task))
+    const ordered = orderedIds.map((id) => byId.get(id)).filter((task): task is NonNullable<typeof task> => Boolean(task))
+    const emittedGroups = new Set<string>()
+    const grouped: typeof ordered = []
+    for (const task of ordered) {
+      if (!task.groupId) {
+        grouped.push(task)
+        continue
+      }
+      if (emittedGroups.has(task.groupId)) continue
+      emittedGroups.add(task.groupId)
+      grouped.push(...ordered.filter((candidate) => candidate.groupId === task.groupId))
+    }
+    return grouped
   }, [tasks, orderedIds])
 
   /* ---------------------------------------------------------------- */
@@ -134,7 +149,17 @@ export default function App(): React.ReactElement {
   }, [tasks, settings.confirmDelete, setSelection])
 
   const actions: ToolbarActions = useMemo(() => ({
-    onAdd: () => setAddOpen(true),
+    onAdd: () => {
+      void window.api.readClipboard()
+        .then((value) => {
+          const candidate = value.trim()
+          if (looksLikeTorrentInput(candidate) || looksLikeYouTubeInput(candidate)) {
+            setSaveAsUrl(candidate)
+          }
+          else setAddOpen(true)
+        })
+        .catch(() => setAddOpen(true))
+    },
     onResume: () => {
       void window.api.startTasks(selection).catch((err) => reportError('Could not resume', err))
     },
@@ -207,7 +232,16 @@ export default function App(): React.ReactElement {
         <Sidebar onEditQueues={() => setSchedulerOpen(true)} />
 
         <main className="flex-1 min-w-0 flex flex-col">
-          <DownloadTable rows={rows} onDetails={setDetailId} onDelete={requestDelete} />
+          {sidebar === 'clipboard' ? (
+            <ClipboardPanel
+              onDownload={(item) => {
+                setClipboardDownload(item)
+                setSaveAsUrl(item.url)
+              }}
+            />
+          ) : (
+            <DownloadTable rows={rows} onDetails={setDetailId} onDelete={requestDelete} />
+          )}
         </main>
       </div>
 
@@ -230,7 +264,20 @@ export default function App(): React.ReactElement {
         />
       )}
 
-      {saveAsUrl && <SaveAsDialog url={saveAsUrl} onClose={() => setSaveAsUrl(null)} />}
+      {saveAsUrl && (
+        <SaveAsDialog
+          url={saveAsUrl}
+          clipboardItem={clipboardDownload ?? undefined}
+          onAdded={clipboardDownload ? () => {
+            void window.api.removeClipboardItem(clipboardDownload.id)
+            setClipboardDownload(null)
+          } : undefined}
+          onClose={() => {
+            setSaveAsUrl(null)
+            setClipboardDownload(null)
+          }}
+        />
+      )}
       {detailId && <TaskDetailDialog id={detailId} onClose={() => setDetailId(null)} />}
       {schedulerOpen && <SchedulerDialog onClose={() => setSchedulerOpen(false)} />}
       {siteGrabberOpen && <SiteGrabberDialog onClose={() => setSiteGrabberOpen(false)} />}

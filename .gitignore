@@ -1,7 +1,9 @@
 node_modules/
 out/
 dist/
+dist-v2/
 release/
+.dracoTemp/
 *.tsbuildinfo
 __pycache__/
 *.pyc

@@ -47,7 +47,7 @@ export type TaskStatus =
   | 'missing'
 
 /** What the engine is downloading. HLS is a pre-split segment list plus a mux. */
-export type TaskKind = 'file' | 'hls' | 'dash'
+export type TaskKind = 'file' | 'hls' | 'dash' | 'torrent'
 
 /**
  * One byte range owned by exactly one connection. Segments never overlap, which
@@ -80,12 +80,53 @@ export interface SubtitleTrack {
   format: 'vtt' | 'srt' | 'ttml'
 }
 
+export interface TorrentRuntimeFile {
+  path: string
+  size: number
+  downloaded: number
+  selected: boolean
+}
+
+export interface TorrentRuntimePeer {
+  address: string
+  client: string
+  type: string
+  downloadSpeed: number
+  uploadSpeed: number
+}
+
+export interface TorrentRuntimeInfo {
+  infoHash: string
+  files: TorrentRuntimeFile[]
+  peers: TorrentRuntimePeer[]
+  trackers: string[]
+  sources: string[]
+  uploaded: number
+  ratio: number
+}
+
 export interface DownloadTask {
   id: string
+  /** True if this task is currently being briefly downloaded by Cat Mode. */
+  isCatMode?: boolean
+  /** Timestamp of when this task was last pinged by Cat Mode. */
+  lastCatPingAt?: number
+  expectedChecksum?: string
+  postProcess?: 'none' | 'mp4' | 'mp3'
+  selectedFiles?: string[]
+  /** Metadata learned before start, used for selection and representative icon. */
+  torrentFiles?: TorrentFile[]
+  /** Live BitTorrent diagnostics for the details tabs. */
+  torrentInfo?: TorrentRuntimeInfo
   /** What the user or the browser handed us. */
   url: string
   /** Page/origin the download was discovered on, used for its persisted favicon. */
   sourceUrl?: string
+  /** Shared identity for files selected from one inspected web page. */
+  groupId?: string
+  groupName?: string
+  /** Safe child folder appended to the chosen/category destination. */
+  groupFolder?: string
   /** The separate audio stream URL to fetch and mux, if any. */
   audioUrl?: string | null
   /**
@@ -168,15 +209,19 @@ export interface TaskProgress {
   segments: Segment[]
   error: string | null
   detail: string | null
+  torrentInfo?: TorrentRuntimeInfo
 }
 
 /** What Add URL and the browser handoff both submit. */
 export interface NewDownload {
   url: string
   sourceUrl?: string
+  groupId?: string
+  groupName?: string
+  groupFolder?: string
   audioUrl?: string | null
   /** Stable YouTube format identity used to refresh expiring signed URLs. */
-  youtube?: { pageUrl: string; videoFormatId: string; audioFormatId?: string | null; height?: number | null }
+  youtube?: { pageUrl: string; videoFormatId: string; audioFormatId?: string | null; height?: number | null; role?: 'video' | 'audio' }
   filename?: string
   dir?: string
   categoryId?: string | null
@@ -184,9 +229,15 @@ export interface NewDownload {
   headers?: RequestHeaders
   subtitles?: SubtitleTrack[]
   description?: string
+  expectedChecksum?: string
+  postProcess?: 'none' | 'mp4' | 'mp3'
+  selectedFiles?: string[]
+  torrentFiles?: TorrentFile[]
   kind?: TaskKind
   /** When false the task is created paused instead of starting immediately. */
   autoStart?: boolean
+  /** Creates the task without opening the separate floating progress window. */
+  suppressProgressWindow?: boolean
 }
 
 /**
@@ -218,6 +269,11 @@ export interface HandoffRequest {
   mediaId?: string
 }
 
+export interface TorrentFile {
+  path: string
+  size: number
+}
+
 /** What a probe learned before any bytes were committed to disk. */
 export interface ProbeResult {
   finalUrl: string
@@ -228,6 +284,7 @@ export interface ProbeResult {
   lastModified: string | null
   mimeType: string | null
   statusCode: number
+  torrentFiles?: TorrentFile[]
 }
 
 /* ------------------------------------------------------------------ */
@@ -315,8 +372,16 @@ export interface Settings {
   theme: 'system' | 'dark' | 'light'
   /** Root for downloads; categories add a subfolder under it. */
   downloadDir: string
+  /** Prevent downloading if free space is less than the file size. */
+  checkDiskSpace: boolean
+  /** Show a floating desktop dropzone widget. */
+  showDropzone: boolean
+  /** 🐱 Keeps waiting downloads alive by occasionally downloading tiny chunks. */
+  catMode: boolean
   /** How many tasks run at once. */
   maxConcurrentTasks: number
+  /** Double the wait time on each network retry. */
+  exponentialBackoff: boolean
   /** Connection budget per task - IDM's "max connections". */
   maxConnectionsPerTask: number
   /**
@@ -443,7 +508,7 @@ export interface MediaVariant {
    */
   container?: string | null
   /** Stable YouTube format identity, used to refresh expiring signed media URLs. */
-  youtube?: { videoFormatId: string; audioFormatId?: string | null }
+  youtube?: { videoFormatId: string; audioFormatId?: string | null; role?: 'video' | 'audio' }
 }
 
 /** Status of the background yt-dlp lookup that resolves a YouTube video's direct links. */
@@ -452,6 +517,29 @@ export type YouTubePrimeState =
   | { state: 'pending'; startedAt: number }
   | { state: 'ready'; tookMs: number }
   | { state: 'failed'; tookMs: number; error: string }
+
+export interface YouTubeResolution {
+  id: string
+  title: string
+  variants: MediaVariant[]
+  thumbnailUrl?: string | null
+}
+
+export interface ClipboardItem {
+  id: string
+  url: string
+  kind: 'file' | 'torrent' | 'youtube' | 'media'
+  status: 'fetching' | 'ready' | 'error'
+  createdAt: number
+  updatedAt: number
+  filename: string | null
+  size: number | null
+  mimeType: string | null
+  error: string | null
+  probe?: ProbeResult
+  youtube?: YouTubeResolution
+  media?: YouTubeResolution
+}
 
 /* ------------------------------------------------------------------ */
 /* Browser integration status                                          */
@@ -553,6 +641,12 @@ export interface RendererApi {
    * window, instead of the caller firing N `addDownload`s that each open one. */
   addDownloads(inputs: NewDownload[]): Promise<DownloadTask[]>
   probe(url: string, headers?: RequestHeaders): Promise<ProbeResult>
+  resolveYouTube(url: string): Promise<YouTubeResolution>
+  resolveMediaPage(url: string): Promise<YouTubeResolution>
+  listClipboardItems(): Promise<ClipboardItem[]>
+  retryClipboardItem(id: string): Promise<void>
+  removeClipboardItem(id: string): Promise<void>
+  onClipboardItemsChanged(cb: (items: ClipboardItem[]) => void): () => void
   startTasks(ids: string[]): Promise<void>
   pauseTasks(ids: string[]): Promise<void>
   pauseAll(): Promise<void>
@@ -563,6 +657,8 @@ export interface RendererApi {
   /** Both resolve false when the file is gone, having marked the task missing. */
   openFile(id: string): Promise<boolean>
   revealFile(id: string): Promise<boolean>
+  openTorrentItem(id: string, path: string): Promise<boolean>
+  revealTorrentItem(id: string, path: string): Promise<boolean>
   onTasksChanged(cb: (tasks: DownloadTask[]) => void): () => void
   onProgress(cb: (updates: TaskProgress[]) => void): () => void
 
@@ -572,7 +668,7 @@ export interface RendererApi {
   acceptHandoff(id: string, input: NewDownload): Promise<void>
   /** For a media handoff: the quality ladder, fetched on demand. */
   resolveHandoffMedia(id: string): Promise<MediaCandidate>
-  acceptHandoffMedia(id: string, opts: { variantUrl: string; filename: string; dir?: string; categoryId?: string; queueId?: string; audioUrl?: string | null; youtube?: { videoFormatId: string; audioFormatId?: string | null } }): Promise<void>
+  acceptHandoffMedia(id: string, opts: { variantUrl: string; filename: string; dir?: string; categoryId?: string; queueId?: string; audioUrl?: string | null; youtube?: { videoFormatId: string; audioFormatId?: string | null; role?: 'video' | 'audio' } }): Promise<void>
   /** Whether yt-dlp's background priming for this YouTube video has finished. Safe to poll. */
   getYouTubePrimeStatus(pageUrl: string): Promise<YouTubePrimeState>
   /** Cancel: drops the request and closes the window. */
@@ -598,6 +694,7 @@ export interface RendererApi {
   chooseDirectory(current?: string): Promise<string | null>
   getIntegration(): Promise<IntegrationStatus>
   registerIntegration(): Promise<IntegrationStatus>
+  readClipboard(): Promise<string>
   copyToClipboard(text: string): Promise<void>
   checkForUpdates(): Promise<UpdateInfo>
   openUpdate(url: string): Promise<void>
@@ -632,8 +729,6 @@ export interface RendererApi {
   /** The frame is custom, so the restore glyph has to be told when to change. */
   onMaximizeChange(cb: (maximized: boolean) => void): () => void
   onToast(cb: (toast: Toast) => void): () => void
-  /** A downloadable link the user copied while clipboard watching was on. */
-  onClipboardUrl(cb: (url: string) => void): () => void
 }
 
 declare global {

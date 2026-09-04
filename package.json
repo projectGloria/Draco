@@ -39,6 +39,9 @@
         "to": "draco-host.exe"
       }
     ],
+    "directories": {
+      "output": "dist-v2"
+    },
     "win": {
       "target": "nsis",
       "icon": "resources/icon.ico"
@@ -66,9 +69,11 @@
     "preview": "electron-vite preview"
   },
   "dependencies": {
+    "parse-torrent": "^11.0.24",
     "react": "^19.2.8",
     "react-dom": "^19.2.8",
     "undici": "^7.16.0",
+    "webtorrent": "^3.0.21",
     "zustand": "^5.0.15"
   },
   "devDependencies": {
@@ -77,6 +82,7 @@
     "@types/node": "^26.2.0",
     "@types/react": "^19.2.18",
     "@types/react-dom": "^19.2.4",
+    "@types/webtorrent": "^3.0.0",
     "@vitejs/plugin-react": "^5.2.0",
     "electron": "^43.4.1",
     "electron-builder": "^26.15.3",

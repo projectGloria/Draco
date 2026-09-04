@@ -39,6 +39,12 @@ const api: RendererApi = {
   addDownload: (input: NewDownload) => ipcRenderer.invoke('tasks:add', input),
   addDownloads: (inputs: NewDownload[]) => ipcRenderer.invoke('tasks:addMany', inputs),
   probe: (url: string, headers?: RequestHeaders) => ipcRenderer.invoke('tasks:probe', url, headers),
+  resolveYouTube: (url: string) => ipcRenderer.invoke('youtube:resolve', url),
+  resolveMediaPage: (url: string) => ipcRenderer.invoke('media:resolvePage', url),
+  listClipboardItems: () => ipcRenderer.invoke('clipboard:list'),
+  retryClipboardItem: (id: string) => ipcRenderer.invoke('clipboard:retry', id),
+  removeClipboardItem: (id: string) => ipcRenderer.invoke('clipboard:remove', id),
+  onClipboardItemsChanged: (cb) => subscribe('clipboard:changed', cb),
   startTasks: (ids: string[]) => ipcRenderer.invoke('tasks:start', ids),
   pauseTasks: (ids: string[]) => ipcRenderer.invoke('tasks:pause', ids),
   pauseAll: () => ipcRenderer.invoke('tasks:pauseAll'),
@@ -50,6 +56,8 @@ const api: RendererApi = {
   redownload: (id: string) => ipcRenderer.invoke('tasks:redownload', id),
   openFile: (id: string) => ipcRenderer.invoke('tasks:open', id),
   revealFile: (id: string) => ipcRenderer.invoke('tasks:reveal', id),
+  openTorrentItem: (id: string, path: string) => ipcRenderer.invoke('tasks:openTorrentItem', id, path),
+  revealTorrentItem: (id: string, path: string) => ipcRenderer.invoke('tasks:revealTorrentItem', id, path),
   onTasksChanged: (cb) => subscribe<DownloadTask[]>('tasks:changed', cb),
   onProgress: (cb) => subscribe<TaskProgress[]>('tasks:progress', cb),
 
@@ -58,7 +66,7 @@ const api: RendererApi = {
   acceptHandoff: (id: string, input: NewDownload) =>
     ipcRenderer.invoke('handoff:accept', id, input),
   resolveHandoffMedia: (id: string) => ipcRenderer.invoke('handoff:resolveMedia', id),
-  acceptHandoffMedia: (id: string, opts: { variantUrl: string; filename: string; dir?: string; categoryId?: string; queueId?: string; audioUrl?: string | null; youtube?: { videoFormatId: string; audioFormatId?: string | null } }) =>
+  acceptHandoffMedia: (id: string, opts: { variantUrl: string; filename: string; dir?: string; categoryId?: string; queueId?: string; audioUrl?: string | null; youtube?: { videoFormatId: string; audioFormatId?: string | null; role?: 'video' | 'audio' } }) =>
     ipcRenderer.invoke('handoff:acceptMedia', id, opts),
   dismissHandoff: (id: string) => ipcRenderer.invoke('handoff:dismiss', id),
   getYouTubePrimeStatus: (pageUrl: string) => ipcRenderer.invoke('youtube:primeStatus', pageUrl),
@@ -83,6 +91,7 @@ const api: RendererApi = {
   chooseDirectory: (current?: string) => ipcRenderer.invoke('settings:chooseDirectory', current),
   getIntegration: () => ipcRenderer.invoke('integration:get'),
   registerIntegration: () => ipcRenderer.invoke('integration:register'),
+  readClipboard: () => ipcRenderer.invoke('clipboard:read'),
   copyToClipboard: (text: string) => ipcRenderer.invoke('clipboard:write', text),
   checkForUpdates: () => ipcRenderer.invoke('updates:check'),
   getToolStatus: (checkLatest: boolean) => ipcRenderer.invoke('tools:status', checkLatest),
@@ -105,8 +114,7 @@ const api: RendererApi = {
   minimizeSelf: () => ipcRenderer.invoke('window:minimizeSelf'),
   closeSelf: () => ipcRenderer.invoke('window:closeSelf'),
   onMaximizeChange: (cb) => subscribe<boolean>('window:maximized', cb),
-  onToast: (cb) => subscribe<Toast>('toast', cb),
-  onClipboardUrl: (cb) => subscribe<string>('clipboard:url', cb)
+  onToast: (cb) => subscribe<Toast>('toast', cb)
 }
 
 contextBridge.exposeInMainWorld('api', api)

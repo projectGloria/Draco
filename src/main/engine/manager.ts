@@ -3,6 +3,7 @@ import { join } from 'node:path'
 import type { DownloadTask, TaskProgress } from '../../shared/types.ts'
 import { QuotaExceededError, RateLimiter, type QuotaState } from './limiter.ts'
 import { mapConcurrent } from './concurrency.ts'
+import { getPaths } from '../bootstrap/paths.ts'
 import { connectionsForUrl, type HostConnectionLimit } from './network-rules.ts'
 import { setProxyUrl } from './http.ts'
 import { readJournal, removeJournal } from './journal.ts'
@@ -12,6 +13,7 @@ import { logger } from '../log.ts'
 import { downloadSubtitles } from '../media/subtitles.ts'
 import { scanFile } from '../security/scanner.ts'
 import { normalizeDownloadDirectory } from '../destination-path.ts'
+import { TorrentRunner } from './torrent.ts'
 
 const log = logger('manager')
 const RECOVERY_CONCURRENCY = 8
@@ -25,7 +27,10 @@ const RECOVERY_CONCURRENCY = 8
  */
 
 export interface EngineSettings {
+  catMode?: boolean
   maxConcurrentTasks: number
+  checkDiskSpace?: boolean
+  exponentialBackoff?: boolean
   maxConnectionsPerTask: number
   /** Optional: how far the adaptive ramp may climb past the line above. */
   adaptiveConnectionCeiling?: number | null
@@ -49,6 +54,9 @@ export interface RunnerContext {
   retryLimit: number
   timeoutMs: number
   proxyUrl: string | null
+  tempDir: string
+  checkDiskSpace?: boolean
+  exponentialBackoff?: boolean
   onUpdate(task: DownloadTask): void
   onFinished(task: DownloadTask, error: Error | null): void
   onProbed?(task: DownloadTask): void | Promise<void>
@@ -98,6 +106,7 @@ export class DownloadManager {
   /** Tasks stopped by the transfer quota, to be started again by `quotaTimer`. */
   private quotaHeld = new Set<string>()
   private quotaTimer: NodeJS.Timeout | null = null
+  private catTimer: NodeJS.Timeout | null = null
 
   private options: ManagerOptions
 
@@ -318,10 +327,12 @@ export class DownloadManager {
     for (const task of this.tasks.values()) {
       if (this.activeCount >= maxConcurrentTasks) break
       if (task.status !== 'queued') continue
+      if (this.runners.has(task.id)) continue
       this.launch(task)
     }
 
     this.ensureTicker()
+    this.ensureCatTimer()
   }
 
   private launch(task: DownloadTask): void {
@@ -347,6 +358,9 @@ export class DownloadManager {
       retryLimit: settings.retryLimit,
       timeoutMs: settings.timeoutMs,
       proxyUrl: settings.proxyUrl,
+      tempDir: getPaths().tempDir,
+      checkDiskSpace: settings.checkDiskSpace,
+      exponentialBackoff: settings.exponentialBackoff,
       onUpdate: () => this.emitTasks(),
       onFinished: (finished, error) => {
         const r = this.runners.get(task.id)
@@ -385,6 +399,8 @@ export class DownloadManager {
         return
       }
       runner = build(task, context)
+    } else if (task.kind === 'torrent') {
+      runner = new TorrentRunner(task, context)
     } else {
       runner = new TaskRunner(
         task,
@@ -393,7 +409,10 @@ export class DownloadManager {
           connectionCeiling,
           minSplitSize: settings.minSplitSize,
           retryLimit: settings.retryLimit,
-          timeoutMs: settings.timeoutMs
+          timeoutMs: settings.timeoutMs,
+          tempDir: getPaths().tempDir,
+          checkDiskSpace: settings.checkDiskSpace,
+          exponentialBackoff: settings.exponentialBackoff
         },
         {
           limiter: context.limiter,
@@ -421,7 +440,10 @@ export class DownloadManager {
     task: DownloadTask,
     error: Error | null
   ): Promise<void> {
-    this.runners.delete(task.id)
+    task.isCatMode = false
+    if (this.runners.get(task.id) === runner) {
+      this.runners.delete(task.id)
+    }
 
     if (!error && task.status === 'done' && task.subtitles && task.subtitles.length > 0) {
       task.detail = 'Saving subtitles…'
@@ -532,6 +554,113 @@ export class DownloadManager {
   /* Progress feed                                                     */
   /* ---------------------------------------------------------------- */
 
+  private ensureCatTimer(): void {
+    if (this.disposed) return
+    const { catMode } = this.options.getSettings()
+
+    if (!catMode) {
+      if (this.catTimer) {
+        clearInterval(this.catTimer)
+        this.catTimer = null
+      }
+      return
+    }
+
+    if (this.catTimer) return
+
+    this.catTimer = setInterval(() => {
+      if (this.disposed) return
+      
+      const queuedTasks = [...this.tasks.values()].filter((t) => t.status === 'queued' && !this.runners.has(t.id))
+      if (queuedTasks.length === 0) return
+
+      // Round-robin: always pick the one that hasn't been pinged in the longest time.
+      queuedTasks.sort((a, b) => (a.lastCatPingAt ?? 0) - (b.lastCatPingAt ?? 0))
+      const task = queuedTasks[0]
+      task.lastCatPingAt = Date.now()
+      task.isCatMode = true
+      task.status = 'downloading'
+      this.emitTasks()
+
+      log.info(`Cat mode started for queued task ${task.id} (${task.filename})`)
+      
+      const settings = this.options.getSettings()
+      
+      // Cat mode limit: ~100 KB/s
+      const catLimiter = new RateLimiter(102400)
+
+      const context: RunnerContext = {
+        limiter: catLimiter,
+        maxConnections: 1,
+        retryLimit: settings.retryLimit,
+        timeoutMs: settings.timeoutMs,
+        proxyUrl: settings.proxyUrl,
+        tempDir: getPaths().tempDir,
+        onUpdate: () => this.emitTasks(),
+        onFinished: (finished, error) => {
+          const r = this.runners.get(task.id)
+          if (r) void this.onFinished(r, finished, error)
+        },
+        onProbed: (probed) => this.options.onProbed?.(probed),
+        refreshYouTube: this.options.refreshYouTube
+      }
+
+      let runner: Runner
+      if (task.kind === 'hls') {
+        const build = this.options.createHlsRunner
+        if (!build) return
+        runner = build(task, context)
+      } else if (task.audioUrl) {
+        const build = this.options.createDashRunner
+        if (!build) return
+        runner = build(task, context)
+      } else if (task.kind === 'torrent') {
+        runner = new TorrentRunner(task, context)
+      } else {
+        runner = new TaskRunner(
+          task,
+          {
+            maxConnections: 1,
+            minSplitSize: settings.minSplitSize,
+            retryLimit: settings.retryLimit,
+            timeoutMs: settings.timeoutMs,
+            tempDir: getPaths().tempDir,
+            checkDiskSpace: settings.checkDiskSpace,
+            exponentialBackoff: settings.exponentialBackoff
+          },
+          {
+            limiter: context.limiter,
+            onUpdate: context.onUpdate,
+            onFinished: context.onFinished,
+            onProbed: context.onProbed,
+            refreshYouTube: context.refreshYouTube
+          }
+        )
+      }
+
+      this.runners.set(task.id, runner)
+      void runner.start()
+
+      // Stop it after 5 to 10 seconds
+      const durationMs = 5000 + Math.random() * 5000
+      setTimeout(() => {
+        if (this.runners.get(task.id) === runner) {
+          log.info(`Cat mode ended for task ${task.id} (${task.filename})`)
+          void this.pause([task.id]).then(() => {
+            task.isCatMode = false
+            // Put it back to queued if it wasn't manually paused during this time
+            if (!task.manualPause && task.status === 'paused') {
+              task.status = 'queued'
+              this.emitTasks()
+              this.schedule()
+            }
+          })
+        }
+      }, durationMs)
+
+    }, 30_000)
+  }
+
   private ensureTicker(): void {
     if (this.ticker || this.disposed) return
 
@@ -557,7 +686,8 @@ export class DownloadManager {
           status: t.status,
           segments: t.segments,
           error: t.error,
-          detail: t.detail
+          detail: t.detail,
+          torrentInfo: t.torrentInfo
         })
       }
 

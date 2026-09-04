@@ -1,4 +1,5 @@
 import appIcon from '../../../../resources/icon.png'
+import torrentIcon from '../../../../resources/torrent.webp'
 
 /**
  * Every glyph in the app, as inline SVG.
@@ -167,6 +168,19 @@ export function DownloadIcon(props: GlyphProps): React.ReactElement {
       <path d="M12 3.5v11M12 15.5 7.2 10.4M12 15.5l4.8-5.1M4.5 19.5h15" />
     </Svg>
   )
+}
+
+export function ClipboardIcon(props: GlyphProps): React.ReactElement {
+  return (
+    <Svg {...props}>
+      <rect x="5" y="4.5" width="14" height="16" rx="2.2" />
+      <path d="M9 5V3.8A1.3 1.3 0 0 1 10.3 2.5h3.4A1.3 1.3 0 0 1 15 3.8V5M8.5 10h7M8.5 14h7" />
+    </Svg>
+  )
+}
+
+export function TorrentIcon(props: GlyphProps): React.ReactElement {
+  return <img src={torrentIcon} alt="" draggable={false} className={(props.className ?? 'w-4 h-4') + ' object-contain'} />
 }
 
 export function InfoIcon(props: GlyphProps): React.ReactElement {

@@ -84,6 +84,7 @@ export interface SegmentContext {
   limiter: RateLimiter
   timeoutMs: number
   retryLimit: number
+  exponentialBackoff: boolean
   expectedSize: number | null
   signal: AbortSignal
   /**
@@ -130,9 +131,9 @@ export async function runSegment(seg: Segment, ctx: SegmentContext): Promise<voi
       attempt++
       if (attempt >= ctx.retryLimit) throw err
 
-      // Exponential backoff with jitter, so a flaky server does not get hit by
-      // every segment in lockstep on the same schedule.
-      const backoff = Math.min(30_000, 500 * 2 ** (attempt - 1))
+      // Exponential backoff with jitter, or a fixed delay if disabled
+      const baseDelay = ctx.exponentialBackoff ? 500 * 2 ** (attempt - 1) : 2000
+      const backoff = Math.min(30_000, baseDelay)
       log.warn(
         `segment ${seg.start}-${seg.end} retry ${attempt}/${ctx.retryLimit} in ${backoff}ms: ${err instanceof Error ? err.message : String(err)}`
       )

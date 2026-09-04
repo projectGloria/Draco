@@ -107,6 +107,17 @@ function codecRank(vcodec: string | null): number {
   return 0
 }
 
+function audioCodecRank(format: SourceFormat): number {
+  const codec = (format.acodec ?? '').toLowerCase()
+  const ext = (format.ext ?? '').toLowerCase()
+  if (/flac|alac|wav|pcm/.test(codec) || /^(flac|wav|alac)$/.test(ext)) return 5
+  if (/opus/.test(codec)) return 4
+  if (/mp4a|aac/.test(codec)) return 3
+  if (/vorbis/.test(codec)) return 2
+  if (/mp3|mpga/.test(codec) || ext === 'mp3') return 1
+  return 0
+}
+
 /** Higher is better, on every axis. */
 function betterVideo(a: SourceFormat, b: SourceFormat): number {
   return (
@@ -150,6 +161,40 @@ export function buildVariants(formats: SourceFormat[]): MediaVariant[] {
   return [...best.entries()]
     .sort((a, b) => b[0] - a[0])
     .map(([tier, video]) => variantFor(tier, video, video.hasAudio ? null : bestAudio))
+}
+
+/** A compact quality list for media pages that expose audio but no video. */
+export function buildAudioVariants(formats: SourceFormat[]): MediaVariant[] {
+  const audio = formats
+    .filter((format) => format.hasAudio && !format.hasVideo)
+    .sort((a, b) =>
+      (b.bitrate ?? 0) - (a.bitrate ?? 0) ||
+      audioCodecRank(b) - audioCodecRank(a) ||
+      (b.size ?? 0) - (a.size ?? 0)
+    )
+
+  const seen = new Set<string>()
+  const variants: MediaVariant[] = []
+  for (const format of audio) {
+    const rate = format.bitrate ? Math.round(format.bitrate / 1000) : null
+    const container = format.ext || 'm4a'
+    // One best stream for each bitrate. If the source publishes several 320
+    // kbps copies, codec quality and then the real size decide which survives.
+    const key = `${rate ?? 'unknown'}`
+    if (seen.has(key)) continue
+    seen.add(key)
+    variants.push({
+      url: format.url ?? '',
+      label: rate ? `Music · ${rate} kbps` : 'Music',
+      height: null,
+      bandwidth: format.bitrate,
+      codecs: format.acodec,
+      estimatedSize: format.size,
+      container,
+      youtube: { videoFormatId: format.id, audioFormatId: null, role: 'audio' }
+    })
+  }
+  return variants.slice(0, 6)
 }
 
 function variantFor(
@@ -509,7 +554,7 @@ export function formatsFromPage(formats: PageFormat[]): SourceFormat[] {
     .map((f) => {
       const mime = f.mimeType ?? ''
       const kind = /^audio\//i.test(mime) ? 'audio' : /^video\//i.test(mime) ? 'video' : ''
-      const codecs = /codecs="([^"]+)"/i.exec(mime)?.[1] ?? ''
+      const codecs = /codecs=["']?([^"']+)["']?/i.exec(mime)?.[1] ?? ''
       const parts = codecs.split(',').map((c) => c.trim()).filter(Boolean)
       const ext = /^[a-z]+\/([a-z0-9]+)/i.exec(mime)?.[1]?.toLowerCase() ?? null
 

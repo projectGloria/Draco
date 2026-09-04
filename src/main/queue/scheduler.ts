@@ -150,6 +150,11 @@ export class Scheduler {
     queue.lastResult = 'idle'
     // An explicit Start means "run this once more" for one-time queues.
     if (queue.mode === 'onetime') queue.oneTimeCompleted = false
+    
+    for (const task of this.tasksOf(queue)) {
+      if (task.manualPause) task.manualPause = false
+    }
+
     await this.persist()
     this.tick()
   }

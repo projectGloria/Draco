@@ -31,6 +31,7 @@ export default function ConfirmDialog({
       width={430}
       onClose={onClose}
       showClose={false}
+      autoFocus={false}
       footer={
         <>
           <GhostButton onClick={onClose}>Cancel</GhostButton>

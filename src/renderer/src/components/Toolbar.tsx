@@ -42,18 +42,27 @@ export default function Toolbar({
   search: string
   onSearch(value: string): void
 }): React.ReactElement {
-  const tasks = useApp((s) => s.tasks)
-  const selection = useApp((s) => s.selection)
+  const toolbarState = useApp((s) => {
+    const selected = s.tasks.filter((t) => s.selection.includes(t.id))
+    const canResume = selected.some((t) => t.status !== 'downloading' && t.status !== 'done')
+    const canPause = selected.some((t) => t.status === 'downloading' || t.status === 'queued')
+    const anyRunning = s.tasks.some((t) => t.status === 'downloading' || t.status === 'queued')
+    const anyDone = s.tasks.some((t) => t.status === 'done')
+    const selectionLength = s.selection.length
+    return `${canResume}:${canPause}:${anyRunning}:${anyDone}:${selectionLength}`
+  })
+
+  const [canResumeStr, canPauseStr, anyRunningStr, anyDoneStr, selectionLengthStr] = toolbarState.split(':')
+  const canResume = canResumeStr === 'true'
+  const canPause = canPauseStr === 'true'
+  const anyRunning = anyRunningStr === 'true'
+  const anyDone = anyDoneStr === 'true'
+  const selectionLength = parseInt(selectionLengthStr, 10)
+
   const t = useT()
 
-  const selected = tasks.filter((t) => selection.includes(t.id))
-  const canResume = selected.some((t) => t.status !== 'downloading' && t.status !== 'done')
-  const canPause = selected.some((t) => t.status === 'downloading' || t.status === 'queued')
-  const anyRunning = tasks.some((t) => t.status === 'downloading' || t.status === 'queued')
-  const anyDone = tasks.some((t) => t.status === 'done')
-
   return (
-    <div className="h-11 shrink-0 flex items-center gap-1 px-2 border-b border-line bg-white/[0.02]">
+    <div className="h-11 shrink-0 flex items-center gap-1 px-2 border-b border-line bg-white/[0.02] overflow-x-auto overflow-y-hidden">
       <Button icon={<PlusIcon />} label={t('addUrl')} primary onClick={actions.onAdd} />
       <Button icon={<LayersIcon />} label={t('siteGrabber')} onClick={actions.onSiteGrabber} />
 
@@ -78,7 +87,7 @@ export default function Toolbar({
       <Button
         icon={<TrashIcon />}
         label={t('delete')}
-        disabled={selection.length === 0}
+        disabled={selectionLength === 0}
         onClick={actions.onDelete}
       />
       <Button
@@ -90,7 +99,7 @@ export default function Toolbar({
       <Button
         icon={<InfoIcon />}
         label={t('details')}
-        disabled={selection.length !== 1}
+        disabled={selectionLength !== 1}
         onClick={actions.onDetails}
       />
 
@@ -101,7 +110,7 @@ export default function Toolbar({
 
       <div className="flex-1" />
 
-      <label className="relative w-[190px] max-[900px]:w-[120px]">
+      <label className="relative w-[190px] max-[900px]:w-[120px] max-[650px]:w-[92px] shrink-0">
         <SearchIcon className="w-3.5 h-3.5 absolute left-2.5 top-1/2 -translate-y-1/2 text-faint pointer-events-none" />
         <input
           value={search}

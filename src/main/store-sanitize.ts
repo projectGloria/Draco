@@ -55,6 +55,18 @@ function validUrl(value: unknown): string | null {
   }
 }
 
+function validDownloadUrl(value: unknown): string | null {
+  if (typeof value !== 'string' || value.length > 32768) return null
+  try {
+    const url = new URL(value)
+    return url.protocol === 'http:' || url.protocol === 'https:' || url.protocol === 'magnet:'
+      ? value
+      : null
+  } catch {
+    return null
+  }
+}
+
 function validTime(value: unknown): string | null {
   if (typeof value !== 'string') return null
   const v = value.trim()
@@ -112,7 +124,10 @@ export function sanitizeSettings(input: unknown, base: Settings, defaultColumns:
     language: source.language === 'en' || source.language === 'tr' ? source.language : 'system',
     theme: source.theme === 'light' || source.theme === 'system' ? source.theme : 'dark',
     downloadDir: safeDownloadDirectory(source.downloadDir, base.downloadDir),
+    checkDiskSpace: Boolean(source.checkDiskSpace ?? base.checkDiskSpace),
+    catMode: Boolean(source.catMode ?? base.catMode),
     maxConcurrentTasks: clamp(source.maxConcurrentTasks, 1, 20, base.maxConcurrentTasks),
+    exponentialBackoff: Boolean(source.exponentialBackoff ?? base.exponentialBackoff),
     // The ramp is what decides how many of these are actually opened, so the
     // ceiling can be generous: asking for more than a server rewards costs a
     // rung's measurement, not the connections.
@@ -145,6 +160,7 @@ export function sanitizeSettings(input: unknown, base: Settings, defaultColumns:
     takeoverExtensions: lowerList(source.takeoverExtensions),
     takeoverExcludeHosts: lowerList(source.takeoverExcludeHosts),
     watchClipboard: source.watchClipboard === true,
+    showDropzone: source.showDropzone === true,
     showProgressWindow: source.showProgressWindow !== false,
     accent,
     columns,
@@ -236,7 +252,7 @@ export function sanitizeTasks(input: unknown, defaultDir: string): DownloadTask[
 
   for (const raw of input) {
     if (!isRecord(raw) || typeof raw.id !== 'string' || typeof raw.url !== 'string') continue
-    const url = validUrl(raw.url)
+    const url = validDownloadUrl(raw.url)
     const id = raw.id.slice(0, 256)
     if (!url || !id || seen.has(id)) continue
     seen.add(id)
@@ -245,10 +261,12 @@ export function sanitizeTasks(input: unknown, defaultDir: string): DownloadTask[
     const receivedRaw = safeNonNegativeInt(raw.received, 0) ?? 0
     const received = size === null ? receivedRaw : Math.min(receivedRaw, size)
     const status: TaskStatus = TASK_STATUSES.includes(raw.status as TaskStatus) ? raw.status as TaskStatus : 'paused'
-    const kind: TaskKind = raw.kind === 'hls' || raw.kind === 'dash' ? raw.kind : 'file'
+    const kind: TaskKind = raw.kind === 'hls' || raw.kind === 'dash' || raw.kind === 'torrent'
+      ? raw.kind
+      : 'file'
     const filenameSource = typeof raw.filename === 'string' ? raw.filename : (filenameFromUrl(url) ?? 'download')
     const filename = sanitizeFilename(filenameSource)
-    const finalUrl = validUrl(raw.finalUrl) ?? url
+    const finalUrl = validDownloadUrl(raw.finalUrl) ?? url
     const audioUrl = validUrl(raw.audioUrl) ?? null
     const youtube = sanitizeYouTube(raw.youtube)
     const segments = sanitizeSegments(raw.segments, size)
@@ -257,6 +275,9 @@ export function sanitizeTasks(input: unknown, defaultDir: string): DownloadTask[
       id,
       url,
       sourceUrl: validUrl(raw.sourceUrl) ?? youtube?.pageUrl ?? url,
+      groupId: optionalText(raw.groupId, 128) ?? undefined,
+      groupName: optionalText(raw.groupName, 160) ?? undefined,
+      groupFolder: optionalText(raw.groupFolder, 120) ?? undefined,
       audioUrl,
       ...(youtube ? { youtube } : {}),
       finalUrl,
@@ -288,10 +309,33 @@ export function sanitizeTasks(input: unknown, defaultDir: string): DownloadTask[
       headers: headers(raw.headers),
       subtitles: sanitizeSubtitles(raw.subtitles),
       mimeType: optionalText(raw.mimeType, 1024),
-      description: typeof raw.description === 'string' ? raw.description.slice(0, 10_000) : ''
+      description: typeof raw.description === 'string' ? raw.description.slice(0, 10_000) : '',
+      expectedChecksum: optionalText(raw.expectedChecksum, 256) ?? undefined,
+      postProcess: raw.postProcess === 'mp4' || raw.postProcess === 'mp3' ? raw.postProcess : 'none',
+      selectedFiles: sanitizeSelectedFiles(raw.selectedFiles),
+      torrentFiles: sanitizeTorrentFiles(raw.torrentFiles)
     })
   }
   return out
+}
+
+function sanitizeTorrentFiles(input: unknown): Array<{ path: string; size: number }> | undefined {
+  if (!Array.isArray(input)) return undefined
+  const files = input.filter((value): value is Record<string, unknown> => isRecord(value))
+    .map((file) => ({ path: typeof file.path === 'string' ? file.path.slice(0, 4096) : '', size: safeNonNegativeInt(file.size, 0) ?? 0 }))
+    .filter((file) => file.path && !file.path.includes('\0'))
+    .slice(0, 20_000)
+  return files.length ? files : undefined
+}
+
+function sanitizeSelectedFiles(input: unknown): string[] | undefined {
+  if (!Array.isArray(input)) return undefined
+  const files = input
+    .filter((value): value is string =>
+      typeof value === 'string' && value.length > 0 && value.length <= 4096 && !value.includes('\0')
+    )
+    .slice(0, 20_000)
+  return files.length === input.length ? files : undefined
 }
 
 function sanitizeSegments(input: unknown, size: number | null): Segment[] {
@@ -423,7 +467,11 @@ function sanitizeVariants(input: unknown): MediaVariant[] {
   for (const raw of input.slice(0, 50)) {
     if (!isRecord(raw)) continue
     const youtube = isRecord(raw.youtube) && typeof raw.youtube.videoFormatId === 'string' && raw.youtube.videoFormatId
-      ? { videoFormatId: raw.youtube.videoFormatId.slice(0, 200), audioFormatId: typeof raw.youtube.audioFormatId === 'string' ? raw.youtube.audioFormatId.slice(0, 200) : null }
+      ? {
+          videoFormatId: raw.youtube.videoFormatId.slice(0, 200),
+          audioFormatId: typeof raw.youtube.audioFormatId === 'string' ? raw.youtube.audioFormatId.slice(0, 200) : null,
+          role: raw.youtube.role === 'audio' ? 'audio' as const : 'video' as const
+        }
       : undefined
     /*
      * A YouTube variant read from the page names its format by itag and has no

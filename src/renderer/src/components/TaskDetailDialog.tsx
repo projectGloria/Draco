@@ -5,7 +5,11 @@ import { HISTORY_SAMPLES, speedHistory } from '../lib/history'
 import { categoryName, useApp } from '../store/app'
 import { reportError, toast } from '../store/toasts'
 import Dialog, { GhostButton, PrimaryButton } from './Dialog'
+import ContextMenu, { type MenuPosition } from './ContextMenu'
+import FileIcon from './FileIcon'
 import ProgressBar, { barColor } from './ProgressBar'
+
+type TorrentTab = 'general' | 'trackers' | 'peers' | 'sources' | 'content'
 
 /**
  * IDM's signature screen: what every connection is doing right now.
@@ -29,6 +33,7 @@ export default function TaskDetailDialog({
   const [filename, setFilename] = useState(task?.filename ?? '')
   const [description, setDescription] = useState(task?.description ?? '')
   const [queueId, setQueueId] = useState(task?.queueId ?? '')
+  const [torrentTab, setTorrentTab] = useState<TorrentTab>('general')
 
   if (!task) return null
 
@@ -53,7 +58,7 @@ export default function TaskDetailDialog({
     <Dialog
       title={task.filename}
       subtitle={task.url}
-      width={740}
+      width={task.kind === 'torrent' ? 920 : 740}
       onClose={onClose}
       footer={
         <>
@@ -83,6 +88,10 @@ export default function TaskDetailDialog({
     >
       <Overview task={task} categoryLabel={categoryName(categories, task.categoryId)} />
 
+      {task.kind === 'torrent' ? (
+        <TorrentDetails task={task} tab={torrentTab} onTabChange={setTorrentTab} />
+      ) : (
+        <>
       <div className="mt-5">
         <SectionLabel>
           Connections
@@ -121,6 +130,8 @@ export default function TaskDetailDialog({
         <SectionLabel>Speed, last 60 seconds</SectionLabel>
         <Sparkline id={id} live={task.status === 'downloading'} />
       </div>
+        </>
+      )}
 
       <div className="mt-5 grid grid-cols-2 gap-3">
         <div className="col-span-2">
@@ -164,6 +175,209 @@ export default function TaskDetailDialog({
         </div>
       )}
     </Dialog>
+  )
+}
+
+function TorrentDetails({
+  task,
+  tab,
+  onTabChange
+}: {
+  task: DownloadTask
+  tab: TorrentTab
+  onTabChange(tab: TorrentTab): void
+}): React.ReactElement {
+  const info = task.torrentInfo
+  const tabs: Array<{ id: TorrentTab; label: string }> = [
+    { id: 'general', label: 'General' },
+    { id: 'trackers', label: `Trackers${info ? ` (${info.trackers.length})` : ''}` },
+    { id: 'peers', label: `Peers${info ? ` (${info.peers.length})` : ''}` },
+    { id: 'sources', label: `HTTP Sources${info ? ` (${info.sources.length})` : ''}` },
+    { id: 'content', label: `Content${info ? ` (${info.files.length})` : ''}` }
+  ]
+
+  return (
+    <div className="mt-5 border border-line rounded-lg overflow-hidden bg-white/[0.02]">
+      <div className="flex items-center border-b border-line bg-white/[0.03] overflow-x-auto">
+        {tabs.map((entry) => (
+          <button
+            key={entry.id}
+            onClick={() => onTabChange(entry.id)}
+            className={
+              'px-3.5 py-2.5 text-[11px] font-semibold whitespace-nowrap border-r border-line transition-colors ' +
+              (tab === entry.id ? 'text-ink bg-white/[0.07]' : 'text-faint hover:text-ink hover:bg-white/[0.04]')
+            }
+            style={tab === entry.id ? { boxShadow: 'inset 0 -2px 0 var(--accent)' } : undefined}
+          >
+            {entry.label}
+          </button>
+        ))}
+      </div>
+
+      <div className="min-h-[245px] max-h-[330px] overflow-auto p-3">
+        {!info ? (
+          <div className="h-[220px] grid place-items-center text-[12px] text-faint">
+            Torrent details will appear after metadata is received.
+          </div>
+        ) : tab === 'general' ? (
+          <TorrentGeneral task={task} />
+        ) : tab === 'trackers' ? (
+          <SimpleTorrentList
+            heading="Tracker URL"
+            rows={info.trackers}
+            empty="This torrent has no tracker URLs and is using peer discovery."
+          />
+        ) : tab === 'sources' ? (
+          <SimpleTorrentList
+            heading="HTTP source"
+            rows={info.sources}
+            empty="This torrent does not advertise HTTP web seeds."
+          />
+        ) : tab === 'peers' ? (
+          <TorrentPeers task={task} />
+        ) : (
+          <TorrentContent task={task} />
+        )}
+      </div>
+    </div>
+  )
+}
+
+function TorrentGeneral({ task }: { task: DownloadTask }): React.ReactElement {
+  const info = task.torrentInfo!
+  return (
+    <div className="grid grid-cols-3 gap-x-5 gap-y-4 text-[11.5px]">
+      <Fact label="Info hash" value={info.infoHash} wide />
+      <Fact label="Selected size" value={formatBytes(task.size)} />
+      <Fact label="Downloaded" value={formatBytes(task.received)} />
+      <Fact label="Uploaded" value={formatBytes(info.uploaded)} />
+      <Fact label="Share ratio" value={info.ratio.toFixed(2)} />
+      <Fact label="Connected peers" value={String(info.peers.length)} />
+      <Fact label="Trackers" value={String(info.trackers.length)} />
+      <Fact label="HTTP sources" value={String(info.sources.length)} />
+    </div>
+  )
+}
+
+function SimpleTorrentList({
+  heading,
+  rows,
+  empty
+}: {
+  heading: string
+  rows: string[]
+  empty: string
+}): React.ReactElement {
+  if (rows.length === 0) return <div className="py-16 text-center text-[12px] text-faint">{empty}</div>
+  return (
+    <div className="text-[11.5px]">
+      <div className="grid grid-cols-[minmax(0,1fr)_90px] px-2 pb-2 text-[10px] uppercase tracking-[0.4px] text-faint">
+        <span>{heading}</span><span>Status</span>
+      </div>
+      {rows.map((row) => (
+        <div key={row} className="grid grid-cols-[minmax(0,1fr)_90px] px-2 py-2 border-t border-line">
+          <span className="truncate" title={row}>{row}</span>
+          <span style={{ color: 'var(--color-ok)' }}>Active</span>
+        </div>
+      ))}
+    </div>
+  )
+}
+
+function TorrentPeers({ task }: { task: DownloadTask }): React.ReactElement {
+  const peers = task.torrentInfo!.peers
+  if (peers.length === 0) {
+    return <div className="py-16 text-center text-[12px] text-faint">No peers are connected right now.</div>
+  }
+  return (
+    <div className="text-[11px]">
+      <div className="grid grid-cols-[160px_minmax(0,1fr)_90px_90px] px-2 pb-2 text-[10px] uppercase tracking-[0.4px] text-faint">
+        <span>Address</span><span>Client / type</span><span className="text-right">Down</span><span className="text-right">Up</span>
+      </div>
+      {peers.map((peer, index) => (
+        <div key={`${peer.address}-${index}`} className="grid grid-cols-[160px_minmax(0,1fr)_90px_90px] px-2 py-2 border-t border-line tnum">
+          <span className="truncate" title={peer.address}>{peer.address}</span>
+          <span className="truncate text-muted" title={peer.client}>{peer.client || peer.type}</span>
+          <span className="text-right">{formatSpeed(peer.downloadSpeed) || '—'}</span>
+          <span className="text-right">{formatSpeed(peer.uploadSpeed) || '—'}</span>
+        </div>
+      ))}
+    </div>
+  )
+}
+
+function TorrentContent({ task }: { task: DownloadTask }): React.ReactElement {
+  const files = task.torrentInfo!.files
+  const [menu, setMenu] = useState<{ at: MenuPosition; path: string } | null>(null)
+
+  const openItem = async (path: string): Promise<void> => {
+    try {
+      if (!(await window.api.openTorrentItem(task.id, path))) {
+        toast('info', 'That file is not available on disk yet')
+      }
+    } catch (error) {
+      reportError('Could not open the torrent file', error)
+    }
+  }
+
+  const revealItem = async (path: string): Promise<void> => {
+    try {
+      if (!(await window.api.revealTorrentItem(task.id, path))) {
+        toast('info', 'That file is not available on disk yet')
+      }
+    } catch (error) {
+      reportError('Could not show the torrent file', error)
+    }
+  }
+
+  return (
+    <div className="text-[11.5px]">
+      <div className="grid grid-cols-[18px_minmax(0,1fr)_90px_160px] gap-2 px-2 pb-2 text-[10px] uppercase tracking-[0.4px] text-faint">
+        <span /><span>Name</span><span className="text-right">Size</span><span className="text-right">Progress</span>
+      </div>
+      {files.map((file) => {
+        const fileProgress = file.size ? Math.min(100, (file.downloaded / file.size) * 100) : 100
+        const fileStatus = fileProgress >= 100
+          ? 'done'
+          : file.selected && task.status === 'downloading'
+            ? 'downloading'
+            : 'paused'
+        return (
+          <div
+            key={file.path}
+            className={'grid grid-cols-[18px_minmax(0,1fr)_90px_160px] items-center gap-2 px-2 py-2 border-t border-line cursor-default hover:bg-white/[0.035] ' + (file.selected ? '' : 'opacity-45')}
+            onDoubleClick={() => void openItem(file.path)}
+            onContextMenu={(event) => {
+              event.preventDefault()
+              setMenu({ at: { x: event.clientX, y: event.clientY }, path: file.path })
+            }}
+          >
+            <FileIcon name={file.path} className="w-4 h-4" />
+            <span className="truncate" title={file.path}>{file.path}</span>
+            <span className="text-right tnum text-muted">{formatBytes(file.size)}</span>
+            <div className="flex items-center gap-2 min-w-0">
+              <ProgressBar percent={fileProgress} status={fileStatus} height={5} />
+              <span className="w-[42px] shrink-0 text-right tnum">{fileProgress.toFixed(1)}%</span>
+            </div>
+          </div>
+        )
+      })}
+      {menu && (
+        <ContextMenu
+          at={menu.at}
+          onClose={() => setMenu(null)}
+          items={[
+            { label: 'Open', onClick: () => void openItem(menu.path) },
+            { label: 'Show in Explorer', onClick: () => void revealItem(menu.path) },
+            {},
+            {
+              label: 'Copy relative path',
+              onClick: () => void window.api.copyToClipboard(menu.path)
+            }
+          ]}
+        />
+      )}
+    </div>
   )
 }
 

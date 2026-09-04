@@ -86,11 +86,44 @@ export function closeSplash(): void {
   splashWindow = null
 }
 
+let dropzoneWindow: BrowserWindow | null = null
+
+export function syncDropzoneWindow(show: boolean): void {
+  if (show) {
+    if (!dropzoneWindow || dropzoneWindow.isDestroyed()) {
+      dropzoneWindow = new BrowserWindow({
+        width: 100,
+        height: 100,
+        transparent: true,
+        frame: false,
+        alwaysOnTop: true,
+        skipTaskbar: true,
+        resizable: false,
+        webPreferences: { preload, sandbox: true, contextIsolation: true }
+      })
+      
+      const target = rendererUrl('index', '#dropzone')
+      if (target.url) void dropzoneWindow.loadURL(target.url)
+      else void dropzoneWindow.loadFile(target.file!, { hash: 'dropzone' })
+      
+      dropzoneWindow.on('closed', () => {
+        dropzoneWindow = null
+      })
+    } else {
+      dropzoneWindow.show()
+    }
+  } else {
+    if (dropzoneWindow && !dropzoneWindow.isDestroyed()) {
+      dropzoneWindow.close()
+    }
+  }
+}
+
 export function createMainWindow(startMinimized: boolean): BrowserWindow {
   mainWindow = new BrowserWindow({
     width: 1180,
     height: 720,
-    minWidth: 860,
+    minWidth: 620,
     minHeight: 480,
     show: false,
     frame: false,

@@ -35,11 +35,18 @@ export default function StatusBar({
     integration !== null &&
     Object.values(integration.registered).some(Boolean)
 
+  const nextInQueue = tasks.find((t) => t.status === 'queued')
+
   return (
     <footer className="h-7 shrink-0 flex items-center gap-4 px-3 border-t border-line bg-white/[0.02] text-[11.5px] text-faint">
-      <span className="tnum">
-        {active.length} {t('active')}
-        {queued > 0 && <span className="text-faint/70"> · {queued} {t('queued')}</span>}
+      <span className="tnum flex items-center gap-1">
+        <span className="text-blue-500 font-semibold">{active.length}</span> {t('active')}
+        {queued > 0 && (
+          <span className="text-faint/70 flex items-center gap-1">
+            {' '}&bull;{' '}
+            <span className="text-yellow-500 font-semibold">{queued}</span> {t('queued')}
+          </span>
+        )}
       </span>
 
       {speed > 0 && (
@@ -48,9 +55,15 @@ export default function StatusBar({
         </span>
       )}
 
-      {remaining > 0 && <span className="tnum">{formatBytes(remaining)} {t('remaining')}</span>}
+      {remaining > 0 && (
+        <span className="tnum flex items-center gap-1">
+          <span className="text-pink-500 font-semibold">{formatBytes(remaining)}</span> {t('remaining')}
+        </span>
+      )}
 
-      <div className="flex-1" />
+      <div className="flex-1 text-center truncate px-2 text-faint/70">
+        {nextInQueue ? `Next: ${nextInQueue.filename}` : ''}
+      </div>
 
       {settings.speedLimit && (
         <span className="tnum" title="Global speed limit, from Options">
@@ -65,7 +78,7 @@ export default function StatusBar({
             ? 'The browser bridge is listening and at least one browser is registered'
             : 'Open Options to finish setting up the browser extension'
         }
-        className="flex items-center gap-1.5 hover:text-ink transition-colors"
+        className="flex items-center gap-1.5 hover:text-ink transition-colors shrink-0"
       >
         <span
           className="w-1.5 h-1.5 rounded-full"

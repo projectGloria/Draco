@@ -1,6 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import {
+  buildAudioVariants,
   buildVariants,
   formatsFromPage,
   formatsFromYtDlp,
@@ -485,4 +486,27 @@ test('a video substitution is refused when the rung it should match is unknown',
   )
 
   assert.equal(format, null)
+})
+
+test('audio-only media pages get a compact bitrate ladder', () => {
+  const variants = buildAudioVariants(formatsFromYtDlp([
+    audio('low', { abr: 64, ext: 'mp3' }),
+    audio('high', { abr: 192, ext: 'mp3' }),
+    audio('duplicate', { abr: 192, ext: 'mp3' })
+  ]))
+
+  assert.deepEqual(variants.map((variant) => variant.label), ['Music · 192 kbps', 'Music · 64 kbps'])
+  assert.equal(variants[0].container, 'mp3')
+  assert.equal(variants[0].youtube.videoFormatId, 'high')
+  assert.equal(variants[0].youtube.role, 'audio')
+})
+
+test('each audio bitrate keeps its best available codec', () => {
+  const variants = buildAudioVariants(formatsFromYtDlp([
+    audio('mp3-copy', { abr: 320, ext: 'mp3', acodec: 'mp3' }),
+    audio('opus-copy', { abr: 320, ext: 'webm', acodec: 'opus' })
+  ]))
+
+  assert.equal(variants.length, 1)
+  assert.equal(variants[0].youtube.videoFormatId, 'opus-copy')
 })

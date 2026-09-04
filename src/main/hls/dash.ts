@@ -1,11 +1,11 @@
 import { basename, extname, join } from 'node:path'
-import { rename, rm, stat } from 'node:fs/promises'
+import { rm, stat } from 'node:fs/promises'
 import type { DownloadTask } from '@shared/types'
 import { QuotaExceededError } from '../engine/limiter.ts'
 import { TaskRunner, quotaDetail } from '../engine/task.ts'
 import type { Runner } from '../engine/runner.ts'
 import type { RunnerContext } from '../engine/manager.ts'
-import { uniquePath } from '../engine/naming.ts'
+import { moveFile, uniquePath } from '../engine/naming.ts'
 import { AbortedError } from '../engine/worker.ts'
 import { ensureFfmpeg } from './ffmpeg.ts'
 import { mux } from './mux.ts'
@@ -147,7 +147,7 @@ export class DashRunner implements Runner {
       })
 
       if (this.controller.signal.aborted) throw new AbortedError()
-      await rename(muxTemp, targetPath)
+      await moveFile(muxTemp, targetPath)
 
       await rm(videoPath, { force: true }).catch(() => {})
       await rm(audioPath, { force: true }).catch(() => {})

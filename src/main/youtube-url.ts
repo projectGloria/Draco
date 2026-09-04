@@ -38,29 +38,31 @@ export function isSupportedYouTubeUrl(value: unknown): boolean {
 
 export function variantsPreparedForStart(variants: MediaVariant[]): boolean {
   return variants.length > 0 && variants.every((variant) =>
-    Boolean(variant.url) && (!variant.youtube?.audioFormatId || Boolean(variant.audioUrl))
+    Boolean(variant.url) &&
+    (variant.youtube?.role === 'audio' || !variant.youtube?.audioFormatId || Boolean(variant.audioUrl))
   )
 }
 
 export function chosenYouTubeUrls(
   variants: MediaVariant[],
   pageUrl: string,
-  youtube: { videoFormatId: string; audioFormatId?: string | null }
+  youtube: { videoFormatId: string; audioFormatId?: string | null; role?: 'video' | 'audio' }
 ): { url: string; audioUrl: string | null } {
   const prepared = variants.find((variant) =>
     variant.youtube?.videoFormatId === youtube.videoFormatId &&
-    (variant.youtube?.audioFormatId ?? null) === (youtube.audioFormatId ?? null)
+    (variant.youtube?.audioFormatId ?? null) === (youtube.audioFormatId ?? null) &&
+    (variant.youtube?.role ?? 'video') === (youtube.role ?? 'video')
   )
-  if (prepared?.url && (!youtube.audioFormatId || prepared.audioUrl)) {
+  if (prepared?.url && (youtube.role === 'audio' || !youtube.audioFormatId || prepared.audioUrl)) {
     return {
       url: prepared.url,
-      audioUrl: youtube.audioFormatId ? prepared.audioUrl ?? null : null
+      audioUrl: youtube.role === 'audio' ? null : youtube.audioFormatId ? prepared.audioUrl ?? null : null
     }
   }
 
   return {
     url: pageUrl,
-    audioUrl: youtube.audioFormatId ? pageUrl : null
+    audioUrl: youtube.role === 'audio' ? null : youtube.audioFormatId ? pageUrl : null
   }
 }
 import type { MediaVariant } from '../shared/types.ts'

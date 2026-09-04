@@ -1,11 +1,11 @@
 import { randomUUID } from 'node:crypto'
 import { basename, dirname, join } from 'node:path'
-import { mkdir, writeFile } from 'node:fs/promises'
+import { mkdir, writeFile, readFile, rm } from 'node:fs/promises'
 import type { SiteGrabOptions, SiteGrabProject, SiteGrabResult } from '../../shared/types.ts'
 import { createTask, validateUrl } from '../engine/create.ts'
 import type { DownloadManager } from '../engine/manager.ts'
 import { sanitizeFilename } from '../engine/naming.ts'
-import { crawlSite } from './crawler.ts'
+import { crawlSite, rewriteForOffline } from './crawler.ts'
 
 const SCHEDULE_TICK_MS = 5 * 60_000
 
@@ -69,7 +69,7 @@ export class SiteProjectManager {
     this.running.add(id)
 
     try {
-      const resources = await crawlSite(project.options)
+      const { resources, paths, tmpDir } = await crawlSite(project.options)
       const known = new Set(project.knownUrls)
       const fresh = resources.filter((resource) => !known.has(resource.url))
       const ids: string[] = []
@@ -80,8 +80,14 @@ export class SiteProjectManager {
       for (const resource of resources.filter((candidate) => candidate.kind === 'page')) {
         const target = join(project.rootDir, resource.relativePath)
         await mkdir(dirname(target), { recursive: true })
-        await writeFile(target, resource.content ?? '', 'utf8')
+        if (resource.tmpFile) {
+          const html = await readFile(resource.tmpFile, 'utf8')
+          const rewritten = rewriteForOffline(html, new URL(resource.url), resource.relativePath, paths)
+          await writeFile(target, rewritten, 'utf8')
+          await rm(resource.tmpFile).catch(() => {})
+        }
       }
+      await rm(tmpDir, { recursive: true, force: true }).catch(() => {})
 
       for (const resource of fresh.filter((candidate) => candidate.kind === 'asset')) {
         const task = createTask({
