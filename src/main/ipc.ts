@@ -28,7 +28,7 @@ import type { DownloadManager } from './engine/manager.ts'
 import { probeUrl } from './engine/probe.ts'
 import { resolveTorrentItemPath } from './engine/torrent-path.ts'
 import { resolveVariants } from './hls/playlist.ts'
-import { isSupportedMediaPageUrl } from './media-url.ts'
+import { couldBeHtmlPageUrl, isSupportedMediaPageUrl } from './media-url.ts'
 import { getToolStatus, updateTool } from './tools.ts'
 import { checkForUpdates } from './update.ts'
 import { chosenYouTubeUrls, isSupportedYouTubeUrl } from './youtube-url.ts'
@@ -150,29 +150,12 @@ export function prepareClipboardItem(ctx: AppContext, rawUrl: string, existingId
         target.mimeType = first?.container ? `video/${first.container}` : 'video'
       } else if (target.kind === 'media') {
         const media = await resolveMediaPage(target.url, { referer: target.url })
-        const first = media.variants[0]
-        target.media = media
-        target.youtube = undefined
-        target.probe = undefined
-        target.filename = media.title
-        target.size = first?.estimatedSize ?? null
-        target.mimeType = first?.container
-          ? `${first.youtube?.role === 'audio' ? 'audio' : 'video'}/${first.container}`
-          : first?.youtube?.role === 'audio' ? 'audio' : 'video'
+        applyClipboardMedia(target, media)
       } else {
         const probe = await probeUrl(target.url, { timeoutMs: getSettings().timeoutMs })
         if (isHtmlPage(probe.mimeType)) {
           const media = await resolveMediaPage(target.url, { referer: target.url })
-          const first = media.variants[0]
-          target.kind = 'media'
-          target.media = media
-          target.youtube = undefined
-          target.probe = undefined
-          target.filename = media.title
-          target.size = first?.estimatedSize ?? null
-          target.mimeType = first?.container
-            ? `${first.youtube?.role === 'audio' ? 'audio' : 'video'}/${first.container}`
-            : first?.youtube?.role === 'audio' ? 'audio' : 'video'
+          applyClipboardMedia(target, media)
         } else {
           target.probe = probe
           target.youtube = undefined
@@ -185,6 +168,20 @@ export function prepareClipboardItem(ctx: AppContext, rawUrl: string, existingId
       target.status = 'ready'
       target.error = null
     } catch (error) {
+      // Sites commonly reject HEAD or ranged GET probes with 403 even though
+      // their HTML or extractor endpoint is usable. Match the Save As flow by
+      // trying page-media preparation before leaving a copied page in error.
+      if (target.kind === 'file' && couldBeHtmlPageUrl(target.url)) {
+        try {
+          const media = await resolveMediaPage(target.url, { referer: target.url })
+          applyClipboardMedia(target, media)
+          target.status = 'ready'
+          target.error = null
+          target.updatedAt = Date.now()
+          publishClipboard(ctx)
+          return
+        } catch {}
+      }
       target.status = 'error'
       target.error = error instanceof Error ? error.message : String(error)
     }
@@ -195,6 +192,22 @@ export function prepareClipboardItem(ctx: AppContext, rawUrl: string, existingId
 
 function isHtmlPage(mimeType: string | null): boolean {
   return Boolean(mimeType && /^(text\/html|application\/xhtml\+xml)(?:;|$)/i.test(mimeType))
+}
+
+function applyClipboardMedia(
+  target: ClipboardItem,
+  media: NonNullable<ClipboardItem['media']>
+): void {
+  const first = media.variants[0]
+  target.kind = 'media'
+  target.media = media
+  target.youtube = undefined
+  target.probe = undefined
+  target.filename = media.title
+  target.size = first?.estimatedSize ?? null
+  target.mimeType = first?.container
+    ? `${first.youtube?.role === 'audio' ? 'audio' : 'video'}/${first.container}`
+    : first?.youtube?.role === 'audio' ? 'audio' : 'video'
 }
 
 /**

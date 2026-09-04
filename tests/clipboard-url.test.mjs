@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { looksDownloadable } from '../src/main/clipboard-url.ts'
+import { couldBeHtmlPageUrl } from '../src/main/media-url.ts'
 
 test('clipboard inbox accepts files, media pages, ordinary pages, torrents, and magnets', () => {
   assert.equal(looksDownloadable('https://example.test/archive.zip?download=1'), true)
@@ -25,4 +26,11 @@ test('clipboard inbox ignores prose and unsafe protocols', () => {
   )
   assert.equal(looksDownloadable('https://soundcloud.com/discover'), true)
   assert.equal(looksDownloadable('https://suno.com/'), true)
+})
+
+test('clipboard preparation distinguishes likely pages from explicit files', () => {
+  assert.equal(couldBeHtmlPageUrl('https://www.artstation.com/demark'), true)
+  assert.equal(couldBeHtmlPageUrl('https://example.test/download/archive.rar?token=abc'), false)
+  assert.equal(couldBeHtmlPageUrl('https://example.test/watch/123'), true)
+  assert.equal(couldBeHtmlPageUrl('magnet:?xt=urn:btih:abc'), false)
 })

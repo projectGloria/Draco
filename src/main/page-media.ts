@@ -1,5 +1,6 @@
 import type { MediaVariant, RequestHeaders, YouTubeResolution } from '../shared/types.ts'
 import { getDispatcher } from './engine/http.ts'
+import { DEFAULT_USER_AGENT } from './engine/probe.ts'
 
 const MAX_HTML_BYTES = 5 * 1024 * 1024
 const MAX_EMBEDDED_PAGES = 8
@@ -85,7 +86,7 @@ async function fetchHtmlPage(
   const response = await fetch(url, {
     headers: {
       accept: 'text/html,application/xhtml+xml',
-      'user-agent': headers?.userAgent || 'Draco/0.1',
+      'user-agent': headers?.userAgent || DEFAULT_USER_AGENT,
       ...(referer ? { referer } : {}),
       ...(headers?.cookie ? { cookie: headers.cookie } : {})
     },
@@ -365,7 +366,7 @@ async function requestAssetInfo(
   headers: RequestHeaders | undefined
 ): Promise<MediaVariant> {
   const requestHeaders = {
-    'user-agent': headers?.userAgent || 'Draco/0.1',
+    'user-agent': headers?.userAgent || DEFAULT_USER_AGENT,
     referer: headers?.referer || pageUrl,
     ...(headers?.cookie ? { cookie: headers.cookie } : {})
   }
