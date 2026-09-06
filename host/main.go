@@ -46,6 +46,10 @@ const (
 
 	// Size at which host.log is rolled over to host.log.1.
 	maxLogBytes = 2 * 1024 * 1024
+
+	// How long the app gets to answer one relayed message. Long enough for a
+	// cold yt-dlp extraction, short enough that a wedged app is not permanent.
+	replyBudget = 120 * time.Second
 )
 
 // hostConfig is written by the app next to the native-messaging manifest, so
@@ -187,7 +191,15 @@ func messageType(body []byte) string {
 
 func shouldLaunchForMessage(body []byte) bool {
 	switch messageType(body) {
-	case "download", "media", "youtube", "youtubePrime":
+	// Only a message that represents something the user actually clicked.
+	//
+	// "youtubePrime" is deliberately not in this list, though it once was: the
+	// extension fires it from tabs.onUpdated for every YouTube video that is
+	// opened, so treating it as a launch trigger meant merely browsing YouTube
+	// cold-started the download manager. Priming is an optimisation for an app
+	// that is already running; when it is not, the "youtube" message that a
+	// real button press sends starts it.
+	case "download", "downloadBatch", "media", "youtube":
 		return true
 	default:
 		return false
@@ -251,7 +263,14 @@ func (c *connection) read() ([]byte, error) {
 		return nil, err
 	}
 
+	// Bounded. A yt-dlp extraction can legitimately take tens of seconds, so the
+	// ceiling is generous - but an app that accepted a frame and never answered
+	// used to block this host forever, and Chrome's port with it.
+	_ = p.SetReadDeadline(time.Now().Add(replyBudget))
 	reply, err := readFrame(p)
+	// The connection is reused for later messages, so the deadline has to come
+	// off again or the next read inherits an instant expiry.
+	_ = p.SetReadDeadline(time.Time{})
 	if err != nil {
 		c.close()
 	}
@@ -364,11 +383,17 @@ func openLog() {
 	if err := os.MkdirAll(logDir, 0o755); err != nil {
 		return
 	}
-	logFile, _ = os.OpenFile(
-		filepath.Join(logDir, "host.log"),
-		os.O_APPEND|os.O_CREATE|os.O_WRONLY,
-		0o644,
-	)
+
+	// One rollover, the same discipline the app's own logger follows. This host
+	// is started once per native message - once per link on a bulk send - so an
+	// append-only file with nothing to bound it is append-forever.
+	path := filepath.Join(logDir, "host.log")
+	if info, err := os.Stat(path); err == nil && info.Size() > maxLogBytes {
+		_ = os.Remove(path + ".1")
+		_ = os.Rename(path, path+".1")
+	}
+
+	logFile, _ = os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
 }
 
 func closeLog() {

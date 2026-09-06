@@ -4,6 +4,7 @@ import type { Runner } from './runner.ts'
 import type { RunnerContext } from './manager.ts'
 import { DEFAULT_TORRENT_TRACKERS } from './create.ts'
 import { fetchCachedTorrentDescriptor } from './probe.ts'
+import { QuotaExceededError } from './limiter.ts'
 
 interface TorrentProgressFile {
   path: string
@@ -42,6 +43,7 @@ export class TorrentRunner implements Runner {
 
   public readonly task: DownloadTask
   private readonly context: RunnerContext
+  private lastReportedDownloaded = 0
 
   constructor(
     task: DownloadTask,
@@ -49,6 +51,7 @@ export class TorrentRunner implements Runner {
   ) {
     this.task = task
     this.context = context
+    this.lastReportedDownloaded = task.received || 0
   }
 
   async start(): Promise<void> {
@@ -62,7 +65,11 @@ export class TorrentRunner implements Runner {
     const wt = await (new Function("return import('webtorrent')")())
     const WebTorrentModule = wt.default || wt
     this.client = new (WebTorrentModule as any)()
-    
+    if (typeof this.client.throttleDownload === 'function') {
+      const limit = this.context.limiter.limit ?? -1
+      this.client.throttleDownload(limit)
+    }
+
     // Start with no pieces selected. WebTorrent otherwise selects the entire
     // payload before its metadata event, which can queue hundreds of megabytes
     // before Draco gets a chance to deselect unwanted files.
@@ -70,10 +77,14 @@ export class TorrentRunner implements Runner {
     if (this.task.url.startsWith('magnet:')) {
       try {
         const cached = await fetchCachedTorrentDescriptor(this.task.url, undefined)
-        if (!this.running) return
+        if (!this.running) {
+          this.cleanup()
+          return
+        }
         if (cached) torrentId = cached.torrentId
       } catch {}
     }
+
 
     this.torrent = this.client.add(
       torrentId,
@@ -156,7 +167,24 @@ export class TorrentRunner implements Runner {
   tick(): void {
     if (!this.running || !this.torrent) return
 
+    if (typeof this.client?.throttleDownload === 'function') {
+      const limit = this.context.limiter.limit ?? -1
+      this.client.throttleDownload(limit)
+    }
+
     const downloaded = this.selectedDownloaded()
+    const delta = downloaded - this.lastReportedDownloaded
+    if (delta > 0) {
+      this.lastReportedDownloaded = downloaded
+      void this.context.limiter.consume(delta).catch((err) => {
+        if (err instanceof QuotaExceededError) {
+          void this.pause()
+          this.task.detail = 'Transfer quota reached'
+          this.context.onUpdate(this.task)
+        }
+      })
+    }
+
     this.task.received = Math.min(downloaded, this.task.size ?? downloaded)
     if (this.selectedComplete()) {
       this.complete()

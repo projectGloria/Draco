@@ -1,8 +1,9 @@
 import { createHash } from 'node:crypto'
 import { posix, join } from 'node:path'
-import { mkdtemp, writeFile } from 'node:fs/promises'
+import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { getDispatcher } from '../engine/http.ts'
+import { mapConcurrent } from '../engine/concurrency.ts'
 
 export interface SiteGrabOptions {
   startUrl: string
@@ -24,7 +25,21 @@ export interface SiteResource {
 const PAGE_BYTES_LIMIT = 5 * 1024 * 1024
 
 /** Bounded breadth-first crawler for offline site-grabber projects. */
-export async function crawlSite(raw: SiteGrabOptions): Promise<{ resources: SiteResource[], paths: Map<string, string>, tmpDir: string }> {
+/**
+ * How many pages are fetched at once.
+ *
+ * The crawl used to be strictly sequential, so a thousand-page project meant a
+ * thousand round trips end to end - minutes of an unresponsive dialog spent
+ * almost entirely waiting on the network. Modest on purpose: this is somebody
+ * else's server, and the point is to stop wasting the latency rather than to
+ * hammer it.
+ */
+const PAGE_CONCURRENCY = 6
+
+export async function crawlSite(
+  raw: SiteGrabOptions,
+  signal?: AbortSignal
+): Promise<{ resources: SiteResource[], paths: Map<string, string>, tmpDir: string }> {
   const start = secureHttpUrl(raw.startUrl)
   const options = {
     maxDepth: clamp(raw.maxDepth, 0, 5),
@@ -33,57 +48,83 @@ export async function crawlSite(raw: SiteGrabOptions): Promise<{ resources: Site
     stayOnHost: raw.stayOnHost !== false,
     respectRobots: raw.respectRobots !== false
   }
-  const robots = options.respectRobots ? await loadRobots(start.origin) : []
-  const queue: Array<{ url: URL; depth: number }> = [{ url: start, depth: 0 }]
-  const visited = new Set<string>()
+  const robots = options.respectRobots ? await loadRobots(start.origin, signal) : []
   const resources = new Map<string, SiteResource>()
   const maxResources = Math.min(10_000, options.maxPages * 50)
   const tmpDir = await mkdtemp(join(tmpdir(), 'draco-crawler-'))
 
-  while (queue.length > 0 && visited.size < options.maxPages) {
-    const current = queue.shift()!
-    const canonical = withoutHash(current.url)
-    if (visited.has(canonical) || blockedByRobots(current.url, robots)) continue
-    if (options.stayOnHost && current.url.host !== start.host) continue
-    visited.add(canonical)
+  // Breadth-first, one depth at a time. Keeping the frontier as a level rather
+  // than a single queue is what makes the fetches inside it safe to run
+  // together: every page in a level has the same depth, so none of them can
+  // change whether another belongs in it.
+  const visited = new Set<string>()
+  let frontier: URL[] = blockedByRobots(start, robots) ? [] : [start]
+  visited.add(withoutHash(start))
 
-    const response = await fetch(canonical, {
-      headers: { accept: 'text/html,application/xhtml+xml', 'user-agent': 'DracoSiteGrabber/0.1' },
-      redirect: 'follow',
-      dispatcher: getDispatcher(30_000)
-    } as RequestInit).catch(() => null)
-    if (!response?.ok) continue
-    const final = new URL(response.url || canonical)
-    if (options.stayOnHost && final.host !== start.host) continue
-    const type = response.headers.get('content-type') ?? ''
-    if (!/text\/html|application\/xhtml\+xml/i.test(type)) {
-      resources.set(withoutHash(final), resourceFor(final, 'asset'))
-      continue
-    }
+  try {
+    for (let depth = 0; depth <= options.maxDepth && frontier.length > 0; depth++) {
+      if (signal?.aborted) throw new Error('The site crawl was cancelled')
 
-    const declared = Number(response.headers.get('content-length') ?? 0)
-    if (declared > PAGE_BYTES_LIMIT) continue
-    const html = await response.text()
-    if (html.length > PAGE_BYTES_LIMIT) continue
-    
-    const tmpFile = join(tmpDir, createHash('sha1').update(final.toString()).digest('hex') + '.html')
-    await writeFile(tmpFile, html, 'utf8')
-    resources.set(withoutHash(final), { ...resourceFor(final, 'page'), tmpFile })
+      const next = new Map<string, URL>()
 
-    const links = extractLinks(html, final)
-    for (const link of links) {
-      if (resources.size >= maxResources && link.kind === 'asset') continue
-      if (options.stayOnHost && link.url.host !== start.host) continue
-      if (link.kind === 'page' && current.depth < options.maxDepth) {
-        queue.push({ url: link.url, depth: current.depth + 1 })
-      } else if (link.kind === 'asset' && options.includeAssets) {
-        resources.set(withoutHash(link.url), resourceFor(link.url, 'asset'))
+      await mapConcurrent(frontier, PAGE_CONCURRENCY, async (url) => {
+        if (signal?.aborted) return
+        const canonical = withoutHash(url)
+
+        const response = await fetch(canonical, {
+          headers: { accept: 'text/html,application/xhtml+xml', 'user-agent': 'DracoSiteGrabber/0.1' },
+          redirect: 'follow',
+          signal,
+          dispatcher: getDispatcher(30_000)
+        } as RequestInit).catch(() => null)
+        if (!response?.ok) return
+        const final = new URL(response.url || canonical)
+        if (options.stayOnHost && final.host !== start.host) return
+        const type = response.headers.get('content-type') ?? ''
+        if (!/text\/html|application\/xhtml\+xml/i.test(type)) {
+          resources.set(withoutHash(final), resourceFor(final, 'asset'))
+          return
+        }
+
+        const declared = Number(response.headers.get('content-length') ?? 0)
+        if (declared > PAGE_BYTES_LIMIT) return
+        const html = await response.text()
+        if (html.length > PAGE_BYTES_LIMIT) return
+
+        const tmpFile = join(tmpDir, createHash('sha1').update(final.toString()).digest('hex') + '.html')
+        await writeFile(tmpFile, html, 'utf8')
+        resources.set(withoutHash(final), { ...resourceFor(final, 'page'), tmpFile })
+
+        for (const link of extractLinks(html, final)) {
+          if (options.stayOnHost && link.url.host !== start.host) continue
+          if (link.kind === 'page') {
+            if (depth >= options.maxDepth) continue
+            const key = withoutHash(link.url)
+            if (visited.has(key) || next.has(key)) continue
+            if (blockedByRobots(link.url, robots)) continue
+            next.set(key, link.url)
+          } else if (link.kind === 'asset' && options.includeAssets) {
+            if (resources.size >= maxResources) continue
+            resources.set(withoutHash(link.url), resourceFor(link.url, 'asset'))
+          }
+        }
+      })
+
+      // The page budget is spent across the whole crawl, not per level.
+      frontier = []
+      for (const [key, url] of next) {
+        if (visited.size >= options.maxPages) break
+        visited.add(key)
+        frontier.push(url)
       }
     }
-  }
 
-  const paths = new Map([...resources.values()].map((resource) => [resource.url, resource.relativePath]))
-  return { resources: [...resources.values()], paths, tmpDir }
+    const paths = new Map([...resources.values()].map((resource) => [resource.url, resource.relativePath]))
+    return { resources: [...resources.values()], paths, tmpDir }
+  } catch (err) {
+    await rm(tmpDir, { recursive: true, force: true }).catch(() => {})
+    throw err
+  }
 }
 
 export function extractLinks(html: string, base: URL): Array<{ url: URL; kind: 'page' | 'asset' }> {
@@ -155,32 +196,54 @@ function safePathname(pathname: string): string {
   return trailingSlash && safe !== '/' ? safe + '/' : safe
 }
 
-async function loadRobots(origin: string): Promise<string[]> {
+async function loadRobots(origin: string, signal?: AbortSignal): Promise<RobotsRule[]> {
   try {
     const response = await fetch(new URL('/robots.txt', origin), {
-      headers: { 'user-agent': 'DracoSiteGrabber/0.1' }, dispatcher: getDispatcher(10_000)
+      headers: { 'user-agent': 'DracoSiteGrabber/0.1' }, signal, dispatcher: getDispatcher(10_000)
     } as RequestInit)
     if (!response.ok) return []
     const text = (await response.text()).slice(0, 1_000_000)
     let applies = false
-    const disallow: string[] = []
+    const rules: RobotsRule[] = []
     for (const raw of text.split(/\r?\n/)) {
       const line = raw.replace(/#.*$/, '').trim()
       const separator = line.indexOf(':')
       if (separator < 0) continue
       const key = line.slice(0, separator).trim().toLowerCase()
       const value = line.slice(separator + 1).trim()
-      if (key === 'user-agent') applies = value === '*' || value.toLowerCase().includes('dracositegrabber')
-      else if (key === 'disallow' && applies && value.startsWith('/')) disallow.push(value)
+      if (key === 'user-agent') {
+        applies = value === '*' || value.toLowerCase().includes('dracositegrabber')
+      } else if (applies && (key === 'disallow' || key === 'allow') && value.startsWith('/')) {
+        // Allow was ignored entirely, so the common "Disallow: /" plus
+        // "Allow: /docs/" shape blocked the whole site - including the part the
+        // publisher had explicitly opened up.
+        rules.push({ path: value, allow: key === 'allow' })
+      }
     }
-    return disallow
+    return rules
   } catch {
     return []
   }
 }
 
-function blockedByRobots(url: URL, disallow: string[]): boolean {
-  return disallow.some((path) => path !== '/' ? url.pathname.startsWith(path) : true)
+export interface RobotsRule {
+  path: string
+  allow: boolean
+}
+
+/**
+ * The standard longest-match rule: the most specific matching path wins, and a
+ * tie goes to Allow.
+ */
+function blockedByRobots(url: URL, rules: RobotsRule[]): boolean {
+  let best: RobotsRule | null = null
+  for (const rule of rules) {
+    if (!url.pathname.startsWith(rule.path)) continue
+    if (!best || rule.path.length > best.path.length || (rule.path.length === best.path.length && rule.allow)) {
+      best = rule
+    }
+  }
+  return best ? !best.allow : false
 }
 
 function secureHttpUrl(raw: string): URL {

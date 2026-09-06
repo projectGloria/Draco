@@ -35,7 +35,15 @@ const SOURCES: Array<{ url: string; sha256Url?: string }> = [
     // on the strength of the transport alone.
     sha256Url: 'https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip.sha256'
   },
-  { url: 'https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip' }
+  {
+    url: 'https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip',
+    // Published beside the archive in the same release. Without it this
+    // fallback fetched 170 MB and ran it on the strength of TLS alone, while
+    // the primary source was checked - an inconsistency that only showed up
+    // when the primary was down, which is exactly the worst moment for it.
+    sha256Url:
+      'https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip.sha256'
+  }
 ]
 
 /** Where the release channel publishes the version number on its own. */

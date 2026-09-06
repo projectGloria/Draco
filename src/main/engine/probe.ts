@@ -149,6 +149,47 @@ export async function probeUrl(url: string, options: ProbeOptions = {}): Promise
       }
 
     if (!ranged.ok) {
+      // Some download endpoints forbid byte ranges as an anti-hotlink measure
+      // but still serve an ordinary GET. A probe must not turn that into a
+      // false "file is forbidden" result: accept the endpoint as a
+      // non-resumable download and let the single-stream worker fetch it.
+      if (ranged.status === 403 || ranged.status === 405 || ranged.status === 416) {
+        const plain = await fetch(url, {
+          method: 'GET',
+          headers,
+          redirect: 'follow',
+          signal: options.signal,
+          dispatcher
+        } as RequestInit)
+        try {
+          if (plain.ok) {
+            finalUrl = plain.url || finalUrl
+            const len = plain.headers.get('content-length')
+            if (len && /^\d+$/.test(len)) {
+              const parsed = Number(len)
+              if (Number.isSafeInteger(parsed)) size = parsed
+            }
+            etag = plain.headers.get('etag') ?? etag
+            lastModified = plain.headers.get('last-modified') ?? lastModified
+            mimeType = plain.headers.get('content-type') ?? mimeType
+            disposition = plain.headers.get('content-disposition') ?? disposition
+            const result = {
+              finalUrl,
+              filename: resolveFilename(disposition, finalUrl, url, mimeType),
+              size,
+              resumable: false,
+              etag,
+              lastModified,
+              mimeType,
+              statusCode: plain.status
+            }
+            setProbeCache(cacheKey, { result, expiresAt: Date.now() + 60_000 })
+            return result
+          }
+        } finally {
+          await plain.body?.cancel().catch(() => {})
+        }
+      }
       throw new HttpStatusError(ranged.status, ranged.statusText)
     }
 

@@ -1,6 +1,6 @@
 import { app } from 'electron'
 import { join } from 'node:path'
-import { mkdirSync } from 'node:fs'
+import { mkdirSync, readdirSync, renameSync, rmdirSync } from 'node:fs'
 
 /**
  * Every path the app writes to lives under userData (%APPDATA%/Draco) so that
@@ -32,7 +32,19 @@ export interface AppPaths {
   /** Where the generated native-messaging manifest is written. */
   hostManifest: string
   firefoxHostManifest: string
-  /** Global temp directory for incomplete downloads. */
+  /**
+   * Workspace for incomplete downloads.
+   *
+   * Under userData like everything else the app writes. It lived beside the
+   * installed resources for one release, which put multi-gigabyte partials
+   * inside the install directory: the uninstaller took them with it, a portable
+   * run lost them every launch, and an install under Program Files could not
+   * create the directory at all - which failed the one bootstrap step the
+   * splash cannot offer to continue past.
+   *
+   * Used only when it shares a volume with the destination; see
+   * `engine/workspace.ts` for why.
+   */
   tempDir: string
 }
 
@@ -53,7 +65,7 @@ export function getPaths(): AppPaths {
     root,
     bin,
     logs: join(root, 'logs'),
-    tempDir: join(resourceRoot, '.dracoTemp'),
+    tempDir: join(root, 'incomplete'),
     settingsFile: join(root, 'settings.json'),
     tasksFile: join(root, 'tasks.json'),
     categoriesFile: join(root, 'categories.json'),
@@ -83,5 +95,50 @@ export function ensureDirs(): AppPaths {
   for (const dir of [p.root, p.bin, p.logs, p.iconCache, p.tempDir]) {
     mkdirSync(dir, { recursive: true })
   }
+  migrateLegacyTempDir(p)
   return p
+}
+
+/**
+ * Moves partials left in the old workspace into the new one.
+ *
+ * One release kept incomplete downloads in `.dracoTemp` beside the installed
+ * resources. Those are multi-gigabyte files, and simply changing the path would
+ * strand them somewhere nothing looks - so they are carried across once, on the
+ * first launch after the move.
+ *
+ * Same volume in the overwhelming majority of cases, which makes this a rename
+ * rather than a copy. Entirely best-effort: a failure here must never stop the
+ * app starting, and the worst case is the old folder staying where it is.
+ */
+function migrateLegacyTempDir(paths: AppPaths): void {
+  const resourceRoot = app.isPackaged ? process.resourcesPath : app.getAppPath()
+  const legacy = join(resourceRoot, '.dracoTemp')
+  if (legacy === paths.tempDir) return
+
+  let entries: string[]
+  try {
+    entries = readdirSync(legacy)
+  } catch {
+    return
+  }
+
+  let moved = 0
+  for (const name of entries) {
+    try {
+      renameSync(join(legacy, name), join(paths.tempDir, name))
+      moved++
+    } catch {
+      // Already there, locked, or across a volume boundary. Leaving it behind
+      // costs the resume; failing the launch would cost far more.
+    }
+  }
+
+  if (moved > 0) {
+    try {
+      rmdirSync(legacy)
+    } catch {
+      // Not empty, because something above could not be moved. Fine.
+    }
+  }
 }

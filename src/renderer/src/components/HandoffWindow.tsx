@@ -70,7 +70,7 @@ export default function HandoffWindow({ id }: { id: string }): React.ReactElemen
       <header className="drag h-9 shrink-0 flex items-center gap-2.5 pl-3 pr-1 border-b border-line bg-white/[0.02]">
         <BrandMark className="w-4 h-4" />
         <span className="font-display text-[12.5px] font-bold tracking-[0.3px]">
-          {request?.kind === 'media' ? 'Download video' : 'Download file'}
+          {request?.kind === 'media' ? 'Download media' : 'Download file'}
         </span>
         <div className="flex-1" />
         <button
@@ -288,6 +288,9 @@ function MediaBody({
   }, [request])
 
   const variant = variants?.[chosen] ?? null
+  const audioOnly = Boolean(
+    variants && variants.length > 0 && variants.every((item) => item.codecs === 'audio' && !item.height)
+  )
   // The page ladder can carry a cipher-only entry (no usable URL yet) even
   // when it showed up instantly. Whether Start Download is actually instant
   // depends on whether the background yt-dlp priming finished in time - this
@@ -330,6 +333,7 @@ function MediaBody({
         categoryId: categoryId || undefined,
         queueId: queueId || undefined,
         audioUrl: variant.audioUrl ?? null,
+        audioTracks: variant.audioTracks,
         youtube: variant.youtube
       })
     } catch (err) {
@@ -347,7 +351,7 @@ function MediaBody({
           icon={<SiteIcon url={request.pageUrl ?? request.url} className="w-4 h-4" />}
         />
 
-        <Field label="Quality">
+        <Field label={audioOnly ? 'Format' : 'Quality'}>
           {error ? (
             <ErrorNote message={error} />
           ) : !variants ? (
@@ -368,12 +372,20 @@ function MediaBody({
                 <option key={entry.url + index} value={index}>
                   {entry.label}
                   {` · ${containerOf(entry, request).toUpperCase()}`}
-                  {entry.estimatedSize ? ` · ${formatBytes(entry.estimatedSize)}` : ''}
+                  {entry.estimatedSize ? ` · ≈ ${formatBytes(entry.estimatedSize)}` : ''}
                 </option>
               ))}
             </select>
           )}
         </Field>
+
+        {variant && variant.audioTracks && variant.audioTracks.length > 0 && (
+          <Field label="Audio tracks">
+            <div className="field text-[12px] text-faint">
+              {variant.audioTracks.map((track) => track.label || track.language || 'Audio').join(' · ')}
+            </div>
+          </Field>
+        )}
 
         {linkPending && <LinkStatusNote status={linkStatus} />}
 

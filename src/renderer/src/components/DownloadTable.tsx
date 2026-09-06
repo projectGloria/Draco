@@ -2,22 +2,30 @@ import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { ColumnId, DownloadTask, TaskStatus } from '@shared/types'
 import { formatBytes, formatEta, formatPercent, formatSpeed, formatWhen, percent } from '../lib/format'
 import { useApp } from '../store/app'
+import { useT, type TKey } from '../i18n'
 import { reportError, toast } from '../store/toasts'
 import ContextMenu, { type MenuItem, type MenuPosition } from './ContextMenu'
 import FileIcon, { SiteIcon } from './FileIcon'
 import { DownloadIcon, SortArrow, TorrentIcon } from './Icons'
 import ProgressBar from './ProgressBar'
 
-const HEADINGS: Record<ColumnId, string> = {
-  name: 'Name',
-  size: 'Size',
-  progress: 'Progress',
-  status: 'Status',
-  eta: 'Time left',
-  speed: 'Speed',
-  queue: 'Queue',
-  added: 'Added',
-  description: 'Description'
+/**
+ * Column headings and status names, by translation key rather than by literal.
+ *
+ * The main window is the surface a language setting is actually judged on, so
+ * these are the strings that have to move with it - the table is most of what
+ * is on screen most of the time.
+ */
+const HEADING_KEYS: Record<ColumnId, TKey> = {
+  name: 'colName',
+  size: 'colSize',
+  progress: 'colProgress',
+  status: 'colStatus',
+  eta: 'colEta',
+  speed: 'colSpeed',
+  queue: 'colQueue',
+  added: 'colAdded',
+  description: 'colDescription'
 }
 
 /** Numeric columns are right-aligned so their digits line up down the column. */
@@ -25,14 +33,14 @@ const RIGHT: ReadonlySet<ColumnId> = new Set<ColumnId>(['size', 'eta', 'speed'])
 const ROW_HEIGHT = 30
 const OVERSCAN_ROWS = 8
 
-const STATUS_LABEL: Record<TaskStatus, string> = {
-  queued: 'Queued',
-  probing: 'Connecting',
-  downloading: 'Downloading',
-  paused: 'Paused',
-  done: 'Complete',
-  error: 'Error',
-  missing: 'File missing'
+const STATUS_KEYS: Record<TaskStatus, TKey> = {
+  queued: 'statusQueued',
+  probing: 'statusProbing',
+  downloading: 'statusDownloading',
+  paused: 'statusPaused',
+  done: 'statusDone',
+  error: 'statusError',
+  missing: 'statusMissing'
 }
 
 const STATUS_COLOR: Record<TaskStatus, string> = {
@@ -54,6 +62,7 @@ export default function DownloadTable({
   onDetails(id: string): void
   onDelete(ids: string[]): void
 }): React.ReactElement {
+  const t = useT()
   const settings = useApp((s) => s.settings)
   const queues = useApp((s) => s.queues)
   const selection = useApp((s) => s.selection)
@@ -180,7 +189,7 @@ export default function DownloadTable({
     setMenu({
       at: { x: event.clientX, y: event.clientY },
       items: settings.columns.map((column) => ({
-        label: HEADINGS[column.id],
+        label: t(HEADING_KEYS[column.id]),
         checked: column.visible,
         // The name column is what identifies a row; hiding it would leave a
         // table of numbers with nothing to attach them to.
@@ -227,8 +236,8 @@ export default function DownloadTable({
     if (!currentSelection.includes(task.id)) setSelection([task.id])
 
     const running = ids.some((id) => {
-      const t = currentRows.find((r) => r.id === id)
-      return t?.status === 'downloading' || t?.status === 'queued'
+      const row = currentRows.find((r) => r.id === id)
+      return row?.status === 'downloading' || row?.status === 'queued'
     })
 
     const items: MenuItem[] = [
@@ -240,38 +249,38 @@ export default function DownloadTable({
           void call.catch((err) => reportError('Command failed', err))
         }
       },
-      { label: 'Redownload', onClick: () => void window.api.redownload(task.id).catch((err) => reportError('Redownload failed', err)) },
+      { label: t('redownload'), onClick: () => void window.api.redownload(task.id).catch((err) => reportError('Redownload failed', err)) },
       {},
       {
-        label: 'Open file',
+        label: t('open'),
         disabled: task.status !== 'done',
         onClick: () => void window.api.openFile(task.id).catch((err) => reportError('Could not open the file', err))
       },
       {
-        label: 'Open containing folder',
+        label: t('openFolder'),
         onClick: () => void window.api.revealFile(task.id).catch((err) => reportError('Could not open the folder', err))
       },
       {
-        label: 'Copy download URL',
+        label: t('copyUrl'),
         onClick: () => {
           void window.api.copyToClipboard(task.url)
           toast('info', 'URL copied')
         }
       },
-      { label: 'Properties…', onClick: () => onDetails(task.id) },
+      { label: 'Properties…', onClick: () => onDetailsRef.current(task.id) },
       {}
     ]
 
     for (const queue of currentQueues) {
       items.push({
-        label: 'Move to ' + queue.name,
+        label: t('moveToQueue') + ': ' + queue.name,
         checked: ids.every((id) => currentRows.find((r) => r.id === id)?.queueId === queue.id),
         onClick: () => void patchQueue(ids, queue.id)
       })
     }
     if (currentQueues.length > 0) {
       items.push({
-        label: 'Remove from queue',
+        label: t('noQueue'),
         disabled: ids.every((id) => !currentRows.find((r) => r.id === id)?.queueId),
         onClick: () => void patchQueue(ids, null)
       })
@@ -281,7 +290,7 @@ export default function DownloadTable({
     items.push({ label: 'Delete', danger: true, onClick: () => onDeleteRef.current(ids) })
 
     setMenu({ at: { x: event.clientX, y: event.clientY }, items })
-  }, [setSelection])
+  }, [setSelection, t])
 
   /* ---------------------------------------------------------------- */
 
@@ -324,9 +333,9 @@ export default function DownloadTable({
                     (RIGHT.has(column.id) ? ' justify-end' : '')
                   }
                   onClick={() => setSort(column.id)}
-                  title={'Sort by ' + HEADINGS[column.id]}
+                  title={t('sortBy', { column: t(HEADING_KEYS[column.id]) })}
                 >
-                  <span className="truncate">{HEADINGS[column.id]}</span>
+                  <span className="truncate">{t(HEADING_KEYS[column.id])}</span>
                   {sorted && (
                     <span style={{ color: 'var(--accent)' }}>
                       <SortArrow direction={settings.sortDirection} />
@@ -358,6 +367,7 @@ export default function DownloadTable({
                   groupLast={Boolean(task.groupId && rows[firstVisible + offset + 1]?.groupId !== task.groupId)}
                   selected={selectedIds.has(task.id)}
                   queueLabel={task.queueId ? queueLabels.get(task.queueId) ?? '' : ''}
+                  statusLabel={t(STATUS_KEYS[task.status])}
                   onSelect={selectTask}
                   onMouseEnter={hoverRow}
                   onOpen={openTask}
@@ -391,6 +401,7 @@ const Row = memo(function Row({
   groupLast,
   selected,
   queueLabel,
+  statusLabel,
   onSelect,
   onMouseEnter,
   onOpen,
@@ -404,6 +415,7 @@ const Row = memo(function Row({
   groupLast: boolean
   selected: boolean
   queueLabel: string
+  statusLabel: string
   onSelect(task: DownloadTask, event: React.MouseEvent): void
   onMouseEnter(task: DownloadTask, event: React.MouseEvent): void
   onOpen(task: DownloadTask): void
@@ -426,7 +438,14 @@ const Row = memo(function Row({
       onContextMenu={(event) => onMenu(event, task)}
     >
       {columns.map((id) => (
-        <Cell key={id} id={id} task={task} queueLabel={queueLabel} groupFirst={groupFirst} />
+        <Cell
+          key={id}
+          id={id}
+          task={task}
+          queueLabel={queueLabel}
+          statusLabel={statusLabel}
+          groupFirst={groupFirst}
+        />
       ))}
       <div />
     </div>
@@ -437,11 +456,13 @@ function Cell({
   id,
   task,
   queueLabel,
+  statusLabel,
   groupFirst
 }: {
   id: ColumnId
   task: DownloadTask
   queueLabel: string
+  statusLabel: string
   groupFirst: boolean
 }): React.ReactElement {
   const base =
@@ -496,7 +517,7 @@ function Cell({
       return (
         <div
           className={base + ' flex items-center gap-2'}
-          title={task.error ?? task.detail ?? STATUS_LABEL[task.status]}
+          title={task.error ?? task.detail ?? statusLabel}
         >
           <span
             className={
@@ -510,7 +531,7 @@ function Cell({
               ? task.error
               : /* The detail says what a long stage is actually doing - fetching
                    ffmpeg, muxing - which "Downloading" on its own does not. */
-                (task.detail ?? STATUS_LABEL[task.status])}
+                (task.detail ?? statusLabel)}
             {task.isCatMode ? ' 🎭' : ''}
           </span>
         </div>
@@ -562,6 +583,7 @@ function representativeTorrentFile(task: DownloadTask): string {
 }
 
 function EmptyState(): React.ReactElement {
+  const t = useT()
   return (
     <div className="py-20 grid place-items-center text-center fade-up">
       <div
@@ -570,11 +592,8 @@ function EmptyState(): React.ReactElement {
       >
         <DownloadIcon className="w-6 h-6" />
       </div>
-      <p className="text-[13px] font-semibold">Nothing here yet</p>
-      <p className="text-[12px] text-faint mt-1 max-w-[320px] leading-relaxed">
-        Add a URL, or start a download in your browser with the Draco extension installed and it
-        will land here.
-      </p>
+      <p className="text-[13px] font-semibold">{t('noDownloads')}</p>
+      <p className="text-[12px] text-faint mt-1 max-w-[320px] leading-relaxed">{t('noDownloadsHint')}</p>
     </div>
   )
 }

@@ -18,7 +18,8 @@ export interface SiteProjectDeps {
 
 export class SiteProjectManager {
   private projects: SiteGrabProject[] = []
-  private running = new Set<string>()
+  /** Running crawls, so they can be cancelled on quit or on removal. */
+  private running = new Map<string, AbortController>()
   private timer: NodeJS.Timeout | null = null
   private deps: SiteProjectDeps
 
@@ -38,6 +39,8 @@ export class SiteProjectManager {
   dispose(): void {
     if (this.timer) clearInterval(this.timer)
     this.timer = null
+    // A crawl in flight would otherwise keep fetching pages through shutdown.
+    for (const controller of this.running.values()) controller.abort()
   }
 
   list(): SiteGrabProject[] {
@@ -66,28 +69,32 @@ export class SiteProjectManager {
     const project = this.projects.find((candidate) => candidate.id === id)
     if (!project) throw new Error('That site project no longer exists')
     if (this.running.has(id)) throw new Error('That site project is already running')
-    this.running.add(id)
+    const controller = new AbortController()
+    this.running.set(id, controller)
 
     try {
-      const { resources, paths, tmpDir } = await crawlSite(project.options)
+      const { resources, paths, tmpDir } = await crawlSite(project.options, controller.signal)
       const known = new Set(project.knownUrls)
       const fresh = resources.filter((resource) => !known.has(resource.url))
       const ids: string[] = []
-      // Pages were already fetched for discovery. Write those bytes directly
-      // after the crawler rewrites known links to local relative paths; fetching
-      // them again as ordinary tasks would waste bandwidth and leave an online-
-      // only copy whose links still point back at the site.
-      for (const resource of resources.filter((candidate) => candidate.kind === 'page')) {
-        const target = join(project.rootDir, resource.relativePath)
-        await mkdir(dirname(target), { recursive: true })
-        if (resource.tmpFile) {
-          const html = await readFile(resource.tmpFile, 'utf8')
-          const rewritten = rewriteForOffline(html, new URL(resource.url), resource.relativePath, paths)
-          await writeFile(target, rewritten, 'utf8')
-          await rm(resource.tmpFile).catch(() => {})
+      try {
+        // Pages were already fetched for discovery. Write those bytes directly
+        // after the crawler rewrites known links to local relative paths; fetching
+        // them again as ordinary tasks would waste bandwidth and leave an online-
+        // only copy whose links still point back at the site.
+        for (const resource of resources.filter((candidate) => candidate.kind === 'page')) {
+          const target = join(project.rootDir, resource.relativePath)
+          await mkdir(dirname(target), { recursive: true })
+          if (resource.tmpFile) {
+            const html = await readFile(resource.tmpFile, 'utf8')
+            const rewritten = rewriteForOffline(html, new URL(resource.url), resource.relativePath, paths)
+            await writeFile(target, rewritten, 'utf8')
+            await rm(resource.tmpFile).catch(() => {})
+          }
         }
+      } finally {
+        await rm(tmpDir, { recursive: true, force: true }).catch(() => {})
       }
-      await rm(tmpDir, { recursive: true, force: true }).catch(() => {})
 
       for (const resource of fresh.filter((candidate) => candidate.kind === 'asset')) {
         const task = createTask({
@@ -117,7 +124,10 @@ export class SiteProjectManager {
   }
 
   async remove(id: string): Promise<void> {
-    if (this.running.has(id)) throw new Error('Wait for the site project to finish crawling')
+    // Cancel rather than refuse. A crawl can take minutes, and "wait for it to
+    // finish" is not an answer when finishing is exactly what the user no
+    // longer wants; the run cleans up after itself on the way out.
+    this.running.get(id)?.abort()
     this.projects = this.projects.filter((project) => project.id !== id)
     await this.persist()
   }

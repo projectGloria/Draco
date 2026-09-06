@@ -28,18 +28,24 @@ const PREFS_KEY = 'dracoPrefs'
 const APP_STATUS_TTL_MS = 4_000
 let prefs = { paused: false, excludedChannelIds: [], excludedVideoIds: [] }
 let appStatus = { running: false, version: null, checkedAt: 0 }
+/** Shares one native-host ping across concurrent tab and popup refreshes. */
+let probePromise = null
 
-const prefsReady = chrome.storage.local.get(PREFS_KEY).then((stored) => {
-  const saved = stored[PREFS_KEY] || {}
-  prefs = {
-    paused: saved.paused === true,
-    excludedChannelIds: Array.isArray(saved.excludedChannelIds)
-      ? [...new Set(saved.excludedChannelIds.filter((id) => typeof id === 'string'))].slice(0, 1000)
+function normalizePrefs(saved) {
+  const source = saved || {}
+  return {
+    paused: source.paused === true,
+    excludedChannelIds: Array.isArray(source.excludedChannelIds)
+      ? [...new Set(source.excludedChannelIds.filter((id) => typeof id === 'string'))].slice(0, 1000)
       : [],
-    excludedVideoIds: Array.isArray(saved.excludedVideoIds)
-      ? [...new Set(saved.excludedVideoIds.filter((id) => typeof id === 'string'))].slice(0, 5000)
+    excludedVideoIds: Array.isArray(source.excludedVideoIds)
+      ? [...new Set(source.excludedVideoIds.filter((id) => typeof id === 'string'))].slice(0, 5000)
       : []
   }
+}
+
+const prefsReady = chrome.storage.local.get(PREFS_KEY).then((stored) => {
+  prefs = normalizePrefs(stored[PREFS_KEY])
 })
 
 async function savePrefs(next) {
@@ -120,6 +126,29 @@ async function stateForTab(tab, forceProbe = false) {
   }
 }
 
+/**
+ * Pending indicator refreshes, keyed by tab.
+ *
+ * `tabs.onUpdated` fires several times for one navigation, and each refresh
+ * reaches `pageIdentity`, which injects a script into the page. Coalescing the
+ * burst into one update per tab makes that once per navigation instead.
+ */
+const indicatorTimers = new Map()
+const INDICATOR_DEBOUNCE_MS = 250
+
+function scheduleTabIndicator(tab) {
+  if (typeof tab?.id !== 'number') return
+  const tabId = tab.id
+  clearTimeout(indicatorTimers.get(tabId))
+  indicatorTimers.set(
+    tabId,
+    setTimeout(() => {
+      indicatorTimers.delete(tabId)
+      void setTabIndicator(tab)
+    }, INDICATOR_DEBOUNCE_MS)
+  )
+}
+
 async function setTabIndicator(tab) {
   if (typeof tab?.id !== 'number') return
   const state = await stateForTab(tab)
@@ -150,12 +179,9 @@ async function refreshAllTabs() {
 
 chrome.storage.onChanged.addListener((changes, area) => {
   if (area !== 'local' || !changes[PREFS_KEY]?.newValue) return
-  const saved = changes[PREFS_KEY].newValue
-  prefs = {
-    paused: saved.paused === true,
-    excludedChannelIds: Array.isArray(saved.excludedChannelIds) ? saved.excludedChannelIds : [],
-    excludedVideoIds: Array.isArray(saved.excludedVideoIds) ? saved.excludedVideoIds : []
-  }
+  // Bounded and deduped the same way the initial load is. Taking the stored
+  // arrays verbatim let the in-memory copy exceed the limits that load enforces.
+  prefs = normalizePrefs(changes[PREFS_KEY].newValue)
   void refreshAllTabs()
 })
 
@@ -604,11 +630,19 @@ async function sendYouTube(tab) {
   )
 }
 
+/** Cap matching the app's own MAX_BATCH_ITEMS, so a frame is never rejected whole. */
+const MAX_BATCH_ITEMS = 500
+
 async function sendUrls(urls, referer) {
   const unique = [...new Set(urls.filter((u) => /^https?:/i.test(u)))]
-  let taken = 0
+  if (unique.length === 0) {
+    notify('No downloadable links were found on this page')
+    return
+  }
 
-  for (const url of unique) {
+  // One link asks where to save it, the way IDM does.
+  if (unique.length === 1) {
+    const url = unique[0]
     const cookie = await cookieHeaderFor(url)
     const reply = await callHost({
       type: 'download',
@@ -616,15 +650,43 @@ async function sendUrls(urls, referer) {
       referer,
       cookie: cookie || undefined,
       userAgent: navigator.userAgent,
-      // One link asks where to save it, the way IDM does. Forty links must not
-      // ask forty times, so a bulk send says so and Draco just queues them.
-      bulk: unique.length > 1
+      bulk: false
     })
-    if (reply.ok && reply.taken) taken++
+    notify(reply.ok && reply.taken ? 'Sent the download to Draco' : 'Draco did not accept the link')
+    return
   }
 
+  /*
+   * Everything else goes in one frame.
+   *
+   * `sendNativeMessage` starts a fresh draco-host.exe for every call, so the
+   * per-link loop this replaced meant one process launch, one pipe connection
+   * and one log append per link - two hundred of each on a page of two hundred
+   * links, strictly in sequence. The cookies still have to be gathered per URL
+   * because they are per-origin, but that is all in-process.
+   */
+  const capped = unique.slice(0, MAX_BATCH_ITEMS)
+  const items = await Promise.all(
+    capped.map(async (url) => {
+      const cookie = await cookieHeaderFor(url)
+      return { url, ...(cookie ? { cookie } : {}) }
+    })
+  )
+
+  const reply = await callHost({
+    type: 'downloadBatch',
+    referer,
+    userAgent: navigator.userAgent,
+    items
+  })
+
+  const queued = reply.ok && typeof reply.queued === 'number' ? reply.queued : 0
+  const dropped = unique.length - capped.length
   notify(
-    taken > 0 ? `Sent ${taken} download${taken === 1 ? '' : 's'} to Draco` : 'Draco did not accept the links'
+    queued > 0
+      ? `Sent ${queued} download${queued === 1 ? '' : 's'} to Draco` +
+          (dropped > 0 ? ` (${dropped} beyond the ${MAX_BATCH_ITEMS} link limit were skipped)` : '')
+      : `Draco did not accept the links${reply.error ? `: ${reply.error}` : ''}`
   )
 }
 
@@ -683,6 +745,9 @@ const MEDIA_PATTERNS = [
   { re: /\.(mp4|webm|mkv|mov|flac|mp3|m4a|ogg)(\?|$)/i, kind: 'file' }
 ]
 
+const HLS_CONTENT_TYPE = /^(?:application|audio)\/(?:vnd\.apple\.|x-)?mpegurl$/i
+const DASH_CONTENT_TYPE = /^application\/dash\+xml$/i
+
 function classify(url) {
   for (const { re, kind } of MEDIA_PATTERNS) {
     if (re.test(url)) return kind
@@ -694,15 +759,56 @@ function classify(url) {
 const ADAPTIVE_HOSTS = /(^|\.)(googlevideo\.com|ytimg\.com|ttvnw\.net|nflxvideo\.net)$/i
 
 const tabLocks = new Map()
+const requestContexts = new Map()
 
-async function remember(tabId, mediaUrl, kind) {
+function requestContext(details) {
+  const referer = [details.documentUrl, details.originUrl, details.initiator]
+    .find((value) => typeof value === 'string' && /^https?:/i.test(value))
+  const origin = typeof details.initiator === 'string' && /^https?:/i.test(details.initiator)
+    ? details.initiator
+    : undefined
+  return { referer, origin }
+}
+
+const BLOCKED_CAPTURED_HEADERS = new Set([
+  'accept-encoding', 'connection', 'content-length', 'host', 'proxy-authorization',
+  'proxy-connection', 'range', 'transfer-encoding', 'upgrade'
+])
+
+/**
+ * Preserve the request fingerprint that actually succeeded in the browser.
+ * Range and connection-management headers stay under Draco's control.
+ */
+function capturedHeaders(headers = []) {
+  const result = {}
+  for (const header of headers) {
+    const name = String(header.name || '').trim().toLowerCase()
+    const value = typeof header.value === 'string' ? header.value : ''
+    if (!name || !value || BLOCKED_CAPTURED_HEADERS.has(name)) continue
+    if (!/^[a-z0-9!#$%&'*+.^_`|~-]+$/.test(name)) continue
+    if (Object.keys(result).length >= 40) break
+    result[name] = value.slice(0, 16_384)
+  }
+  return result
+}
+
+async function remember(tabId, mediaUrl, kind, context = {}) {
   let p = tabLocks.get(tabId) || Promise.resolve()
   p = p.then(async () => {
     const list = await getMedia(tabId)
     // A player re-requests the same playlist constantly; one entry is enough.
-    if (list.some((m) => m.mediaUrl === mediaUrl)) return
+    const existing = list.find((m) => m.mediaUrl === mediaUrl)
+    if (existing) {
+      existing.kind = kind
+      existing.referer = context.referer || existing.referer
+      existing.origin = context.origin || existing.origin
+      existing.requestHeaders = { ...existing.requestHeaders, ...context.requestHeaders }
+      existing.at = Date.now()
+      await setMedia(tabId, list)
+      return
+    }
 
-    list.push({ mediaUrl, kind, at: Date.now() })
+    list.push({ mediaUrl, kind, ...context, at: Date.now() })
     // Keep the list bounded: a long live stream would otherwise grow forever.
     const bounded = list.slice(-40)
     await setMedia(tabId, bounded)
@@ -716,7 +822,7 @@ async function remember(tabId, mediaUrl, kind) {
  * Ranks what was seen on a page. A playlist beats a loose media file: it is the
  * whole programme rather than one of its parts, and Draco can reassemble it.
  */
-const KIND_RANK = { hls: 0, file: 1, dash: 2 }
+const KIND_RANK = { hls: 0, dash: 0, file: 1 }
 
 function pickBest(list) {
   return [...list].sort(
@@ -729,9 +835,26 @@ chrome.webRequest.onBeforeRequest.addListener(
     if (details.tabId < 0) return
     const kind = classify(details.url)
     if (!kind) return
-    remember(details.tabId, details.url, kind)
+    remember(details.tabId, details.url, kind, requestContext(details))
   },
   { urls: ['<all_urls>'] }
+)
+
+chrome.webRequest.onBeforeSendHeaders.addListener(
+  (details) => {
+    if (details.tabId < 0) return
+    const context = {
+      ...requestContext(details),
+      requestHeaders: capturedHeaders(details.requestHeaders)
+    }
+    requestContexts.set(details.requestId, context)
+    if (requestContexts.size > 500) requestContexts.delete(requestContexts.keys().next().value)
+    const kind = classify(details.url)
+    if (!kind) return
+    remember(details.tabId, details.url, kind, context)
+  },
+  { urls: ['<all_urls>'] },
+  ['requestHeaders', 'extraHeaders']
 )
 
 /**
@@ -742,10 +865,18 @@ chrome.webRequest.onBeforeRequest.addListener(
 chrome.webRequest.onHeadersReceived.addListener(
   (details) => {
     if (details.tabId < 0) return
-    if (classify(details.url)) return // already counted by the URL pattern
-
     const headers = details.responseHeaders ?? []
-    const type = headers.find((h) => h.name.toLowerCase() === 'content-type')?.value ?? ''
+    const type = (headers.find((h) => h.name.toLowerCase() === 'content-type')?.value ?? '')
+      .split(';', 1)[0]
+      .trim()
+    const adaptiveKind = HLS_CONTENT_TYPE.test(type) ? 'hls' : DASH_CONTENT_TYPE.test(type) ? 'dash' : null
+    const urlKind = classify(details.url)
+    const context = { ...requestContext(details), ...requestContexts.get(details.requestId) }
+    requestContexts.delete(details.requestId)
+    if (adaptiveKind || urlKind === 'hls' || urlKind === 'dash') {
+      remember(details.tabId, details.url, adaptiveKind || urlKind, context)
+      return
+    }
     if (!/^(video|audio)\//i.test(type)) return
 
     // Adaptive players fetch thousands of tiny media chunks that are useless on
@@ -757,22 +888,28 @@ chrome.webRequest.onHeadersReceived.addListener(
     )
     if (length > 0 && length < 512 * 1024) return
 
-    remember(details.tabId, details.url, 'file')
+    remember(details.tabId, details.url, 'file', context)
   },
   { urls: ['<all_urls>'] },
   ['responseHeaders']
 )
 
-chrome.tabs.onRemoved.addListener((tabId) => chrome.storage.session.remove(`media_${tabId}`))
+chrome.tabs.onRemoved.addListener((tabId) => {
+  clearTimeout(indicatorTimers.get(tabId))
+  indicatorTimers.delete(tabId)
+  // The per-tab serialisation chain outlived the tab it was serialising for.
+  tabLocks.delete(tabId)
+  void chrome.storage.session.remove(`media_${tabId}`)
+})
 chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
-  if (changeInfo.status === 'loading' && changeInfo.url) {
+  if (changeInfo.status === 'loading') {
     chrome.storage.session.remove(`media_${tabId}`)
     chrome.action.setBadgeText({ tabId, text: '' })
   }
 
   const url = changeInfo.url || tab.url
   if (url && youtubeVideoId(url)) void primeYouTubeUrl(url)
-  void setTabIndicator(tab)
+  scheduleTabIndicator(tab)
 })
 
 chrome.tabs.onActivated.addListener(({ tabId }) => {
@@ -890,8 +1027,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         // The page's own <video src> is the most reliable thing there is when
         // it is a plain URL: no guessing about which of forty sniffed requests
         // was the one being watched.
+        const capturedDirect = list.find((item) => item.mediaUrl === message.videoSrc)
         const direct = /^https?:/i.test(message.videoSrc ?? '')
-          ? { mediaUrl: message.videoSrc, kind: classify(message.videoSrc) ?? 'file' }
+          ? {
+              ...capturedDirect,
+              mediaUrl: message.videoSrc,
+              kind: classify(message.videoSrc) ?? capturedDirect?.kind ?? 'file'
+            }
           : null
 
         let best = direct
@@ -910,16 +1052,35 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         }
 
         const cookie = await cookieHeaderFor(best.mediaUrl)
+        const relatedMediaUrls = list
+          .filter((item) => item.kind === 'hls' && item.mediaUrl !== best.mediaUrl)
+          .map((item) => item.mediaUrl)
+          .slice(0, 20)
         const reply = await callHost({
           type: 'media',
           pageUrl: tab?.url ?? '',
           pageTitle: tab?.title ?? '',
           mediaUrl: best.mediaUrl,
+          relatedMediaUrls,
           subtitles: message.subtitles,
           kind: best.kind,
-          referer: tab?.url,
-          cookie: cookie || undefined,
-          userAgent: navigator.userAgent
+          // DOM dimensions describe this URL only when the element exposed a
+          // direct HTTP source. A blob-backed player and a sniffed playlist
+          // cannot safely be correlated on pages containing several players.
+          width: direct ? Number(message.videoWidth) || null : null,
+          height: direct ? Number(message.videoHeight) || null : null,
+          // Once Chrome exposed the real outgoing headers, absence matters too:
+          // adding an inferred Referer that the browser did not send can make a
+          // signed CDN request fail with 403.
+          referer: best.requestHeaders
+            ? best.requestHeaders.referer
+            : best.referer || tab?.url,
+          origin: best.requestHeaders
+            ? best.requestHeaders.origin
+            : best.origin,
+          cookie: best.requestHeaders?.cookie || cookie || undefined,
+          userAgent: best.requestHeaders?.['user-agent'] || navigator.userAgent,
+          extraHeaders: best.requestHeaders
         })
 
         sendResponse(reply.ok ? { ok: true } : { ok: false, error: reply.error })
@@ -933,17 +1094,46 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           return
         }
         const cookie = await cookieHeaderFor(message.mediaUrl)
+        const captured = (await getMedia(tab?.id)).find((item) => item.mediaUrl === message.mediaUrl)
+        const relatedMediaUrls = (await getMedia(tab?.id))
+          .filter((item) => item.kind === 'hls' && item.mediaUrl !== message.mediaUrl)
+          .map((item) => item.mediaUrl)
+          .slice(0, 20)
         const reply = await callHost({
           type: 'media',
           pageUrl: tab?.url ?? '',
           pageTitle: tab?.title ?? '',
           mediaUrl: message.mediaUrl,
+          relatedMediaUrls,
           kind: message.kind ?? 'file',
-          referer: tab?.url,
-          cookie: cookie || undefined,
-          userAgent: navigator.userAgent
+          referer: captured?.requestHeaders
+            ? captured.requestHeaders.referer
+            : captured?.referer || tab?.url,
+          origin: captured?.requestHeaders
+            ? captured.requestHeaders.origin
+            : captured?.origin,
+          cookie: captured?.requestHeaders?.cookie || cookie || undefined,
+          userAgent: captured?.requestHeaders?.['user-agent'] || navigator.userAgent,
+          extraHeaders: captured?.requestHeaders
         })
         sendResponse(reply)
+        return
+      }
+
+      case 'draco:dom-media': {
+        const tabId = sender.tab?.id
+        if (typeof tabId !== 'number' || !Array.isArray(message.items)) {
+          sendResponse({ ok: false })
+          return
+        }
+        for (const item of message.items.slice(0, 50)) {
+          if (!item || typeof item.url !== 'string' || !/^https?:/i.test(item.url)) continue
+          await remember(tabId, item.url, classify(item.url) ?? 'file', {
+            referer: sender.url || sender.tab?.url,
+            origin: sender.origin
+          })
+        }
+        sendResponse({ ok: true })
         return
       }
 

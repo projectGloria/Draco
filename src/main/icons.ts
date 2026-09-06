@@ -1,8 +1,10 @@
 import { app } from 'electron'
 import { createHash } from 'node:crypto'
-import { mkdir, open, readFile, writeFile } from 'node:fs/promises'
+import { mkdir, open, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { getPaths } from './bootstrap/paths.ts'
+import { getDispatcher } from './engine/http.ts'
+import { DEFAULT_USER_AGENT } from './engine/probe.ts'
 import { logger } from './log.ts'
 
 const log = logger('icons')
@@ -141,18 +143,53 @@ async function readCachedFavicon(origin: string): Promise<string | null> {
   }
 }
 
+/**
+ * How many site icons are kept on disk.
+ *
+ * One small file per origin, written forever, was the only cache in the app
+ * with nothing bounding it - a few years of browsing is a directory with tens
+ * of thousands of entries in it. Trimmed oldest-first, and losing one only
+ * costs a single request the next time that site appears.
+ */
+const FAVICON_CACHE_MAX = 500
+
 async function writeCachedFavicon(origin: string, dataUrl: string): Promise<void> {
-  const path = faviconCachePath(origin)
-  await mkdir(join(getPaths().iconCache, 'sites'), { recursive: true })
-  await writeFile(path, JSON.stringify({ origin, dataUrl }), 'utf8')
+  const dir = join(getPaths().iconCache, 'sites')
+  await mkdir(dir, { recursive: true })
+  await writeFile(faviconCachePath(origin), JSON.stringify({ origin, dataUrl }), 'utf8')
+  await trimFaviconCache(dir)
+}
+
+async function trimFaviconCache(dir: string): Promise<void> {
+  try {
+    const names = (await readdir(dir)).filter((name) => name.endsWith('.json'))
+    if (names.length <= FAVICON_CACHE_MAX) return
+
+    const dated = await Promise.all(
+      names.map(async (name) => ({
+        name,
+        at: (await stat(join(dir, name)).catch(() => null))?.mtimeMs ?? 0
+      }))
+    )
+    dated.sort((a, b) => a.at - b.at)
+    for (const entry of dated.slice(0, dated.length - FAVICON_CACHE_MAX)) {
+      await rm(join(dir, entry.name), { force: true }).catch(() => {})
+    }
+  } catch {
+    // A cache that could not be trimmed is not a reason to fail an icon lookup.
+  }
 }
 
 async function fetchFavicon(origin: string): Promise<string | null> {
   const response = await fetch(`${origin}/favicon.ico`, {
     redirect: 'follow',
     signal: AbortSignal.timeout(FAVICON_TIMEOUT_MS),
-    headers: { accept: 'image/*' }
-  })
+    headers: { accept: 'image/*', 'user-agent': DEFAULT_USER_AGENT },
+    // Through the app's own pool, so a configured proxy applies here too. This
+    // was the one outbound request in the app that ignored it - and it names
+    // the site the user is downloading from.
+    dispatcher: getDispatcher(FAVICON_TIMEOUT_MS)
+  } as RequestInit)
   if (!response.ok) return null
 
   const type = (response.headers.get('content-type') ?? '').split(';')[0].trim().toLowerCase()

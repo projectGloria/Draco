@@ -14,16 +14,17 @@ import { basename, join } from 'node:path'
 import type { DownloadTask, Segment } from '@shared/types'
 import { getDispatcher } from '../engine/http.ts'
 import { QuotaExceededError, type RateLimiter } from '../engine/limiter.ts'
-import { moveFile, uniquePath } from '../engine/naming.ts'
+import { discardReservedPath, moveFile, uniquePath } from '../engine/naming.ts'
 import { mapConcurrent } from '../engine/concurrency.ts'
 import { buildHeaders } from '../engine/probe.ts'
 import type { Runner } from '../engine/runner.ts'
+import { workspaceDir } from '../engine/workspace.ts'
 import { quotaDetail } from '../engine/task.ts'
 import { AbortedError } from '../engine/worker.ts'
 import { logger } from '../log.ts'
 import { ensureFfmpeg } from './ffmpeg.ts'
 import { mux } from './mux.ts'
-import { loadMediaPlaylist, type HlsSegment } from './playlist.ts'
+import { loadMediaPlaylist, resolveVariants, type HlsSegment } from './playlist.ts'
 import { streamResponseBody } from './stream.ts'
 
 const log = logger('hls')
@@ -62,27 +63,39 @@ export interface HlsRunnerDeps {
 }
 
 const SPEED_WINDOW_MS = 3000
-/** Enough finished pieces for an average size to mean anything. */
-const ESTIMATE_AFTER = 3
+/** Enough finished pieces from each track for its average to mean anything. */
+const ESTIMATE_AFTER_PER_TRACK = 3
 const FILE_SCAN_CONCURRENCY = 8
 
 interface ActiveFetch {
   bytes: number
 }
 
+interface TrackProgress {
+  bytes: number
+  completed: number
+}
+
+interface ResolvedTrack {
+  id: string
+  role: 'video' | 'audio'
+  label: string | null
+  language: string | null
+  isDefault: boolean
+  segments: HlsSegment[]
+  initSegment: { url: string; byteRange: { offset: number; length: number } | null } | null
+  mediaSequence: number
+}
+
 export class HlsRunner implements Runner {
   private controller = new AbortController()
-  private tracks: Array<{
-    type: 'video' | 'audio'
-    segments: HlsSegment[]
-    initSegment: { url: string; byteRange: { offset: number; length: number } | null } | null
-    mediaSequence: number
-  }> = []
+  private tracks: ResolvedTrack[] = []
 
   private received = 0
   private completed = 0
   private samples: Array<{ t: number; received: number }> = []
   private active = new Map<number, ActiveFetch>()
+  private trackProgress = new Map<string, TrackProgress>()
   private keys = new Map<string, Buffer>()
   private inFlight: Promise<void> | null = null
   private restarted = false
@@ -100,7 +113,7 @@ export class HlsRunner implements Runner {
   }
 
   private get tempDir(): string {
-    return this.config.tempDir || this.task.dir
+    return workspaceDir(this.task.dir, this.config.tempDir)
   }
 
   private get partsDir(): string {
@@ -111,8 +124,8 @@ export class HlsRunner implements Runner {
     return join(this.tempDir, this.task.filename + '.dracodl')
   }
 
-  private get joinedAudioPath(): string {
-    return join(this.tempDir, this.task.filename + '.dracodl.audio')
+  private joinedAudioPath(index: number): string {
+    return join(this.tempDir, this.task.filename + `.dracodl.audio${index === 0 ? '' : `.${index}`}`)
   }
 
   private get manifestPath(): string {
@@ -128,6 +141,7 @@ export class HlsRunner implements Runner {
     this.received = 0
     this.completed = 0
     this.active.clear()
+    this.trackProgress.clear()
     this.keys.clear()
 
     try {
@@ -183,7 +197,13 @@ export class HlsRunner implements Runner {
     if (!this.running) return
 
     const now = Date.now()
-    this.samples.push({ t: now, received: this.received })
+    // `received` contains atomically completed pieces. Large HLS pieces can
+    // take several seconds, so using only that number makes an active transfer
+    // look stopped until a whole piece lands. Include the bytes currently
+    // streaming on every connection for smooth, truthful speed reporting.
+    const activeBytes = [...this.active.values()].reduce((sum, fetchState) => sum + fetchState.bytes, 0)
+    const liveReceived = this.received + activeBytes
+    this.samples.push({ t: now, received: liveReceived })
     while (this.samples.length > 2 && now - this.samples[0].t > SPEED_WINDOW_MS) {
       this.samples.shift()
     }
@@ -191,21 +211,30 @@ export class HlsRunner implements Runner {
     const oldest = this.samples[0]
     const elapsed = (now - oldest.t) / 1000
     if (elapsed >= 0.25) {
-      this.task.speed = Math.max(0, (this.received - oldest.received) / elapsed)
+      this.task.speed = Math.max(0, (liveReceived - oldest.received) / elapsed)
     }
 
-    this.task.received = this.received
+    this.task.received = liveReceived
 
-    const totalSegments = this.tracks.reduce((acc, t) => acc + t.segments.length, 0)
-    if (this.completed >= ESTIMATE_AFTER && totalSegments > 0) {
-      this.task.size = Math.round((this.received / this.completed) * totalSegments)
+    // Video and alternate-audio pieces can differ in size by orders of
+    // magnitude, and the work queue processes tracks in order. Extrapolating
+    // the first video pieces across every audio piece made an 11 GB download
+    // jump to 36 GB. Refine only after every track has its own sample.
+    const trackEstimates = this.tracks.map((track) => {
+      const progress = this.trackProgress.get(track.id)
+      const required = Math.min(ESTIMATE_AFTER_PER_TRACK, track.segments.length)
+      if (!progress || progress.completed < required || progress.completed === 0) return null
+      return (progress.bytes / progress.completed) * track.segments.length
+    })
+    if (trackEstimates.length > 0 && trackEstimates.every((size): size is number => size !== null)) {
+      this.task.size = Math.max(this.received, Math.round(trackEstimates.reduce((sum, size) => sum + size, 0)))
     }
 
     this.task.segments = this.snapshot()
 
     this.task.eta =
       this.task.size !== null && this.task.speed > 1
-        ? Math.max(0, Math.round((this.task.size - this.received) / this.task.speed))
+        ? Math.max(0, Math.round((this.task.size - liveReceived) / this.task.speed))
         : null
   }
 
@@ -231,7 +260,21 @@ export class HlsRunner implements Runner {
     this.task.detail = null
     this.deps.onUpdate(this.task)
 
-    const playlist = await loadMediaPlaylist(this.task.url, this.task.headers)
+    let videoUrl = this.task.url
+    if ((!this.task.audioTracks || this.task.audioTracks.length === 0) && !this.task.audioUrl) {
+      const variants = await resolveVariants(this.task.url, this.task.headers)
+      const selected = variants[0]
+      if (selected) {
+        videoUrl = selected.url
+        this.task.audioUrl = selected.audioUrl ?? null
+        this.task.audioTracks = selected.audioTracks?.map((track) => ({ ...track })) ?? []
+        if (this.task.audioTracks.length > 1 && !this.task.filenameLocked) {
+          this.task.filename = this.task.filename.replace(/\.[a-z0-9]+$/i, '.mkv')
+        }
+      }
+    }
+
+    const playlist = await loadMediaPlaylist(videoUrl, this.task.headers)
     this.throwIfAborted()
 
     if (playlist.isLive) {
@@ -242,30 +285,44 @@ export class HlsRunner implements Runner {
     }
 
     this.tracks.push({
-      type: 'video',
+      id: 'video',
+      role: 'video',
+      label: null,
+      language: null,
+      isDefault: false,
       segments: playlist.segments,
       initSegment: playlist.initSegment,
       mediaSequence: playlist.mediaSequence
     })
 
-    if (this.task.audioUrl) {
-      try {
-        const audioPlaylist = await loadMediaPlaylist(this.task.audioUrl, this.task.headers)
-        this.throwIfAborted()
-        if (!audioPlaylist.isLive && audioPlaylist.segments.length > 0) {
-          this.tracks.push({
-            type: 'audio',
-            segments: audioPlaylist.segments,
-            initSegment: audioPlaylist.initSegment,
-            mediaSequence: audioPlaylist.mediaSequence
-          })
-        }
-      } catch (err) {
-        log.warn(`Failed to fetch audio playlist: ${err}`)
-      }
+    const declaredAudio = this.task.audioTracks && this.task.audioTracks.length > 0
+      ? this.task.audioTracks
+      : this.task.audioUrl
+        ? [{ url: this.task.audioUrl, label: 'Audio', language: null, isDefault: true }]
+        : []
+    const uniqueAudio = declaredAudio.filter((track, index, tracks) =>
+      tracks.findIndex((candidate) => candidate.url === track.url) === index
+    )
+
+    for (let index = 0; index < uniqueAudio.length; index++) {
+      const declared = uniqueAudio[index]
+      const audioPlaylist = await loadMediaPlaylist(declared.url, this.task.headers)
+      this.throwIfAborted()
+      if (audioPlaylist.isLive) throw new Error(`Audio track “${declared.label}” is a live stream`)
+      if (audioPlaylist.segments.length === 0) throw new Error(`Audio track “${declared.label}” contained no media segments`)
+      this.tracks.push({
+        id: `audio_${String(index).padStart(3, '0')}`,
+        role: 'audio',
+        label: declared.label,
+        language: declared.language,
+        isDefault: declared.isDefault,
+        segments: audioPlaylist.segments,
+        initSegment: audioPlaylist.initSegment,
+        mediaSequence: audioPlaylist.mediaSequence
+      })
     }
 
-    this.task.finalUrl = this.task.url
+    this.task.finalUrl = videoUrl
     this.task.resumable = true
     this.task.mimeType = this.task.mimeType ?? 'video/mp4'
 
@@ -277,11 +334,38 @@ export class HlsRunner implements Runner {
     // compact fingerprint of the resolved playlist inputs and discard stale
     // pieces before resuming.
     const playlistIdentity = buildPlaylistIdentity(this.tracks)
-    const previousIdentity = await readPlaylistIdentity(this.manifestPath)
-    if (previousIdentity !== playlistIdentity) {
-      await clearPlaylistParts(this.partsDir)
+    const storedManifest = await readPlaylistManifest(this.manifestPath)
+    if (storedManifest) {
+      if (storedManifest.version === PLAYLIST_MANIFEST_VERSION && storedManifest.identity === playlistIdentity) {
+        // Current format and identical identity; resume on-disk pieces.
+      } else if (
+        storedManifest.version === 1 &&
+        storedManifest.identity === buildLegacyPlaylistIdentity(this.tracks)
+      ) {
+        // Migrating from legacy manifest format (v1). Audio pieces were renamed
+        // from audio_NNNNNN.part to audio_000_NNNNNN.part for multi-track support.
+        await migrateLegacyPlaylistParts(this.partsDir)
+        await writeFile(
+          this.manifestPath,
+          JSON.stringify({ version: PLAYLIST_MANIFEST_VERSION, identity: playlistIdentity }),
+          'utf8'
+        )
+      } else {
+        log.warn(`HLS playlist identity changed for ${this.task.filename}, restarting stream`)
+        await clearPlaylistParts(this.partsDir)
+        await writeFile(
+          this.manifestPath,
+          JSON.stringify({ version: PLAYLIST_MANIFEST_VERSION, identity: playlistIdentity }),
+          'utf8'
+        )
+      }
+    } else {
+      await writeFile(
+        this.manifestPath,
+        JSON.stringify({ version: PLAYLIST_MANIFEST_VERSION, identity: playlistIdentity }),
+        'utf8'
+      )
     }
-    await writeFile(this.manifestPath, playlistIdentity, 'utf8')
 
     const totalSegments = this.tracks.reduce((acc, t) => acc + t.segments.length, 0)
     
@@ -290,36 +374,50 @@ export class HlsRunner implements Runner {
     // connection count for video+audio streams.
     let totalBytes = 0
     let totalCompleted = 0
+    const sampleJobs: Array<(slot: number) => Promise<void>> = []
     const jobs: Array<(slot: number) => Promise<void>> = []
 
     for (const track of this.tracks) {
-      const done = await this.existingPieces(track.type, track.segments.length)
+      const done = await this.existingPieces(track.id, track.segments.length)
+      this.trackProgress.set(track.id, { bytes: done.bytes, completed: done.indices.size })
       totalBytes += done.bytes
       totalCompleted += done.indices.size
 
       if (track.initSegment) {
-        const initPath = this.initPath(track.type)
+        const initPath = this.initPath(track.id)
         const existing = await stat(initPath).catch(() => null)
         if (!existing || existing.size === 0) {
-          jobs.push(async (slot) => {
+          sampleJobs.push(async (slot) => {
             const bytes = await this.downloadAtomic(
               initPath,
               track.initSegment!.url,
               track.initSegment!.byteRange,
               slot
             )
-            this.received += bytes
+            this.creditCompletedBytes(slot, bytes)
           })
         } else {
           totalBytes += existing.size
         }
       }
 
+      let samplesQueued = 0
       for (let index = 0; index < track.segments.length; index++) {
         if (done.indices.has(index)) continue
-        jobs.push((slot) => this.fetchPiece(track, index, slot))
+        const job = (slot: number): Promise<void> => this.fetchPiece(track, index, slot)
+        if (samplesQueued < ESTIMATE_AFTER_PER_TRACK) {
+          sampleJobs.push(job)
+          samplesQueued++
+        } else {
+          jobs.push(job)
+        }
       }
     }
+
+    // Seed every track before bulk downloading the first one. Besides making
+    // the size estimate honest, this prevents progress from briefly reaching
+    // 100% while alternate audio is still waiting at the back of the queue.
+    jobs.unshift(...sampleJobs)
 
     this.received = totalBytes
     this.completed = totalCompleted
@@ -422,12 +520,12 @@ export class HlsRunner implements Runner {
   }
 
   private async fetchPiece(
-    track: { type: string; segments: HlsSegment[]; mediaSequence: number },
+    track: { id: string; segments: HlsSegment[]; mediaSequence: number },
     index: number,
     slot: number
   ): Promise<void> {
     const segment = track.segments[index]
-    const path = this.piecePath(track.type, index)
+    const path = this.piecePath(track.id, index)
     let bytes: number
     if (segment.key) {
       const raw = await this.download(segment.url, segment.byteRange, slot)
@@ -442,8 +540,22 @@ export class HlsRunner implements Runner {
 
     // Count bytes only after the complete piece has been renamed into place. A
     // failed write must never make progress jump forward and report a false ETA.
+    // The completed byte count now owns these bytes. Clear the live slot first
+    // so a tick between completion and worker cleanup cannot count them twice.
+    this.creditCompletedBytes(slot, bytes, track.id)
+  }
+
+  private creditCompletedBytes(slot: number, bytes: number, trackId?: string): void {
+    const active = this.active.get(slot)
+    if (active) active.bytes = 0
     this.received += bytes
-    this.completed++
+    if (trackId) {
+      this.completed++
+      const progress = this.trackProgress.get(trackId) ?? { bytes: 0, completed: 0 }
+      progress.bytes += bytes
+      progress.completed++
+      this.trackProgress.set(trackId, progress)
+    }
   }
 
   /** Buffers an encrypted piece while still throttling each incoming chunk. */
@@ -644,18 +756,20 @@ export class HlsRunner implements Runner {
 
   private async assemble(): Promise<void> {
     await rm(this.joinedVideoPath, { force: true })
-    await rm(this.joinedAudioPath, { force: true })
+    const audioTracks = this.tracks.filter((track) => track.role === 'audio')
+    await Promise.all(audioTracks.map((_track, index) => rm(this.joinedAudioPath(index), { force: true })))
 
     let totalJoinedSize = 0
 
+    let audioIndex = 0
     for (const track of this.tracks) {
-      const outPath = track.type === 'video' ? this.joinedVideoPath : this.joinedAudioPath
+      const outPath = track.role === 'video' ? this.joinedVideoPath : this.joinedAudioPath(audioIndex++)
       const handle = await open(outPath, 'w')
       try {
-        if (track.initSegment) await appendPiece(handle, this.initPath(track.type))
+        if (track.initSegment) await appendPiece(handle, this.initPath(track.id))
         for (let index = 0; index < track.segments.length; index++) {
           this.throwIfAborted()
-          await appendPiece(handle, this.piecePath(track.type, index))
+          await appendPiece(handle, this.piecePath(track.id, index))
         }
       } finally {
         await handle.close()
@@ -715,11 +829,16 @@ export class HlsRunner implements Runner {
       this.task.detail = 'Muxing…'
       this.deps.onUpdate(this.task)
 
-      const hasAudio = this.tracks.some((t) => t.type === 'audio')
+      const audioTracks = this.tracks.filter((track) => track.role === 'audio')
       await mux({
         ffmpegPath,
         inputPath: this.joinedVideoPath,
-        audioInputPath: hasAudio ? this.joinedAudioPath : undefined,
+        audioInputs: audioTracks.map((track, index) => ({
+          path: this.joinedAudioPath(index),
+          language: track.language,
+          title: track.label,
+          isDefault: track.isDefault
+        })),
         outputPath: muxTemp,
         signal: this.controller.signal
       })
@@ -727,11 +846,14 @@ export class HlsRunner implements Runner {
       this.throwIfAborted()
       await moveFile(muxTemp, target)
       await rm(this.joinedVideoPath, { force: true }).catch(() => {})
-      await rm(this.joinedAudioPath, { force: true }).catch(() => {})
+      await Promise.all(audioTracks.map((_track, index) => rm(this.joinedAudioPath(index), { force: true }).catch(() => {})))
       this.task.detail = null
       return target
     } catch (err) {
       await rm(muxTemp, { force: true }).catch(() => {})
+      // The target name was reserved before the mux was attempted; hand it back
+      // rather than leaving an empty file holding it.
+      await discardReservedPath(target)
       if (this.controller.signal.aborted) throw new AbortedError()
 
       const reason = err instanceof Error ? err.message : String(err)
@@ -743,7 +865,7 @@ export class HlsRunner implements Runner {
        * *and* the pieces - `assemble` only clears those on success - and report
        * the failure, so Start re-runs the merge rather than the download.
        */
-      if (this.tracks.some((track) => track.type === 'audio')) {
+      if (this.tracks.some((track) => track.role === 'audio')) {
         this.task.detail = null
         throw new Error(`Could not merge the video and audio tracks: ${reason}`)
       }
@@ -756,7 +878,8 @@ export class HlsRunner implements Runner {
         this.task.filename.replace(/\.([a-z0-9]+)$/i, '.ts')
       )
       await moveFile(this.joinedVideoPath, fallback)
-      await rm(this.joinedAudioPath, { force: true }).catch(() => {})
+      const audioTracks = this.tracks.filter((track) => track.role === 'audio')
+      await Promise.all(audioTracks.map((_track, index) => rm(this.joinedAudioPath(index), { force: true }).catch(() => {})))
 
       this.task.description = this.task.description
         ? this.task.description
@@ -773,7 +896,10 @@ export class HlsRunner implements Runner {
 
     await rm(this.partsDir, { recursive: true, force: true }).catch(() => {})
     await rm(this.joinedVideoPath, { force: true }).catch(() => {})
-    await rm(this.joinedAudioPath, { force: true }).catch(() => {})
+    const audioCount = Math.max(1, this.task.audioTracks?.length ?? (this.task.audioUrl ? 1 : 0))
+    await Promise.all(Array.from({ length: audioCount }, (_value, index) =>
+      rm(this.joinedAudioPath(index), { force: true }).catch(() => {})
+    ))
     this.received = 0
     this.completed = 0
     this.task.received = 0
@@ -788,16 +914,20 @@ export class HlsRunner implements Runner {
 
 /* ------------------------------------------------------------------ */
 
-function buildPlaylistIdentity(
-  tracks: Array<{
-    type: 'video' | 'audio'
-    segments: HlsSegment[]
-    initSegment: { url: string; byteRange: { offset: number; length: number } | null } | null
-    mediaSequence: number
-  }>
-): string {
+export const PLAYLIST_MANIFEST_VERSION = 2
+
+export interface PlaylistManifest {
+  version: number
+  identity: string
+}
+
+function buildPlaylistIdentity(tracks: ResolvedTrack[]): string {
   const canonical = tracks.map((track) => ({
-    type: track.type,
+    id: track.id,
+    role: track.role,
+    label: track.label,
+    language: track.language,
+    isDefault: track.isDefault,
     initSegment: track.initSegment,
     mediaSequence: track.mediaSequence,
     segments: track.segments.map((segment) => ({
@@ -810,12 +940,46 @@ function buildPlaylistIdentity(
   return createHash('sha256').update(JSON.stringify(canonical), 'utf8').digest('hex')
 }
 
-async function readPlaylistIdentity(path: string): Promise<string | null> {
+function buildLegacyPlaylistIdentity(tracks: ResolvedTrack[]): string {
+  const canonical = tracks.map((track) => ({
+    type: track.role,
+    initSegment: track.initSegment,
+    mediaSequence: track.mediaSequence,
+    segments: track.segments.map((segment) => ({
+      url: segment.url,
+      byteRange: segment.byteRange,
+      key: segment.key,
+      duration: segment.duration
+    }))
+  }))
+  return createHash('sha256').update(JSON.stringify(canonical), 'utf8').digest('hex')
+}
+
+async function readPlaylistManifest(path: string): Promise<PlaylistManifest | null> {
   try {
-    const value = (await readFile(path, 'utf8')).trim()
-    return /^[0-9a-f]{64}$/i.test(value) ? value : null
+    const raw = (await readFile(path, 'utf8')).trim()
+    if (/^[0-9a-f]{64}$/i.test(raw)) {
+      return { version: 1, identity: raw }
+    }
+    const parsed = JSON.parse(raw) as PlaylistManifest
+    if (parsed && typeof parsed.version === 'number' && typeof parsed.identity === 'string') {
+      return parsed
+    }
+    return null
   } catch {
     return null
+  }
+}
+
+async function migrateLegacyPlaylistParts(dir: string): Promise<void> {
+  const entries = await readdir(dir).catch(() => [])
+  for (const name of entries) {
+    const match = /^audio_(\d{6})\.part$/.exec(name)
+    if (match) {
+      await rename(join(dir, name), join(dir, `audio_000_${match[1]}.part`)).catch(() => {})
+    } else if (name === 'audio_init.part') {
+      await rename(join(dir, name), join(dir, 'audio_000_init.part')).catch(() => {})
+    }
   }
 }
 
@@ -915,3 +1079,4 @@ function delay(ms: number, signal: AbortSignal): Promise<void> {
     signal.addEventListener('abort', onAbort, { once: true })
   })
 }
+

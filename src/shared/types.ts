@@ -80,6 +80,14 @@ export interface SubtitleTrack {
   format: 'vtt' | 'srt' | 'ttml'
 }
 
+/** One alternate audio rendition advertised by an adaptive stream. */
+export interface MediaAudioTrack {
+  url: string
+  label: string
+  language: string | null
+  isDefault: boolean
+}
+
 export interface TorrentRuntimeFile {
   path: string
   size: number
@@ -129,6 +137,8 @@ export interface DownloadTask {
   groupFolder?: string
   /** The separate audio stream URL to fetch and mux, if any. */
   audioUrl?: string | null
+  /** Alternate HLS audio renditions to keep as separate tracks in the output. */
+  audioTracks?: MediaAudioTrack[]
   /**
    * Stable source identity for expiring signed streams (currently YouTube).
    *
@@ -220,6 +230,7 @@ export interface NewDownload {
   groupName?: string
   groupFolder?: string
   audioUrl?: string | null
+  audioTracks?: MediaAudioTrack[]
   /** Stable YouTube format identity used to refresh expiring signed URLs. */
   youtube?: { pageUrl: string; videoFormatId: string; audioFormatId?: string | null; height?: number | null; role?: 'video' | 'audio' }
   filename?: string
@@ -457,7 +468,12 @@ export interface MediaCandidate {
   pageUrl: string
   pageTitle: string
   mediaUrl: string
+  /** Other HLS playlists observed in the same tab, used to find split audio. */
+  relatedMediaUrls?: string[]
   type: 'hls' | 'dash' | 'file'
+  /** Intrinsic dimensions reported by the playing video element. */
+  width?: number | null
+  height?: number | null
   /** Filled in once the playlist has been parsed. */
   variants: MediaVariant[]
   headers: RequestHeaders
@@ -492,6 +508,8 @@ export interface MediaVariant {
   url: string
   /** The separate audio stream URL, if the stream is demuxed. */
   audioUrl?: string | null
+  /** All alternate audio renditions in this variant's HLS audio group. */
+  audioTracks?: MediaAudioTrack[]
   /** e.g. "1080p" */
   label: string
   height: number | null
@@ -642,7 +660,7 @@ export interface RendererApi {
   addDownloads(inputs: NewDownload[]): Promise<DownloadTask[]>
   probe(url: string, headers?: RequestHeaders): Promise<ProbeResult>
   resolveYouTube(url: string): Promise<YouTubeResolution>
-  resolveMediaPage(url: string): Promise<YouTubeResolution>
+  resolveMediaPage(url: string, headers?: RequestHeaders): Promise<YouTubeResolution>
   listClipboardItems(): Promise<ClipboardItem[]>
   retryClipboardItem(id: string): Promise<void>
   removeClipboardItem(id: string): Promise<void>
@@ -668,7 +686,7 @@ export interface RendererApi {
   acceptHandoff(id: string, input: NewDownload): Promise<void>
   /** For a media handoff: the quality ladder, fetched on demand. */
   resolveHandoffMedia(id: string): Promise<MediaCandidate>
-  acceptHandoffMedia(id: string, opts: { variantUrl: string; filename: string; dir?: string; categoryId?: string; queueId?: string; audioUrl?: string | null; youtube?: { videoFormatId: string; audioFormatId?: string | null; role?: 'video' | 'audio' } }): Promise<void>
+  acceptHandoffMedia(id: string, opts: { variantUrl: string; filename: string; dir?: string; categoryId?: string; queueId?: string; audioUrl?: string | null; audioTracks?: MediaAudioTrack[]; youtube?: { videoFormatId: string; audioFormatId?: string | null; role?: 'video' | 'audio' } }): Promise<void>
   /** Whether yt-dlp's background priming for this YouTube video has finished. Safe to poll. */
   getYouTubePrimeStatus(pageUrl: string): Promise<YouTubePrimeState>
   /** Cancel: drops the request and closes the window. */

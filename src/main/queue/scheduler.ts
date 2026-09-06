@@ -36,6 +36,13 @@ export class Scheduler {
   private timer: NodeJS.Timeout | null = null
   private pending: PendingAction | null = null
   private pendingTimer: NodeJS.Timeout | null = null
+  /**
+   * Queues that have drained and already had their completion action fired.
+   *
+   * Lifted again by `releaseDrainedWithWork` as soon as the queue has something
+   * non-terminal in it, which is what "this queue has work again" means.
+   */
+  private drained = new Set<string>()
   private deps: SchedulerDeps
 
   constructor(deps: SchedulerDeps) {
@@ -124,6 +131,7 @@ export class Scheduler {
     }
 
     this.queues = this.queues.filter((q) => q.id !== id)
+    this.drained.delete(id)
     await this.persist()
   }
 
@@ -150,6 +158,7 @@ export class Scheduler {
     queue.lastResult = 'idle'
     // An explicit Start means "run this once more" for one-time queues.
     if (queue.mode === 'onetime') queue.oneTimeCompleted = false
+    this.drained.delete(id)
     
     for (const task of this.tasksOf(queue)) {
       if (task.manualPause) task.manualPause = false
@@ -180,8 +189,9 @@ export class Scheduler {
   /* ---------------------------------------------------------------- */
 
   private tick(): void {
-    const before = JSON.stringify(this.queues)
+    const before = this.fingerprint()
     this.synchronizeMembership()
+    this.releaseDrainedWithWork()
     const now = new Date()
 
     for (const queue of this.queues) {
@@ -197,15 +207,20 @@ export class Scheduler {
         }
       }
 
-      if (queue.running && !(queue.mode === 'onetime' && queue.oneTimeCompleted)) this.feed(queue)
+      if (
+        queue.running &&
+        !(queue.mode === 'onetime' && queue.oneTimeCompleted) &&
+        !this.drained.has(queue.id)
+      ) this.feed(queue)
     }
 
-    if (JSON.stringify(this.queues) !== before) void this.persist()
+    if (this.fingerprint() !== before) void this.persist()
     else this.deps.onQueues(this.queues)
   }
 
   /** Promotes this queue's tasks in order, up to its own concurrency limit. */
   private feed(queue: Queue): void {
+    if (this.drained.has(queue.id)) return
     if (queue.mode === 'onetime' && queue.oneTimeCompleted) return
 
     const tasks = this.tasksOf(queue)
@@ -254,8 +269,17 @@ export class Scheduler {
     const finished = tasks.length > 0 && tasks.every((t) => t.status === 'done' || exhausted(t))
     if (!finished && existingPending) this.cancelPending()
     if (finished) {
-      // A one-time queue is consumed once it drains, even when no completion
-      // action is configured. Otherwise it would re-enter its time window forever.
+      // Latched for *every* mode, not just one-time. A periodic queue is still
+      // inside its window a tick later, so it was set running again, fed again,
+      // found drained again - and scheduled its completion action again, every
+      // ninety seconds for the length of the window. With `run` configured that
+      // re-launched the user's program on a loop.
+      //
+      // The latch is in-memory rather than persisted: a restart is a new day's
+      // worth of work as far as a periodic queue is concerned, and
+      // `oneTimeCompleted` already carries the part that must outlive the
+      // process.
+      this.drained.add(queue.id)
       if (queue.mode === 'onetime') queue.oneTimeCompleted = true
       queue.running = false
       queue.lastResult = tasks.some(exhausted) ? 'completed-with-errors' : 'completed'
@@ -265,14 +289,23 @@ export class Scheduler {
 
   private tasksOf(queue: Queue) {
     const all = this.deps.manager.list()
+    // Indexed rather than scanned per id: this runs for every queue on every
+    // tick, and a linear find inside the loop made it quadratic in the size of
+    // the whole download list.
+    const byId = new Map(all.map((task) => [task.id, task]))
+
     // Honour the queue's own ordering, and fall back to membership by queueId so
     // a task added straight to a queue still runs.
     const ordered = queue.taskIds
-      .map((id) => all.find((t) => t.id === id))
+      .map((id) => byId.get(id))
       .filter((t): t is NonNullable<typeof t> => Boolean(t))
 
+    const seen = new Set(ordered)
     for (const task of all) {
-      if (task.queueId === queue.id && !ordered.includes(task)) ordered.push(task)
+      if (task.queueId === queue.id && !seen.has(task)) {
+        ordered.push(task)
+        seen.add(task)
+      }
     }
 
     return ordered
@@ -280,13 +313,47 @@ export class Scheduler {
 
   private synchronizeMembership(): void {
     const tasks = this.deps.manager.list()
-    const ids = new Set(tasks.map((task) => task.id))
+    const byId = new Map(tasks.map((task) => [task.id, task]))
     for (const queue of this.queues) {
-      queue.taskIds = queue.taskIds.filter((id) => ids.has(id) && tasks.find((task) => task.id === id)?.queueId === queue.id)
+      queue.taskIds = queue.taskIds.filter((id) => byId.get(id)?.queueId === queue.id)
+      const members = new Set(queue.taskIds)
       for (const task of tasks) {
-        if (task.queueId === queue.id && !queue.taskIds.includes(task.id)) queue.taskIds.push(task.id)
+        if (task.queueId === queue.id && !members.has(task.id)) {
+          queue.taskIds.push(task.id)
+          members.add(task.id)
+        }
       }
     }
+  }
+
+  /**
+   * Drops the completion latch from any queue that has work again.
+   *
+   * "Work again" is anything not in a terminal state - a resumed task, a newly
+   * added one, a retry that came back. Without this a queue that drained once
+   * would never run again inside the same session.
+   */
+  private releaseDrainedWithWork(): void {
+    if (this.drained.size === 0) return
+    for (const queue of this.queues) {
+      if (!this.drained.has(queue.id)) continue
+      const hasWork = this.tasksOf(queue).some(
+        (task) => task.status !== 'done' && task.status !== 'error' && task.status !== 'missing'
+      )
+      if (hasWork) this.drained.delete(queue.id)
+    }
+  }
+
+  /**
+   * A cheap change signal for the tick.
+   *
+   * `JSON.stringify` over every queue ran twice per tick and grew with the task
+   * list; only these fields decide whether the file needs rewriting.
+   */
+  private fingerprint(): string {
+    return this.queues
+      .map((q) => `${q.id}:${q.running ? 1 : 0}:${q.oneTimeCompleted ? 1 : 0}:${q.lastResult}:${q.taskIds.length}:${q.taskIds.join(',')}`)
+      .join('|')
   }
 
   private inWindow(queue: Queue, now: Date): boolean {
@@ -298,7 +365,14 @@ export class Scheduler {
   /* ---------------------------------------------------------------- */
 
   private scheduleAction(queue: Queue): void {
-    if (this.pending) return
+    if (this.pending) {
+      // Only one machine-level action can be pending at a time. Say so rather
+      // than dropping the second queue's action without a trace.
+      log.warn(
+        `queue "${queue.name}" wanted to ${queue.onComplete} but a ${this.pending.action} is already pending; skipped`
+      )
+      return
+    }
 
     this.pending = { action: queue.onComplete, queueId: queue.id, firesAt: Date.now() + ACTION_DELAY_MS }
     this.deps.onPending(this.pending)
@@ -348,10 +422,18 @@ function runAction(
       spawn('shutdown', ['/h'], { shell: false, detached: true }).unref()
       break
     case 'sleep':
-      // Windows has no first-class sleep command; this is the documented call.
-      spawn('rundll32.exe', ['powrprof.dll,SetSuspendState', '0,1,0'], {
+      // Windows rundll32 powrprof.dll passes an HWND that SetSuspendState treats as
+      // bHibernate=true, causing unwanted hibernation. Using PowerShell .NET
+      // SetSuspendState correctly invokes Sleep/Suspend without hibernating.
+      spawn('powershell', [
+        '-NoProfile',
+        '-NonInteractive',
+        '-Command',
+        'Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.Application]::SetSuspendState([System.Windows.Forms.PowerState]::Suspend, $false, $false)'
+      ], {
         shell: false,
-        detached: true
+        detached: true,
+        windowsHide: true
       }).unref()
       break
     case 'exit':

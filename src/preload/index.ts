@@ -3,6 +3,7 @@ import type {
   BootstrapState,
   Category,
   DownloadTask,
+  MediaAudioTrack,
   NewDownload,
   PendingAction,
   Queue,
@@ -40,7 +41,7 @@ const api: RendererApi = {
   addDownloads: (inputs: NewDownload[]) => ipcRenderer.invoke('tasks:addMany', inputs),
   probe: (url: string, headers?: RequestHeaders) => ipcRenderer.invoke('tasks:probe', url, headers),
   resolveYouTube: (url: string) => ipcRenderer.invoke('youtube:resolve', url),
-  resolveMediaPage: (url: string) => ipcRenderer.invoke('media:resolvePage', url),
+  resolveMediaPage: (url: string, headers?: RequestHeaders) => ipcRenderer.invoke('media:resolvePage', url, headers),
   listClipboardItems: () => ipcRenderer.invoke('clipboard:list'),
   retryClipboardItem: (id: string) => ipcRenderer.invoke('clipboard:retry', id),
   removeClipboardItem: (id: string) => ipcRenderer.invoke('clipboard:remove', id),
@@ -66,7 +67,7 @@ const api: RendererApi = {
   acceptHandoff: (id: string, input: NewDownload) =>
     ipcRenderer.invoke('handoff:accept', id, input),
   resolveHandoffMedia: (id: string) => ipcRenderer.invoke('handoff:resolveMedia', id),
-  acceptHandoffMedia: (id: string, opts: { variantUrl: string; filename: string; dir?: string; categoryId?: string; queueId?: string; audioUrl?: string | null; youtube?: { videoFormatId: string; audioFormatId?: string | null; role?: 'video' | 'audio' } }) =>
+  acceptHandoffMedia: (id: string, opts: { variantUrl: string; filename: string; dir?: string; categoryId?: string; queueId?: string; audioUrl?: string | null; audioTracks?: MediaAudioTrack[]; youtube?: { videoFormatId: string; audioFormatId?: string | null; role?: 'video' | 'audio' } }) =>
     ipcRenderer.invoke('handoff:acceptMedia', id, opts),
   dismissHandoff: (id: string) => ipcRenderer.invoke('handoff:dismiss', id),
   getYouTubePrimeStatus: (pageUrl: string) => ipcRenderer.invoke('youtube:primeStatus', pageUrl),

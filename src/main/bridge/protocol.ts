@@ -6,11 +6,15 @@
  * frames through without parsing or re-encoding them.
  */
 
-import type { PageFormat, SubtitleTrack } from '../../shared/types.ts'
+import type { MediaAudioTrack, PageFormat, SubtitleTrack } from '../../shared/types.ts'
 import { preparedYouTubeUrl } from '../youtube-url.ts'
+import { validateUrl } from '../engine/create.ts'
 
 /** Chrome's own cap on a single native message. */
 export const MAX_FRAME_BYTES = 64 * 1024 * 1024
+
+/** How many downloads one bulk action may enqueue in a single frame. */
+export const MAX_BATCH_ITEMS = 500
 
 export interface PingMessage {
   type: 'ping'
@@ -42,6 +46,23 @@ export interface DownloadMessage {
   bulk?: boolean
 }
 
+/**
+ * A batch of downloads from one bulk action, in a single frame.
+ *
+ * `sendNativeMessage` starts a fresh host process per call, so "download all
+ * links" on a page with two hundred links used to mean two hundred sequential
+ * process launches, pipe connections and log appends. One frame carries the
+ * lot; the app queues them the way a bulk `download` message is queued, with
+ * no confirm window.
+ */
+export interface DownloadBatchMessage {
+  type: 'downloadBatch'
+  requestId?: string
+  referer?: string
+  userAgent?: string
+  items: Array<{ url: string; filename?: string; cookie?: string }>
+}
+
 export interface YouTubeMessage {
   type: 'youtube'
   requestId?: string
@@ -61,7 +82,13 @@ export interface YouTubeMessage {
   pageFormats?: PageFormat[]
 }
 
-/** Starts Draco if needed and warms YouTube extraction before a download click. */
+/**
+ * Warms YouTube extraction before a download click.
+ *
+ * Only when Draco is already running. The extension sends this on every
+ * YouTube page load, so the native host deliberately refuses to cold-start the
+ * app for it - browsing must not launch a download manager.
+ */
 export interface YouTubePrimeMessage {
   type: 'youtubePrime'
   requestId?: string
@@ -77,13 +104,18 @@ export interface MediaMessage {
   pageUrl: string
   pageTitle: string
   mediaUrl: string
+  relatedMediaUrls?: string[]
   audioUrl?: string | null
   variants?: any[]
   subtitles?: SubtitleTrack[]
   kind: 'hls' | 'dash' | 'file'
+  width?: number | null
+  height?: number | null
   referer?: string
+  origin?: string
   cookie?: string
   userAgent?: string
+  extraHeaders?: Record<string, string>
 }
 
 export type HostMessage =
@@ -91,6 +123,7 @@ export type HostMessage =
   | ConfigMessage
   | DownloadMessage
   | MediaMessage
+  | DownloadBatchMessage
   | YouTubeMessage
   | YouTubePrimeMessage
 
@@ -98,6 +131,8 @@ export interface HostReply {
   ok: boolean
   /** Only meaningful for `download`: whether Draco took the job. */
   taken?: boolean
+  /** Only meaningful for `downloadBatch`: how many of the items were queued. */
+  queued?: number
   error?: string
   config?: {
     enabled: boolean
@@ -144,6 +179,57 @@ export function encodeFrame(value: unknown): Buffer {
   const header = Buffer.allocUnsafe(4)
   header.writeUInt32LE(body.length, 0)
   return Buffer.concat([header, body])
+}
+
+function nullableDimension(value: unknown, label: string): number | null | undefined {
+  if (value === undefined) return undefined
+  if (value === null) return null
+  if (typeof value !== 'number' || !Number.isInteger(value) || value <= 0 || value > 32_768) {
+    throw new Error(`Invalid ${label}`)
+  }
+  return value
+}
+
+const UNSAFE_CAPTURED_HEADERS = new Set([
+  'accept-encoding', 'connection', 'content-length', 'cookie', 'host',
+  'proxy-authorization', 'proxy-connection', 'range', 'referer',
+  'transfer-encoding', 'upgrade', 'user-agent'
+])
+
+function normalizeCapturedHeaders(value: unknown): Record<string, string> | undefined {
+  if (value === undefined || value === null) return undefined
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Invalid extraHeaders')
+
+  const result: Record<string, string> = {}
+  const entries = Object.entries(value as Record<string, unknown>)
+  if (entries.length > 40) throw new Error('Too many extraHeaders')
+  for (const [rawName, rawValue] of entries) {
+    const name = rawName.toLowerCase()
+    if (!/^[a-z0-9!#$%&'*+.^_`|~-]{1,128}$/.test(name)) throw new Error('Invalid extraHeaders name')
+    if (UNSAFE_CAPTURED_HEADERS.has(name)) continue
+    if (typeof rawValue !== 'string' || rawValue.length > 16_384 || /[\r\n]/.test(rawValue)) {
+      throw new Error(`Invalid extraHeaders value for ${name}`)
+    }
+    result[name] = rawValue
+  }
+  return Object.keys(result).length > 0 ? result : undefined
+}
+
+function normalizeRelatedMediaUrls(value: unknown): string[] | undefined {
+  if (value === undefined || value === null) return undefined
+  if (!Array.isArray(value) || value.length > 20) throw new Error('Invalid relatedMediaUrls')
+  const urls: string[] = []
+  for (const item of value) {
+    if (typeof item !== 'string' || item.length > 32_768) throw new Error('Invalid related media URL')
+    try {
+      const parsed = new URL(item)
+      if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') throw new Error()
+    } catch {
+      throw new Error('Invalid related media URL')
+    }
+    if (!urls.includes(item)) urls.push(item)
+  }
+  return urls.length > 0 ? urls : undefined
 }
 
 
@@ -214,6 +300,49 @@ export function validateHostMessage(value: unknown): HostMessage {
         bulk: bulk ?? false
       }
     }
+    case 'downloadBatch': {
+      const items = message.items
+      if (!Array.isArray(items) || items.length === 0) throw new Error('Invalid items')
+      // Bounded: this arrives from a page's own link list, and one frame must
+      // not be able to enqueue an unbounded amount of work.
+      if (items.length > MAX_BATCH_ITEMS) throw new Error('Too many items')
+
+      const parsed = items.map((raw, index) => {
+        if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+          throw new Error(`Invalid item ${index}`)
+        }
+        const item = raw as Record<string, unknown>
+        const url = item.url
+        if (typeof url !== 'string' || url.length > 32_768) throw new Error(`Invalid item ${index} url`)
+        try {
+          const u = new URL(url)
+          if (u.protocol !== 'http:' && u.protocol !== 'https:') throw new Error()
+        } catch {
+          throw new Error(`Invalid item ${index} url`)
+        }
+        const filename = item.filename
+        if (filename !== undefined && filename !== null && (typeof filename !== 'string' || filename.length > 512)) {
+          throw new Error(`Invalid item ${index} filename`)
+        }
+        const cookie = item.cookie
+        if (cookie !== undefined && cookie !== null && (typeof cookie !== 'string' || cookie.length > 1_000_000)) {
+          throw new Error(`Invalid item ${index} cookie`)
+        }
+        return {
+          url,
+          ...(typeof filename === 'string' ? { filename } : {}),
+          ...(typeof cookie === 'string' ? { cookie } : {})
+        }
+      })
+
+      return {
+        type,
+        ...(requestId ? { requestId } : {}),
+        referer: optionalUrl('referer'),
+        userAgent: stringField('userAgent', 1024),
+        items: parsed
+      }
+    }
     case 'youtube': {
       const pageFormats = message.pageFormats
       if (pageFormats !== undefined) {
@@ -257,19 +386,31 @@ export function validateHostMessage(value: unknown): HostMessage {
       if (subtitles !== undefined && (!Array.isArray(subtitles) || subtitles.length > 20)) {
         throw new Error('Invalid subtitles')
       }
+      const width = nullableDimension(message.width, 'width')
+      const height = nullableDimension(message.height, 'height')
+      const extraHeaders = normalizeCapturedHeaders(message.extraHeaders)
+      const relatedMediaUrls = normalizeRelatedMediaUrls(message.relatedMediaUrls)
       return {
         type,
         ...(requestId ? { requestId } : {}),
         pageUrl: urlField('pageUrl'),
         pageTitle: stringField('pageTitle', 1000) ?? '',
         mediaUrl: urlField('mediaUrl'),
-        audioUrl: optionalUrl('audioUrl') ?? null,
+        relatedMediaUrls,
+        audioUrl: (() => {
+          const raw = optionalUrl('audioUrl')
+          return raw ? validateUrl(raw, { allowPrivate: false }) : null
+        })(),
         variants: Array.isArray(variants) ? variants.map(normalizeMediaVariant) : undefined,
         subtitles: Array.isArray(subtitles) ? subtitles.map(normalizeSubtitleTrack) : undefined,
         kind,
+        width,
+        height,
         referer: optionalUrl('referer'),
+        origin: optionalUrl('origin'),
         cookie: stringField('cookie', 1_000_000),
-        userAgent: stringField('userAgent', 1024)
+        userAgent: stringField('userAgent', 1024),
+        extraHeaders
       }
     }
     default:
@@ -283,7 +424,7 @@ function normalizeSubtitleTrack(value: unknown): SubtitleTrack {
   const format = track.format
   if (format !== 'vtt' && format !== 'srt' && format !== 'ttml') throw new Error('Invalid subtitle format')
   return {
-    url: requiredUrlValue(track.url, 'subtitle url'),
+    url: validateUrl(requiredUrlValue(track.url, 'subtitle url'), { allowPrivate: false }),
     label: boundedString(track.label ?? '', 100, 'subtitle label'),
     language: track.language === null || track.language === undefined
       ? null
@@ -331,6 +472,7 @@ function normalizePageFormat(value: unknown): PageFormat {
 function normalizeMediaVariant(value: unknown): {
   url: string
   audioUrl: string | null
+  audioTracks?: MediaAudioTrack[]
   label: string | null
   height: number | null
   bandwidth: number | null
@@ -341,8 +483,11 @@ function normalizeMediaVariant(value: unknown): {
 } {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Invalid media variant')
   const v = value as Record<string, unknown>
-  const url = requiredUrlValue(v.url, 'variant url')
-  const audioUrl = v.audioUrl === undefined || v.audioUrl === null ? null : optionalUrlValue(v.audioUrl, 'variant audioUrl')
+  const rawUrl = requiredUrlValue(v.url, 'variant url')
+  const url = validateUrl(rawUrl, { allowPrivate: false })
+  const rawAudioUrl = v.audioUrl === undefined || v.audioUrl === null ? null : optionalUrlValue(v.audioUrl, 'variant audioUrl')
+  const audioUrl = rawAudioUrl ? validateUrl(rawAudioUrl, { allowPrivate: false }) : null
+  const audioTracks = normalizeAudioTracks(v.audioTracks)
   const label = v.label === undefined || v.label === null ? null : boundedString(v.label, 200, 'variant label')
   const codecs = v.codecs === undefined || v.codecs === null ? null : boundedString(v.codecs, 1000, 'variant codecs')
   const height = nonNegativeNumber(v.height, 'height')
@@ -374,7 +519,25 @@ function normalizeMediaVariant(value: unknown): {
     youtube = { videoFormatId, audioFormatId, role }
   }
 
-  return { url, audioUrl, label, height, bandwidth, codecs, estimatedSize, container, ...(youtube ? { youtube } : {}) }
+  return { url, audioUrl, ...(audioTracks ? { audioTracks } : {}), label, height, bandwidth, codecs, estimatedSize, container, ...(youtube ? { youtube } : {}) }
+}
+
+function normalizeAudioTracks(value: unknown): MediaAudioTrack[] | undefined {
+  if (value === undefined || value === null) return undefined
+  if (!Array.isArray(value) || value.length > 16) throw new Error('Invalid audio tracks')
+  return value.map((entry, index) => {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) throw new Error('Invalid audio track')
+    const track = entry as Record<string, unknown>
+    const rawTrackUrl = requiredUrlValue(track.url, `audio track ${index + 1} url`)
+    return {
+      url: validateUrl(rawTrackUrl, { allowPrivate: false }),
+      label: boundedString(track.label ?? '', 100, 'audio track label'),
+      language: track.language === undefined || track.language === null
+        ? null
+        : boundedString(track.language, 35, 'audio track language'),
+      isDefault: track.isDefault === true
+    }
+  })
 }
 
 function boundedString(value: unknown, max: number, label: string): string {

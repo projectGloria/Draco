@@ -17,6 +17,7 @@ import {
   type YtDlpFormat
 } from './youtube-ladder.ts'
 import { electronNodeRuntimeArgs, electronNodeRuntimeEnv } from './youtube-runtime.ts'
+import { normalizeYtDlpError } from './youtube-error.ts'
 import { isSunoUrl } from './media-url.ts'
 import { resolveSuno } from './suno.ts'
 import { resolveHtmlPageMedia } from './page-media.ts'
@@ -275,6 +276,17 @@ export type YouTubePrimeState =
   | { state: 'failed'; tookMs: number; error: string }
 
 const primeStatus = new Map<string, YouTubePrimeState>()
+const PRIME_STATUS_MAX = 64
+
+function setPrimeStatus(key: string, value: YouTubePrimeState): void {
+  primeStatus.delete(key)
+  primeStatus.set(key, value)
+  while (primeStatus.size > PRIME_STATUS_MAX) {
+    const oldest = primeStatus.keys().next().value as string | undefined
+    if (oldest === undefined) break
+    primeStatus.delete(oldest)
+  }
+}
 
 export function getYouTubePrimeStatus(pageUrl: string): YouTubePrimeState {
   return primeStatus.get(extractYouTubeId(pageUrl)) ?? { state: 'idle' }
@@ -306,7 +318,7 @@ async function loadInfo(
   }
 
   const startedAt = now
-  primeStatus.set(key, { state: 'pending', startedAt })
+  setPrimeStatus(key, { state: 'pending', startedAt })
   log.info(`YouTube extraction started for ${key}${force ? ' (forced)' : ''}`)
 
   const promise = (async () => {
@@ -317,13 +329,13 @@ async function loadInfo(
   promise.then(
     () => {
       const tookMs = Date.now() - startedAt
-      primeStatus.set(key, { state: 'ready', tookMs })
+      setPrimeStatus(key, { state: 'ready', tookMs })
       log.info(`YouTube extraction finished for ${key} in ${tookMs}ms`)
     },
     (err: unknown) => {
       const tookMs = Date.now() - startedAt
       const error = err instanceof Error ? err.message : String(err)
-      primeStatus.set(key, { state: 'failed', tookMs, error })
+      setPrimeStatus(key, { state: 'failed', tookMs, error })
       log.warn(`YouTube extraction failed for ${key} after ${tookMs}ms: ${error}`)
     }
   )
@@ -565,7 +577,7 @@ async function dumpJson(
   )
   if (code !== 0) {
     const detail = lastUsefulLine(stderr) || lastUsefulLine(stdout) || `yt-dlp exited with ${code}`
-    throw new Error(normalizeYtDlpError(detail))
+    throw new Error(normalizeYtDlpError(detail, url))
   }
 
   // yt-dlp's JSON is a single object for --no-playlist. Ignore incidental blank
@@ -585,31 +597,6 @@ async function dumpJson(
   }
 
   throw new Error('yt-dlp returned no usable JSON')
-}
-
-function normalizeYtDlpError(message: string): string {
-  if (/no supported javascript runtime/i.test(message)) {
-    return (
-      'YouTube needs a supported JavaScript runtime for extraction. ' +
-      'Install Deno (recommended) and make sure deno.exe is on PATH, then retry.'
-    )
-  }
-
-  if (/po token|proof of origin|403|forbidden/i.test(message)) {
-    return (
-      'YouTube rejected the extractor request (PO token / HTTP 403). ' +
-      'This video or client currently needs a browser token or a newer yt-dlp setup.'
-    )
-  }
-
-  if (/sign in|bot|captcha|confirm you('re| are) not a robot/i.test(message)) {
-    return (
-      'YouTube requires a browser session or verification for this video. ' +
-      'Draco received the page cookies, but YouTube still rejected the extractor.'
-    )
-  }
-
-  return message
 }
 
 function lastUsefulLine(value: string): string {

@@ -1,0 +1,10 @@
+{
+  "manifest_version": 3,
+  "name": "Frame — Page Screenshots",
+  "version": "1.0.0",
+  "description": "Capture an entire page, the visible area, or a selected section. Preview and save locally as PNG.",
+  "minimum_chrome_version": "116",
+  "permissions": ["activeTab", "scripting", "storage"],
+  "background": { "service_worker": "background.js", "type": "module" },
+  "action": { "default_popup": "popup.html", "default_title": "Frame — Take a screenshot" }
+}

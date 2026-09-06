@@ -1,13 +1,12 @@
 import { createHash } from 'node:crypto'
 import { createReadStream } from 'node:fs'
 import { open, rm, stat, statfs, type FileHandle } from 'node:fs/promises'
-import { basename, join, extname } from 'node:path'
+import { basename, dirname, extname } from 'node:path'
 import { spawn } from 'node:child_process'
-import { ensureFfmpeg } from '../hls/ffmpeg.ts'
 import type { DownloadTask, Segment } from '../../shared/types.ts'
 import { journalMatches, journalSegmentsValid, readJournal, removeJournal, segmentsForJournal, writeJournal, JOURNAL_VERSION } from './journal.ts'
 import { QuotaExceededError, type RateLimiter } from './limiter.ts'
-import { uniquePath, moveFile } from './naming.ts'
+import { discardReservedPath, uniquePath, moveFile } from './naming.ts'
 import { buildHeaders, probeUrl } from './probe.ts'
 import { logger } from '../log.ts'
 import { preallocate } from './preallocate.ts'
@@ -16,6 +15,7 @@ import { Segmenter } from './segmenter.ts'
 import { AbortedError, HttpStatusError, NotResumableError, ServerBusyError, runSegment } from './worker.ts'
 import { preparedYouTubeUrl } from '../youtube-url.ts'
 import { ensureDownloadDirectory } from '../destination-path.ts'
+import { partPathFor } from './workspace.ts'
 
 /**
  * Drives one download: probe, resume-or-start, keep the connection pool fed,
@@ -154,8 +154,7 @@ export class TaskRunner {
   }
 
   get partPath(): string {
-    const dir = this.config.tempDir || this.task.dir
-    return join(dir, this.task.filename + '.dracodl')
+    return partPathFor(this.task.dir, this.task.filename, this.config.tempDir)
   }
 
   get journalPath(): string {
@@ -392,8 +391,12 @@ export class TaskRunner {
     this.task.dir = await ensureDownloadDirectory(this.task.dir)
 
     if (this.config.checkDiskSpace && this.task.size !== null && this.task.size > 0) {
+      // Measured on the volume the bytes actually accumulate on, which is the
+      // workspace rather than the destination. Asking about the destination
+      // while writing somewhere else can pass and then fill the other disk.
+      const target = dirname(this.partPath)
       try {
-        const stats = await statfs(this.task.dir)
+        const stats = await statfs(target)
         const free = stats.bavail * stats.bsize
         // Require at least the file size + 10MB of padding
         if (free < this.task.size + 10 * 1024 * 1024) {
@@ -500,8 +503,9 @@ export class TaskRunner {
       if (this.inflight.size === 0) {
         // Nothing running and nothing splittable while work remains means the
         // segmenter and the workers disagree - fail loudly rather than spin.
-        if (!segmenter.complete) throw this.fatal ?? new Error('Download stalled with work outstanding')
-        break
+        // `complete` was checked at the top of this iteration, so reaching here
+        // with nothing in flight is always the disagreement.
+        throw this.fatal ?? new Error('Download stalled with work outstanding')
       }
 
       await Promise.race([...this.inflight])
@@ -678,7 +682,14 @@ export class TaskRunner {
     }
 
     let target = await uniquePath(this.task.dir, this.task.filename)
-    await moveFile(this.partPath, target)
+    try {
+      await moveFile(this.partPath, target)
+    } catch (err) {
+      // The name was reserved as an empty file; a failed move must not leave it
+      // sitting there holding the download's own name.
+      await discardReservedPath(target)
+      throw err
+    }
     // The payload is already safely at its final name. Journal cleanup is
     // recovery metadata, so a transient cleanup failure must not turn a finished
     // download into a visible error.
@@ -688,6 +699,11 @@ export class TaskRunner {
       this.task.detail = `Converting to ${this.task.postProcess.toUpperCase()}...`
       this.deps.onUpdate(this.task)
 
+      // Imported here rather than at the top of the file: ffmpeg provisioning
+      // reaches Electron's paths, and this module has to stay loadable under
+      // bare Node for `tools/dl.ts` and the engine tests. Post-processing is
+      // the one path that genuinely needs it, and only in the app.
+      const { ensureFfmpeg } = await import('../hls/ffmpeg.ts')
       const ffmpegPath = await ensureFfmpeg()
       const finalExt = '.' + this.task.postProcess
       const outPath = await uniquePath(
@@ -695,25 +711,30 @@ export class TaskRunner {
         basename(this.task.filename, extname(this.task.filename)) + finalExt
       )
       
-      const args = ['-y', '-i', target]
-      if (this.task.postProcess === 'mp4') {
-        args.push('-c:v', 'copy', '-c:a', 'copy')
-      } else if (this.task.postProcess === 'mp3') {
-        args.push('-vn', '-c:a', 'libmp3lame', '-q:a', '2')
-      }
-      args.push(outPath)
+      try {
+        const args = ['-y', '-i', target]
+        if (this.task.postProcess === 'mp4') {
+          args.push('-c:v', 'copy', '-c:a', 'copy')
+        } else if (this.task.postProcess === 'mp3') {
+          args.push('-vn', '-c:a', 'libmp3lame', '-q:a', '2')
+        }
+        args.push(outPath)
 
-      await new Promise<void>((resolve, reject) => {
-        const child = spawn(ffmpegPath, args, { windowsHide: true, stdio: 'ignore' })
-        child.on('error', reject)
-        child.on('close', (code) => {
-          if (code === 0) resolve()
-          else reject(new Error(`ffmpeg exited with code ${code}`))
+        await new Promise<void>((resolve, reject) => {
+          const child = spawn(ffmpegPath, args, { windowsHide: true, stdio: 'ignore' })
+          child.on('error', reject)
+          child.on('close', (code) => {
+            if (code === 0) resolve()
+            else reject(new Error(`ffmpeg exited with code ${code}`))
+          })
         })
-      })
 
-      await rm(target, { force: true }).catch(() => {})
-      target = outPath
+        await rm(target, { force: true }).catch(() => {})
+        target = outPath
+      } catch (err) {
+        await discardReservedPath(outPath)
+        throw err
+      }
     }
 
     this.task.filename = basename(target)

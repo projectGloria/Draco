@@ -9,6 +9,7 @@ import type {
   HandoffRequest,
   IntegrationStatus,
   MediaCandidate,
+  MediaVariant,
   NewDownload,
   Queue,
   RequestHeaders,
@@ -23,11 +24,11 @@ import type { PipeServer } from './bridge/pipe-server.ts'
 import { directoryFor } from './categories.ts'
 import { normalizeDownloadDirectory } from './destination-path.ts'
 import { createTask, filenameForKind, kindForUrl, validateUrl } from './engine/create.ts'
-import { sanitizeFilename, uniquePath } from './engine/naming.ts'
+import { discardReservedPath, sanitizeFilename, uniquePath } from './engine/naming.ts'
 import type { DownloadManager } from './engine/manager.ts'
 import { probeUrl } from './engine/probe.ts'
 import { resolveTorrentItemPath } from './engine/torrent-path.ts'
-import { resolveVariants } from './hls/playlist.ts'
+import { inspectHlsMedia, resolveVariants } from './hls/playlist.ts'
 import { couldBeHtmlPageUrl, isSupportedMediaPageUrl } from './media-url.ts'
 import { getToolStatus, updateTool } from './tools.ts'
 import { checkForUpdates } from './update.ts'
@@ -51,6 +52,7 @@ import {
   createProgressWindow,
   getMainWindow,
   send,
+  syncDropzoneWindow,
   updateProgressWindow
 } from './windows.ts'
 
@@ -266,6 +268,7 @@ export function placeTask(input: NewDownload): DownloadTask {
     groupFolder: groupFolder || undefined,
     dir: groupedDir,
     audioUrl: input.audioUrl,
+    audioTracks: input.audioTracks,
     youtube: input.youtube ? { ...input.youtube } : undefined,
     filename: chosenName,
     categoryId,
@@ -372,10 +375,10 @@ export function registerIpc(ctx: AppContext): void {
     return resolveYouTube(pageUrl, { referer: pageUrl })
   })
 
-  handle('media:resolvePage', (url: string) => {
+  handle('media:resolvePage', (url: string, headers?: RequestHeaders) => {
     const pageUrl = validateUrl(url)
     if (!/^https?:/i.test(pageUrl)) throw new Error('Media pages must use HTTP or HTTPS')
-    return resolveMediaPage(pageUrl, { referer: pageUrl })
+    return resolveMediaPage(pageUrl, { ...headers, referer: headers?.referer ?? pageUrl })
   })
 
   handle('clipboard:list', () => ctx.clipboardItems.map((item) => ({ ...item })))
@@ -416,12 +419,14 @@ export function registerIpc(ctx: AppContext): void {
 
       if (task.status === 'done') {
         const currentPath = join(task.dir, task.filename)
+        let targetPath: string | null = null
         try {
           await access(currentPath, constants.F_OK)
-          const targetPath = await uniquePath(task.dir, nextFilename)
+          targetPath = await uniquePath(task.dir, nextFilename)
           await rename(currentPath, targetPath)
           task.filename = targetPath.split(/[\\/]/).pop() || nextFilename
         } catch (err) {
+          if (targetPath) await discardReservedPath(targetPath)
           if ((err as NodeJS.ErrnoException)?.code !== 'ENOENT') throw err
           task.filename = nextFilename
           task.status = 'missing'
@@ -438,6 +443,7 @@ export function registerIpc(ctx: AppContext): void {
     // UI-only task metadata should be persisted immediately enough that a clean
     // restart does not lose a rename/description/queue move.
     persistTaskSnapshot(ctx)
+    ctx.manager.emitTasks()
     return task
   })
 
@@ -446,16 +452,34 @@ export function registerIpc(ctx: AppContext): void {
     if (!task) return
     await ctx.manager.remove([id], false)
 
+    // Everything the original carried, not a subset of it. Dropping `dir` sent
+    // a download the user had deliberately filed elsewhere back to the default
+    // tree; dropping the group fields split a page batch out of its folder; and
+    // dropping the torrent selection re-downloaded files they had deselected.
     const fresh = placeTask({
       url: task.url,
+      sourceUrl: task.sourceUrl,
+      // `placeTask` appends `groupFolder` to whatever directory it settles on,
+      // and `task.dir` already contains it - passing both would nest the folder
+      // inside itself. For a grouped task the category id reproduces the same
+      // parent, so let it re-derive; otherwise the explicit directory wins.
+      dir: task.groupFolder ? undefined : task.dir,
+      categoryId: task.categoryId ?? undefined,
+      groupId: task.groupId,
+      groupName: task.groupName,
+      groupFolder: task.groupFolder,
       filename: task.filenameLocked ? task.filename : undefined,
       headers: task.headers,
+      subtitles: task.subtitles,
       description: task.description,
       expectedChecksum: task.expectedChecksum,
       postProcess: task.postProcess,
       queueId: task.queueId,
       kind: task.kind,
       audioUrl: task.audioUrl,
+      audioTracks: task.audioTracks,
+      selectedFiles: task.selectedFiles,
+      torrentFiles: task.torrentFiles,
       youtube: task.youtube ? { pageUrl: task.youtube.pageUrl, videoFormatId: task.youtube.videoFormatId, audioFormatId: task.youtube.audioFormatId ?? null, height: task.youtube.height ?? null, role: task.youtube.role } : undefined
     })
     ctx.manager.add(fresh, true)
@@ -537,7 +561,7 @@ export function registerIpc(ctx: AppContext): void {
 
   handle('handoff:acceptMedia', async (
     id: string,
-    opts: { variantUrl: string; filename: string; dir?: string; categoryId?: string; queueId?: string; audioUrl?: string | null; youtube?: { videoFormatId: string; audioFormatId?: string | null; role?: 'video' | 'audio' } }
+    opts: { variantUrl: string; filename: string; dir?: string; categoryId?: string; queueId?: string; audioUrl?: string | null; audioTracks?: MediaVariant['audioTracks']; youtube?: { videoFormatId: string; audioFormatId?: string | null; role?: 'video' | 'audio' } }
   ) => {
     // Validate the media entry before consuming the pending handoff. A media
     // list can be cleared concurrently from another window; in that case the
@@ -556,6 +580,7 @@ export function registerIpc(ctx: AppContext): void {
     const chosen = chosenFormatId
       ? candidate.variants.find((v) => v.youtube?.videoFormatId === chosenFormatId)
       : undefined
+    const selectedVariant = candidate.variants.find((variant) => variant.url === opts.variantUrl)
 
     takeHandoff(id)
 
@@ -563,6 +588,7 @@ export function registerIpc(ctx: AppContext): void {
       url: urls.url,
       sourceUrl: candidate.pageUrl,
       audioUrl: urls.audioUrl,
+      audioTracks: opts.youtube ? undefined : opts.audioTracks,
       youtube: opts.youtube
         ? {
             pageUrl: candidate.pageUrl,
@@ -581,6 +607,10 @@ export function registerIpc(ctx: AppContext): void {
       description: candidate.pageTitle,
       kind: candidate.type
     })
+    // Carry the same estimate shown in the confirmation window into the
+    // progress window. The HLS runner may refine it later, but must not start
+    // from an unrelated average of whichever track happened to download first.
+    task.size = selectedVariant?.estimatedSize ?? null
 
     ctx.manager.add(task, true)
     announce(task)
@@ -624,10 +654,7 @@ export function registerIpc(ctx: AppContext): void {
     const next = await saveSettings(patch)
     ctx.manager.applySettings()
     if (patch.watchClipboard !== undefined) ctx.setClipboardWatch(patch.watchClipboard === true)
-    if (patch.showDropzone !== undefined) {
-      const { syncDropzoneWindow } = require('./windows.ts')
-      syncDropzoneWindow(patch.showDropzone === true)
-    }
+    if (patch.showDropzone !== undefined) syncDropzoneWindow(patch.showDropzone === true)
     return next
   })
 
@@ -782,24 +809,118 @@ export async function resolveCandidate(
 
   if (candidate.type === 'file') {
     const probe = await probeUrl(candidate.mediaUrl, { headers: candidate.headers })
+    const audio = probe.mimeType?.toLowerCase().startsWith('audio/') ||
+      /\.(?:mp3|m4a|aac|flac|ogg|opus|wav)(?:[?#]|$)/i.test(candidate.mediaUrl)
+    const audioContainer = audioContainerFor(candidate.mediaUrl, probe.mimeType)
     candidate.variants = [
       {
         url: candidate.mediaUrl,
-        label: probe.filename,
-        height: null,
+        label: audio ? `${audioContainer.toUpperCase()} audio` : candidate.height ? `${candidate.height}p` : probe.filename,
+        height: candidate.height ?? null,
         bandwidth: null,
-        codecs: null,
-        estimatedSize: probe.size
+        codecs: audio ? 'audio' : null,
+        estimatedSize: probe.size,
+        container: audio ? audioContainer : null
       }
     ]
   } else if (candidate.type === 'hls') {
-    candidate.variants = await resolveVariants(candidate.mediaUrl, candidate.headers)
+    // If the primary URL is a master playlist, resolveVariants already parses its ladder and renditions.
+    const primaryVariants = await resolveVariants(candidate.mediaUrl, candidate.headers).catch(() => [])
+    const hasMasterLadder = primaryVariants.length > 1 || primaryVariants.some((v) => v.height || v.bandwidth)
+
+    if (hasMasterLadder) {
+      candidate.variants = primaryVariants
+    } else {
+      const knownUrls = new Set<string>()
+      for (const v of primaryVariants) {
+        knownUrls.add(v.url)
+        if (v.audioUrl) knownUrls.add(v.audioUrl)
+        for (const t of v.audioTracks ?? []) knownUrls.add(t.url)
+      }
+
+      const rawUrls = [...new Set([candidate.mediaUrl, ...(candidate.relatedMediaUrls ?? [])])]
+      const uninspectedUrls = rawUrls.filter((url) => !knownUrls.has(url))
+
+      const inspected = await Promise.all(uninspectedUrls.map(async (url) => ({
+        url,
+        media: await inspectHlsMedia(url, candidate.headers).catch(() => null)
+      })))
+      const videoUrls = inspected.filter((item) => item.media?.hasVideo).map((item) => item.url)
+      const audioUrls = inspected
+        .filter((item) => item.media?.hasAudio && !item.media.hasVideo)
+        .map((item) => item.url)
+
+      if (videoUrls.length > 0) {
+        const ladders = await Promise.all(videoUrls.map((url) => resolveVariants(url, candidate.headers)))
+        const hasQualityLadder = ladders.some((ladder) =>
+          ladder.length > 1 || ladder.some((variant) => variant.height || variant.bandwidth)
+        )
+        // Once a master playlist supplied a real ladder, an independently
+        // observed anonymous child playlist is only a duplicate of the quality
+        // currently playing. Do not expose it as a misleading extra "stream".
+        const variants = ladders.flat().filter((variant) =>
+          !hasQualityLadder || variant.height || variant.bandwidth || variant.label !== 'stream'
+        )
+        for (const variant of variants) {
+          const height = variant.height ?? hlsUrlHeight(variant.url)
+          if (height && !variant.height) {
+            variant.height = height
+            variant.label = `${height}p`
+          }
+          if ((!variant.audioTracks || variant.audioTracks.length === 0) && audioUrls.length > 0) {
+            variant.audioUrl = audioUrls[0]
+            variant.audioTracks = audioUrls.map((url, index) => ({
+              url,
+              label: `Audio ${index + 1}`,
+              language: null,
+              isDefault: index === 0
+            }))
+            if (audioUrls.length > 1) variant.container = 'mkv'
+          }
+        }
+        candidate.variants = [...new Map(variants.map((variant) => [variant.url, variant])).values()]
+          .sort((a, b) => (b.height ?? 0) - (a.height ?? 0) || (b.bandwidth ?? 0) - (a.bandwidth ?? 0))
+        if (audioUrls.length > 0) {
+          log.info(`paired ${audioUrls.length} split HLS audio rendition(s) with ${videoUrls.length} video playlist(s)`)
+        }
+      } else if (audioUrls.length > 0) {
+        candidate.variants = audioUrls.map((url, index) => ({
+          url,
+          label: audioUrls.length > 1 ? `Audio ${index + 1}` : 'Audio stream',
+          height: null,
+          bandwidth: null,
+          codecs: 'audio',
+          estimatedSize: null,
+          container: 'm4a'
+        }))
+      } else {
+        candidate.variants = primaryVariants.length > 0
+          ? primaryVariants
+          : await resolveVariants(candidate.mediaUrl, candidate.headers)
+      }
+    }
   } else {
     const { resolveMpd } = await import('./dash/manifest.ts')
     candidate.variants = (await resolveMpd(candidate.mediaUrl, candidate.headers)).variants
   }
 
   return candidate
+}
+
+function hlsUrlHeight(url: string): number | null {
+  const match = /q(144|240|360|480|540|720|1080|1440|2160)(?:\D|$)/i.exec(url)
+  return match ? Number(match[1]) : null
+}
+
+function audioContainerFor(url: string, mimeType: string | null): string {
+  const fromUrl = /\.(mp3|m4a|aac|flac|ogg|opus|wav)(?:[?#]|$)/i.exec(url)?.[1]?.toLowerCase()
+  if (fromUrl) return fromUrl
+  const mime = mimeType?.toLowerCase() ?? ''
+  if (mime.includes('mpeg')) return 'mp3'
+  if (mime.includes('flac')) return 'flac'
+  if (mime.includes('ogg')) return 'ogg'
+  if (mime.includes('wav')) return 'wav'
+  return 'm4a'
 }
 
 /**
@@ -860,36 +981,75 @@ export function handoffToTask(
   return task
 }
 
+function mediaExtraHeaders(
+  captured: Record<string, string> | undefined,
+  origin: string | undefined
+): Record<string, string> | undefined {
+  const extra = { ...(captured ?? {}) }
+  delete extra.cookie
+  delete extra.referer
+  delete extra['user-agent']
+  delete extra.authorization
+  if (origin && !extra.origin) extra.origin = origin
+  return Object.keys(extra).length > 0 ? extra : undefined
+}
+
+function logMediaCapture(candidate: MediaCandidate): void {
+  const host = new URL(candidate.mediaUrl).hostname
+  const names = Object.keys(candidate.headers.extra ?? {}).sort()
+  if (candidate.headers.authorization) names.push('authorization')
+  log.info(
+    `captured ${candidate.type} media from ${host}` +
+      `${candidate.height ? ` (${candidate.height}p)` : ''}; ` +
+      `cookies=${candidate.headers.cookie ? 'yes' : 'no'}, headers=${names.join(',') || 'none'}`
+  )
+}
+
 export function recordMedia(
   ctx: AppContext,
   message: {
     pageUrl: string
     pageTitle: string
     mediaUrl: string
+    relatedMediaUrls?: string[]
     audioUrl?: string | null
     variants?: any[]
     subtitles?: Array<{ url: string; label: string; language: string | null; format: 'vtt' | 'srt' | 'ttml' }>
     kind: 'hls' | 'dash' | 'file'
+    width?: number | null
+    height?: number | null
     referer?: string
+    origin?: string
     cookie?: string
     userAgent?: string
+    extraHeaders?: Record<string, string>
   }
 ): MediaCandidate {
   const existing = ctx.media.find((m) => m.mediaUrl === message.mediaUrl)
   if (existing) {
-    if (message.variants && message.variants.length > 0) {
-      existing.pageUrl = message.pageUrl
-      existing.pageTitle = message.pageTitle
-      existing.type = message.kind
-      existing.variants = message.variants
-      existing.headers = {
-        referer: message.referer,
-        cookie: message.cookie,
-        userAgent: message.userAgent
-      }
-      existing.subtitles = message.subtitles ?? existing.subtitles
-      existing.discoveredAt = Date.now()
+    // The same signed manifest is often sent again after an extension reload.
+    // Refresh its browser context even when the message carries no prebuilt
+    // quality ladder; otherwise a candidate that first arrived with the wrong
+    // top-page referer remains permanently stuck on 403.
+    existing.pageUrl = message.pageUrl
+    existing.pageTitle = message.pageTitle
+    existing.type = message.kind
+    existing.relatedMediaUrls = message.relatedMediaUrls ?? existing.relatedMediaUrls ?? []
+    existing.width = message.width ?? existing.width ?? null
+    existing.height = message.height ?? existing.height ?? null
+    // A new page inventory may contain qualities/audio that were not present
+    // when this URL was first resolved. Rebuild the ladder on every handoff.
+    existing.variants = message.variants && message.variants.length > 0 ? message.variants : []
+    existing.headers = {
+      referer: message.referer,
+      cookie: message.cookie,
+      userAgent: message.userAgent,
+      authorization: message.extraHeaders?.authorization,
+      extra: mediaExtraHeaders(message.extraHeaders, message.origin)
     }
+    existing.subtitles = message.subtitles ?? existing.subtitles
+    existing.discoveredAt = Date.now()
+    logMediaCapture(existing)
     return existing
   }
 
@@ -898,12 +1058,17 @@ export function recordMedia(
     pageUrl: message.pageUrl,
     pageTitle: message.pageTitle,
     mediaUrl: message.mediaUrl,
+    relatedMediaUrls: message.relatedMediaUrls ?? [],
     type: message.kind,
+    width: message.width ?? null,
+    height: message.height ?? null,
     variants: message.variants || [],
     headers: {
       referer: message.referer,
       cookie: message.cookie,
-      userAgent: message.userAgent
+      userAgent: message.userAgent,
+      authorization: message.extraHeaders?.authorization,
+      extra: mediaExtraHeaders(message.extraHeaders, message.origin)
     },
     subtitles: message.subtitles ?? [],
     discoveredAt: Date.now()
@@ -913,6 +1078,8 @@ export function recordMedia(
   // Bounded: a long browsing session would otherwise accumulate every stream
   // the user ever scrolled past.
   if (ctx.media.length > 100) ctx.media.length = 100
+
+  logMediaCapture(candidate)
 
   return candidate
 }

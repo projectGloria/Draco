@@ -3,6 +3,7 @@ import type {
   ColumnId,
   ColumnPref,
   DownloadTask,
+  MediaAudioTrack,
   MediaCandidate,
   MediaVariant,
   Queue,
@@ -268,6 +269,7 @@ export function sanitizeTasks(input: unknown, defaultDir: string): DownloadTask[
     const filename = sanitizeFilename(filenameSource)
     const finalUrl = validDownloadUrl(raw.finalUrl) ?? url
     const audioUrl = validUrl(raw.audioUrl) ?? null
+    const audioTracks = sanitizeAudioTracks(raw.audioTracks)
     const youtube = sanitizeYouTube(raw.youtube)
     const segments = sanitizeSegments(raw.segments, size)
 
@@ -279,6 +281,7 @@ export function sanitizeTasks(input: unknown, defaultDir: string): DownloadTask[
       groupName: optionalText(raw.groupName, 160) ?? undefined,
       groupFolder: optionalText(raw.groupFolder, 120) ?? undefined,
       audioUrl,
+      audioTracks,
       ...(youtube ? { youtube } : {}),
       finalUrl,
       filename,
@@ -296,7 +299,10 @@ export function sanitizeTasks(input: unknown, defaultDir: string): DownloadTask[
       resumable: raw.resumable === true,
       singleConnectionFallback: raw.singleConnectionFallback === true,
       segments,
-      connections: clamp(raw.connections, 1, 16, 1),
+      // Same ceiling as maxConnectionsPerTask/adaptiveConnectionCeiling. At 16
+      // a restored task that had been running wider under-reported its own
+      // connection count.
+      connections: clamp(raw.connections, 1, 64, 1),
       speed: typeof raw.speed === 'number' && Number.isFinite(raw.speed) && raw.speed >= 0 ? raw.speed : 0,
       eta: safeNonNegativeInt(raw.eta),
       error: optionalText(raw.error, 10_000),
@@ -461,6 +467,25 @@ function sanitizeSubtitles(input: unknown): SubtitleTrack[] {
   return out
 }
 
+function sanitizeAudioTracks(input: unknown): MediaAudioTrack[] {
+  if (!Array.isArray(input)) return []
+  const out: MediaAudioTrack[] = []
+  const seen = new Set<string>()
+  for (const raw of input.slice(0, 16)) {
+    if (!isRecord(raw)) continue
+    const url = validUrl(raw.url)
+    if (!url || seen.has(url)) continue
+    seen.add(url)
+    out.push({
+      url,
+      label: typeof raw.label === 'string' ? raw.label.slice(0, 100) : '',
+      language: optionalText(raw.language, 35),
+      isDefault: raw.isDefault === true
+    })
+  }
+  return out
+}
+
 function sanitizeVariants(input: unknown): MediaVariant[] {
   if (!Array.isArray(input)) return []
   const out: MediaVariant[] = []
@@ -482,9 +507,11 @@ function sanitizeVariants(input: unknown): MediaVariant[] {
     const url = validUrl(raw.url) ?? (youtube && raw.url === '' ? '' : null)
     if (url === null) continue
     const audioUrl = validUrl(raw.audioUrl)
+    const audioTracks = sanitizeAudioTracks(raw.audioTracks)
     out.push({
       url,
       audioUrl,
+      audioTracks,
       label: typeof raw.label === 'string' ? raw.label.slice(0, 200) : '',
       height: typeof raw.height === 'number' && Number.isSafeInteger(raw.height) && raw.height >= 0 ? raw.height : null,
       bandwidth: typeof raw.bandwidth === 'number' && Number.isSafeInteger(raw.bandwidth) && raw.bandwidth >= 0 ? raw.bandwidth : null,

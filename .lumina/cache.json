@@ -1,0 +1,969 @@
+{
+  "version": 4,
+  "notes": {
+    "reports/2026-09-05/codebase-review.md": {
+      "path": "reports/2026-09-05/codebase-review.md",
+      "title": "Draco codebase review",
+      "aliases": [],
+      "mtime": 1788626231835.3557,
+      "createdAt": 1788626214299.4226,
+      "wordCount": 1823,
+      "headings": [
+        {
+          "level": 1,
+          "text": "Draco codebase review",
+          "line": 0
+        },
+        {
+          "level": 2,
+          "text": "Verification",
+          "line": 8
+        },
+        {
+          "level": 2,
+          "text": "Findings",
+          "line": 18
+        },
+        {
+          "level": 3,
+          "text": "P1 — Shared temporary filenames let one task delete or resume another task's partial",
+          "line": 20
+        },
+        {
+          "level": 3,
+          "text": "P1 — A short or corrupted partial can be promoted to a complete file",
+          "line": 30
+        },
+        {
+          "level": 3,
+          "text": "P1 — Resource changes after probe can produce a mixed, corrupt output",
+          "line": 40
+        },
+        {
+          "level": 3,
+          "text": "P1 — Torrent setup failures escape                         and strand the manager slot",
+          "line": 50
+        },
+        {
+          "level": 3,
+          "text": "P1 — Pausing a torrent does not release its manager slot, so Resume does not restart it",
+          "line": 58
+        },
+        {
+          "level": 3,
+          "text": "P1 — A one-time queue's pending completion action is not cancelled when new work appears",
+          "line": 68
+        },
+        {
+          "level": 3,
+          "text": "P2 — Private IPv4-mapped IPv6 addresses bypass the takeover SSRF check",
+          "line": 78
+        },
+        {
+          "level": 3,
+          "text": "P2 — Malformed but JSON-valid journals load       progress into the task list",
+          "line": 88
+        },
+        {
+          "level": 3,
+          "text": "P2 — Site-grabber temporary HTML can leak when post-crawl materialization fails",
+          "line": 98
+        },
+        {
+          "level": 3,
+          "text": "P2 — Proxy changes retain every old Undici dispatcher until process shutdown",
+          "line": 106
+        },
+        {
+          "level": 3,
+          "text": "P2 — Antivirus status is briefly published as “done” before scanning completes",
+          "line": 114
+        },
+        {
+          "level": 2,
+          "text": "Improvements and hardening priorities",
+          "line": 122
+        },
+        {
+          "level": 2,
+          "text": "Suggested delivery order",
+          "line": 132
+        }
+      ],
+      "tags": [],
+      "links": [
+        {
+          "from": "reports/2026-09-05/codebase-review.md",
+          "target": "./reproduce.mjs",
+          "to": null,
+          "alias": "reproduce.mjs",
+          "line": 6,
+          "context": "This review is against the current working tree, which is dirty and contains an earlier audit plus fixes. I did not change application code. I added [reproduce.mjs](./reproduce.mjs), an isolated evidence script that uses only OS temporary directories and loopback HTTP fixtures.",
+          "kind": "link"
+        },
+        {
+          "from": "reports/2026-09-05/codebase-review.md",
+          "target": "../../src/main/engine/workspace.ts:28",
+          "to": null,
+          "alias": "workspace.ts:28",
+          "line": 22,
+          "context": "Refs: [workspace.ts:28](../../src/main/engine/workspace.ts:28), [workspace.ts:43](../../src/main/engine/workspace.ts:43), [manager.ts:298](../../src/main/engine/manager.ts:298), [task.ts:156](../../src/main/engine/task.ts:156)",
+          "kind": "link"
+        },
+        {
+          "from": "reports/2026-09-05/codebase-review.md",
+          "target": "../../src/main/engine/workspace.ts:43",
+          "to": null,
+          "alias": "workspace.ts:43",
+          "line": 22,
+          "context": "Refs: [workspace.ts:28](../../src/main/engine/workspace.ts:28), [workspace.ts:43](../../src/main/engine/workspace.ts:43), [manager.ts:298](../../src/main/engine/manager.ts:298), [task.ts:156](../../src/main/engine/task.ts:156)",
+          "kind": "link"
+        },
+        {
+          "from": "reports/2026-09-05/codebase-review.md",
+          "target": "../../src/main/engine/manager.ts:298",
+          "to": null,
+          "alias": "manager.ts:298",
+          "line": 22,
+          "context": "Refs: [workspace.ts:28](../../src/main/engine/workspace.ts:28), [workspace.ts:43](../../src/main/engine/workspace.ts:43), [manager.ts:298](../../src/main/engine/manager.ts:298), [task.ts:156](../../src/main/engine/task.ts:156)",
+          "kind": "link"
+        },
+        {
+          "from": "reports/2026-09-05/codebase-review.md",
+          "target": "../../src/main/engine/task.ts:156",
+          "to": null,
+          "alias": "task.ts:156",
+          "line": 22,
+          "context": "Refs: [workspace.ts:28](../../src/main/engine/workspace.ts:28), [workspace.ts:43](../../src/main/engine/workspace.ts:43), [manager.ts:298](../../src/main/engine/manager.ts:298), [task.ts:156](../../src/main/engine/task.ts:156)",
+          "kind": "link"
+        },
+        {
+          "from": "reports/2026-09-05/codebase-review.md",
+          "target": "../../src/main/engine/task.ts:453",
+          "to": null,
+          "alias": "task.ts:453",
+          "line": 32,
+          "context": "Refs: [task.ts:453](../../src/main/engine/task.ts:453), [journal.ts:118](../../src/main/engine/journal.ts:118)",
+          "kind": "link"
+        },
+        {
+          "from": "reports/2026-09-05/codebase-review.md",
+          "target": "../../src/main/engine/journal.ts:118",
+          "to": null,
+          "alias": "journal.ts:118",
+          "line": 32,
+          "context": "Refs: [task.ts:453](../../src/main/engine/task.ts:453), [journal.ts:118](../../src/main/engine/journal.ts:118)",
+          "kind": "link"
+        },
+        {
+          "from": "reports/2026-09-05/codebase-review.md",
+          "target": "../../src/main/engine/journal.ts:82",
+          "to": null,
+          "alias": "journal.ts:82",
+          "line": 42,
+          "context": "Refs: [journal.ts:82](../../src/main/engine/journal.ts:82), [task.ts:453](../../src/main/engine/task.ts:453), [worker.ts:154](../../src/main/engine/worker.ts:154)",
+          "kind": "link"
+        },
+        {
+          "from": "reports/2026-09-05/codebase-review.md",
+          "target": "../../src/main/engine/task.ts:453",
+          "to": null,
+          "alias": "task.ts:453",
+          "line": 42,
+          "context": "Refs: [journal.ts:82](../../src/main/engine/journal.ts:82), [task.ts:453](../../src/main/engine/task.ts:453), [worker.ts:154](../../src/main/engine/worker.ts:154)",
+          "kind": "link"
+        },
+        {
+          "from": "reports/2026-09-05/codebase-review.md",
+          "target": "../../src/main/engine/worker.ts:154",
+          "to": null,
+          "alias": "worker.ts:154",
+          "line": 42,
+          "context": "Refs: [journal.ts:82](../../src/main/engine/journal.ts:82), [task.ts:453](../../src/main/engine/task.ts:453), [worker.ts:154](../../src/main/engine/worker.ts:154)",
+          "kind": "link"
+        },
+        {
+          "from": "reports/2026-09-05/codebase-review.md",
+          "target": "../../src/main/engine/torrent.ts:57",
+          "to": null,
+          "alias": "torrent.ts:57",
+          "line": 52,
+          "context": "Refs: [torrent.ts:57](../../src/main/engine/torrent.ts:57), [manager.ts:443](../../src/main/engine/manager.ts:443)",
+          "kind": "link"
+        },
+        {
+          "from": "reports/2026-09-05/codebase-review.md",
+          "target": "../../src/main/engine/manager.ts:443",
+          "to": null,
+          "alias": "manager.ts:443",
+          "line": 52,
+          "context": "Refs: [torrent.ts:57](../../src/main/engine/torrent.ts:57), [manager.ts:443](../../src/main/engine/manager.ts:443)",
+          "kind": "link"
+        },
+        {
+          "from": "reports/2026-09-05/codebase-review.md",
+          "target": "../../src/main/engine/torrent.ts:156",
+          "to": null,
+          "alias": "torrent.ts:156",
+          "line": 60,
+          "context": "Refs: [torrent.ts:156](../../src/main/engine/torrent.ts:156), [manager.ts:258](../../src/main/engine/manager.ts:258), [manager.ts:326](../../src/main/engine/manager.ts:326)",
+          "kind": "link"
+        },
+        {
+          "from": "reports/2026-09-05/codebase-review.md",
+          "target": "../../src/main/engine/manager.ts:258",
+          "to": null,
+          "alias": "manager.ts:258",
+          "line": 60,
+          "context": "Refs: [torrent.ts:156](../../src/main/engine/torrent.ts:156), [manager.ts:258](../../src/main/engine/manager.ts:258), [manager.ts:326](../../src/main/engine/manager.ts:326)",
+          "kind": "link"
+        },
+        {
+          "from": "reports/2026-09-05/codebase-review.md",
+          "target": "../../src/main/engine/manager.ts:326",
+          "to": null,
+          "alias": "manager.ts:326",
+          "line": 60,
+          "context": "Refs: [torrent.ts:156](../../src/main/engine/torrent.ts:156), [manager.ts:258](../../src/main/engine/manager.ts:258), [manager.ts:326](../../src/main/engine/manager.ts:326)",
+          "kind": "link"
+        },
+        {
+          "from": "reports/2026-09-05/codebase-review.md",
+          "target": "../../src/main/queue/scheduler.ts:224",
+          "to": null,
+          "alias": "scheduler.ts:224",
+          "line": 70,
+          "context": "Refs: [scheduler.ts:224](../../src/main/queue/scheduler.ts:224), [scheduler.ts:271](../../src/main/queue/scheduler.ts:271), [scheduler.ts:336](../../src/main/queue/scheduler.ts:336)",
+          "kind": "link"
+        },
+        {
+          "from": "reports/2026-09-05/codebase-review.md",
+          "target": "../../src/main/queue/scheduler.ts:271",
+          "to": null,
+          "alias": "scheduler.ts:271",
+          "line": 70,
+          "context": "Refs: [scheduler.ts:224](../../src/main/queue/scheduler.ts:224), [scheduler.ts:271](../../src/main/queue/scheduler.ts:271), [scheduler.ts:336](../../src/main/queue/scheduler.ts:336)",
+          "kind": "link"
+        },
+        {
+          "from": "reports/2026-09-05/codebase-review.md",
+          "target": "../../src/main/queue/scheduler.ts:336",
+          "to": null,
+          "alias": "scheduler.ts:336",
+          "line": 70,
+          "context": "Refs: [scheduler.ts:224](../../src/main/queue/scheduler.ts:224), [scheduler.ts:271](../../src/main/queue/scheduler.ts:271), [scheduler.ts:336](../../src/main/queue/scheduler.ts:336)",
+          "kind": "link"
+        },
+        {
+          "from": "reports/2026-09-05/codebase-review.md",
+          "target": "../../src/main/engine/create.ts:154",
+          "to": null,
+          "alias": "create.ts:154",
+          "line": 80,
+          "context": "Refs: [create.ts:154](../../src/main/engine/create.ts:154), [index.ts:561](../../src/main/index.ts:561), [index.ts:747](../../src/main/index.ts:747)",
+          "kind": "link"
+        },
+        {
+          "from": "reports/2026-09-05/codebase-review.md",
+          "target": "../../src/main/index.ts:561",
+          "to": null,
+          "alias": "index.ts:561",
+          "line": 80,
+          "context": "Refs: [create.ts:154](../../src/main/engine/create.ts:154), [index.ts:561](../../src/main/index.ts:561), [index.ts:747](../../src/main/index.ts:747)",
+          "kind": "link"
+        },
+        {
+          "from": "reports/2026-09-05/codebase-review.md",
+          "target": "../../src/main/index.ts:747",
+          "to": null,
+          "alias": "index.ts:747",
+          "line": 80,
+          "context": "Refs: [create.ts:154](../../src/main/engine/create.ts:154), [index.ts:561](../../src/main/index.ts:561), [index.ts:747](../../src/main/index.ts:747)",
+          "kind": "link"
+        },
+        {
+          "from": "reports/2026-09-05/codebase-review.md",
+          "target": "../../src/main/engine/journal.ts:49",
+          "to": null,
+          "alias": "journal.ts:49",
+          "line": 90,
+          "context": "Refs: [journal.ts:49](../../src/main/engine/journal.ts:49), [manager.ts:822](../../src/main/engine/manager.ts:822)",
+          "kind": "link"
+        },
+        {
+          "from": "reports/2026-09-05/codebase-review.md",
+          "target": "../../src/main/engine/manager.ts:822",
+          "to": null,
+          "alias": "manager.ts:822",
+          "line": 90,
+          "context": "Refs: [journal.ts:49](../../src/main/engine/journal.ts:49), [manager.ts:822](../../src/main/engine/manager.ts:822)",
+          "kind": "link"
+        },
+        {
+          "from": "reports/2026-09-05/codebase-review.md",
+          "target": "../../src/main/site-grabber/projects.ts:76",
+          "to": null,
+          "alias": "projects.ts:76",
+          "line": 100,
+          "context": "Refs: [projects.ts:76](../../src/main/site-grabber/projects.ts:76), [projects.ts:96](../../src/main/site-grabber/projects.ts:96), [projects.ts:116](../../src/main/site-grabber/projects.ts:116)",
+          "kind": "link"
+        },
+        {
+          "from": "reports/2026-09-05/codebase-review.md",
+          "target": "../../src/main/site-grabber/projects.ts:96",
+          "to": null,
+          "alias": "projects.ts:96",
+          "line": 100,
+          "context": "Refs: [projects.ts:76](../../src/main/site-grabber/projects.ts:76), [projects.ts:96](../../src/main/site-grabber/projects.ts:96), [projects.ts:116](../../src/main/site-grabber/projects.ts:116)",
+          "kind": "link"
+        },
+        {
+          "from": "reports/2026-09-05/codebase-review.md",
+          "target": "../../src/main/site-grabber/projects.ts:116",
+          "to": null,
+          "alias": "projects.ts:116",
+          "line": 100,
+          "context": "Refs: [projects.ts:76](../../src/main/site-grabber/projects.ts:76), [projects.ts:96](../../src/main/site-grabber/projects.ts:96), [projects.ts:116](../../src/main/site-grabber/projects.ts:116)",
+          "kind": "link"
+        },
+        {
+          "from": "reports/2026-09-05/codebase-review.md",
+          "target": "../../src/main/engine/http.ts:17",
+          "to": null,
+          "alias": "http.ts:17",
+          "line": 108,
+          "context": "Refs: [http.ts:17](../../src/main/engine/http.ts:17), [http.ts:21](../../src/main/engine/http.ts:21), [http.ts:55](../../src/main/engine/http.ts:55)",
+          "kind": "link"
+        },
+        {
+          "from": "reports/2026-09-05/codebase-review.md",
+          "target": "../../src/main/engine/http.ts:21",
+          "to": null,
+          "alias": "http.ts:21",
+          "line": 108,
+          "context": "Refs: [http.ts:17](../../src/main/engine/http.ts:17), [http.ts:21](../../src/main/engine/http.ts:21), [http.ts:55](../../src/main/engine/http.ts:55)",
+          "kind": "link"
+        },
+        {
+          "from": "reports/2026-09-05/codebase-review.md",
+          "target": "../../src/main/engine/http.ts:55",
+          "to": null,
+          "alias": "http.ts:55",
+          "line": 108,
+          "context": "Refs: [http.ts:17](../../src/main/engine/http.ts:17), [http.ts:21](../../src/main/engine/http.ts:21), [http.ts:55](../../src/main/engine/http.ts:55)",
+          "kind": "link"
+        },
+        {
+          "from": "reports/2026-09-05/codebase-review.md",
+          "target": "../../src/main/engine/task.ts:741",
+          "to": null,
+          "alias": "task.ts:741",
+          "line": 116,
+          "context": "Refs: [task.ts:741](../../src/main/engine/task.ts:741), [manager.ts:468](../../src/main/engine/manager.ts:468)",
+          "kind": "link"
+        },
+        {
+          "from": "reports/2026-09-05/codebase-review.md",
+          "target": "../../src/main/engine/manager.ts:468",
+          "to": null,
+          "alias": "manager.ts:468",
+          "line": 116,
+          "context": "Refs: [task.ts:741](../../src/main/engine/task.ts:741), [manager.ts:468](../../src/main/engine/manager.ts:468)",
+          "kind": "link"
+        }
+      ],
+      "frontmatter": {},
+      "excerpt": "Draco codebase review Date: 2026-09-05 Revision reviewed: 1259ae053ab28ce5ac717b029c0ec103c3e23f91 Scope: src/main, src/preload, src/renderer, extension, host, tools, and tests. This review is against the current working"
+    },
+    "AGENTS.md": {
+      "path": "AGENTS.md",
+      "title": "Repository Guidelines",
+      "aliases": [],
+      "mtime": 1788617241269.76,
+      "createdAt": 1788617241269.76,
+      "wordCount": 399,
+      "headings": [
+        {
+          "level": 1,
+          "text": "Repository Guidelines",
+          "line": 0
+        },
+        {
+          "level": 2,
+          "text": "Project Structure & Module Organization",
+          "line": 2
+        },
+        {
+          "level": 2,
+          "text": "Build, Test, and Development Commands",
+          "line": 14
+        },
+        {
+          "level": 2,
+          "text": "Coding Style & Naming Conventions",
+          "line": 27
+        },
+        {
+          "level": 2,
+          "text": "Testing Guidelines",
+          "line": 33
+        },
+        {
+          "level": 2,
+          "text": "Commit & Pull Request Guidelines",
+          "line": 37
+        },
+        {
+          "level": 2,
+          "text": "Security & Configuration",
+          "line": 41
+        }
+      ],
+      "tags": [],
+      "links": [],
+      "frontmatter": {},
+      "excerpt": "Repository Guidelines Project Structure & Module Organization Draco is a Windows-focused Electron download manager built with TypeScript, React, Zustand, and Tailwind CSS. src/main/: download engine, scheduling, persiste"
+    },
+    "AUDIT.md": {
+      "path": "AUDIT.md",
+      "title": "Draco — code audit",
+      "aliases": [],
+      "mtime": 1788536623433.1318,
+      "createdAt": 1788534033488.4897,
+      "wordCount": 4301,
+      "headings": [
+        {
+          "level": 1,
+          "text": "Draco — code audit",
+          "line": 0
+        },
+        {
+          "level": 2,
+          "text": "The headline",
+          "line": 12
+        },
+        {
+          "level": 2,
+          "text": "A. Broken at runtime",
+          "line": 24
+        },
+        {
+          "level": 3,
+          "text": "A-1 ·                           throws in the packaged bundle *[verified]*",
+          "line": 26
+        },
+        {
+          "level": 3,
+          "text": "A-2 · Four settings are read from disk, shown in the UI, and never reach the engine",
+          "line": 47
+        },
+        {
+          "level": 2,
+          "text": "B. Bugs",
+          "line": 71
+        },
+        {
+          "level": 3,
+          "text": "B-1 · Partial downloads are written to one directory and cleaned up from another",
+          "line": 73
+        },
+        {
+          "level": 3,
+          "text": "B-2 · Every completed download is copied rather than renamed when temp and destination are on different volumes",
+          "line": 90
+        },
+        {
+          "level": 3,
+          "text": "B-3 · Plain YouTube tasks cannot refresh an expired media URL",
+          "line": 98
+        },
+        {
+          "level": 3,
+          "text": "B-4 · A periodic queue re-fires its completion action forever",
+          "line": 120
+        },
+        {
+          "level": 3,
+          "text": "B-5 ·                    loses the destination and half the task's metadata",
+          "line": 141
+        },
+        {
+          "level": 3,
+          "text": "B-6 · Two forced journal flushes can race over a shared        path",
+          "line": 151
+        },
+        {
+          "level": 3,
+          "text": "B-7 · Cat mode (once A-2 is fixed) has several problems of its own",
+          "line": 168
+        },
+        {
+          "level": 3,
+          "text": "B-8 · The Go host's log rotation was written as a constant and never implemented *[verified]*",
+          "line": 179
+        },
+        {
+          "level": 3,
+          "text": "B-9 ·              children can rename themselves out from under the mux",
+          "line": 192
+        },
+        {
+          "level": 3,
+          "text": "B-10 · Smaller correctness notes",
+          "line": 202
+        },
+        {
+          "level": 2,
+          "text": "C. Build, packaging and tooling",
+          "line": 214
+        },
+        {
+          "level": 3,
+          "text": "C-1 ·               and                                     cannot load *[verified]*",
+          "line": 216
+        },
+        {
+          "level": 3,
+          "text": "C-2 ·              is created inside the install directory *[verified]*",
+          "line": 235
+        },
+        {
+          "level": 3,
+          "text": "C-3 · Packaging config is duplicated and inconsistent",
+          "line": 253
+        },
+        {
+          "level": 3,
+          "text": "C-4 ·                      is a build output with no clean guarantee",
+          "line": 259
+        },
+        {
+          "level": 2,
+          "text": "D. Security and privacy",
+          "line": 265
+        },
+        {
+          "level": 3,
+          "text": "D-1 · Session cookies for every download are persisted in plaintext, indefinitely",
+          "line": 269
+        },
+        {
+          "level": 3,
+          "text": "D-2 · The ffmpeg fallback source is unverified",
+          "line": 275
+        },
+        {
+          "level": 3,
+          "text": "D-3 · A failed antivirus scan is advisory only",
+          "line": 279
+        },
+        {
+          "level": 3,
+          "text": "D-4 · No SSRF guard on takeover URLs",
+          "line": 283
+        },
+        {
+          "level": 3,
+          "text": "D-5 ·                            exposes deleted disk contents",
+          "line": 287
+        },
+        {
+          "level": 2,
+          "text": "E. Performance",
+          "line": 293
+        },
+        {
+          "level": 3,
+          "text": "E-1 · \"Download all links\" spawns one host process per link",
+          "line": 295
+        },
+        {
+          "level": 3,
+          "text": "E-2 ·                  serializes every queue twice, every 30 seconds",
+          "line": 301
+        },
+        {
+          "level": 3,
+          "text": "E-3 ·                   runs on every",
+          "line": 307
+        },
+        {
+          "level": 3,
+          "text": "E-4 · The site grabber blocks its IPC call for the whole crawl",
+          "line": 311
+        },
+        {
+          "level": 2,
+          "text": "F. Design and completeness",
+          "line": 317
+        },
+        {
+          "level": 2,
+          "text": "Suggested order",
+          "line": 330
+        },
+        {
+          "level": 2,
+          "text": "What changed",
+          "line": 342
+        },
+        {
+          "level": 3,
+          "text": "New module",
+          "line": 346
+        },
+        {
+          "level": 3,
+          "text": "Per finding",
+          "line": 350
+        },
+        {
+          "level": 3,
+          "text": "Also found while fixing",
+          "line": 380
+        },
+        {
+          "level": 3,
+          "text": "Deliberately not done",
+          "line": 384
+        }
+      ],
+      "tags": [],
+      "links": [
+        {
+          "from": "AUDIT.md",
+          "target": "src/main/index.ts:380",
+          "to": null,
+          "alias": "                       ",
+          "line": 28,
+          "context": "[`src/main/index.ts:380`](src/main/index.ts:380), [`src/main/ipc.ts:628`](src/main/ipc.ts:628)",
+          "kind": "link"
+        },
+        {
+          "from": "AUDIT.md",
+          "target": "src/main/ipc.ts:628",
+          "to": null,
+          "alias": "                     ",
+          "line": 28,
+          "context": "[`src/main/index.ts:380`](src/main/index.ts:380), [`src/main/ipc.ts:628`](src/main/ipc.ts:628)",
+          "kind": "link"
+        },
+        {
+          "from": "AUDIT.md",
+          "target": "src/main/index.ts:163",
+          "to": null,
+          "alias": "                       ",
+          "line": 49,
+          "context": "[`src/main/index.ts:163`](src/main/index.ts:163)",
+          "kind": "link"
+        },
+        {
+          "from": "AUDIT.md",
+          "target": "src/main/engine/task.ts:156",
+          "to": null,
+          "alias": "             ",
+          "line": 75,
+          "context": "- Written: [`task.ts:156`](src/main/engine/task.ts:156) — `this.config.tempDir || this.task.dir`, and `tempDir` is always supplied (`manager.ts:361`, `:413`).",
+          "kind": "link"
+        },
+        {
+          "from": "AUDIT.md",
+          "target": "src/main/engine/manager.ts:267",
+          "to": null,
+          "alias": "                ",
+          "line": 76,
+          "context": "- Deleted: [`manager.ts:267`](src/main/engine/manager.ts:267) — `join(task.dir, task.filename + '.dracodl')`",
+          "kind": "link"
+        },
+        {
+          "from": "AUDIT.md",
+          "target": "src/main/engine/manager.ts:772",
+          "to": null,
+          "alias": "                ",
+          "line": 77,
+          "context": "- Reconciled: [`manager.ts:772`](src/main/engine/manager.ts:772) — `readJournal(join(task.dir, …))`",
+          "kind": "link"
+        },
+        {
+          "from": "AUDIT.md",
+          "target": "src/main/index.ts:231",
+          "to": null,
+          "alias": "              ",
+          "line": 84,
+          "context": "Note the asymmetry that hides this: `createHlsRunner` at [`index.ts:231`](src/main/index.ts:231) does **not** pass `tempDir`, so HLS parts land in `task.dir` and *are* cleaned up correctly. Only the plain-file path is broken.",
+          "kind": "link"
+        },
+        {
+          "from": "AUDIT.md",
+          "target": "src/main/engine/naming.ts",
+          "to": null,
+          "alias": "           ",
+          "line": 92,
+          "context": "`.dracoTemp` lives on the install volume; downloads usually go to the user's chosen drive. `moveFile` ([`naming.ts`](src/main/engine/naming.ts)) correctly falls back to copy-and-delete on `EXDEV`, so a 40 GB download is read and rewritten in full after it finishes — minutes of disk time, and it needs 2× the space transiently.",
+          "kind": "link"
+        },
+        {
+          "from": "AUDIT.md",
+          "target": "src/main/engine/manager.ts:412",
+          "to": null,
+          "alias": "                    ",
+          "line": 100,
+          "context": "[`manager.ts:412–422`](src/main/engine/manager.ts:412)",
+          "kind": "link"
+        },
+        {
+          "from": "AUDIT.md",
+          "target": "src/main/queue/scheduler.ts:255",
+          "to": null,
+          "alias": "                      ",
+          "line": 122,
+          "context": "[`scheduler.ts:255–262`](src/main/queue/scheduler.ts:255)",
+          "kind": "link"
+        },
+        {
+          "from": "AUDIT.md",
+          "target": "src/main/ipc.ts:444",
+          "to": null,
+          "alias": "            ",
+          "line": 143,
+          "context": "[`ipc.ts:444`](src/main/ipc.ts:444)",
+          "kind": "link"
+        },
+        {
+          "from": "AUDIT.md",
+          "target": "src/main/engine/journal.ts:33",
+          "to": null,
+          "alias": "               ",
+          "line": 153,
+          "context": "[`journal.ts:33`](src/main/engine/journal.ts:33) uses a fixed `path + '.tmp'`. [`task.ts:742`](src/main/engine/task.ts:742):",
+          "kind": "link"
+        },
+        {
+          "from": "AUDIT.md",
+          "target": "src/main/engine/task.ts:742",
+          "to": null,
+          "alias": "             ",
+          "line": 153,
+          "context": "[`journal.ts:33`](src/main/engine/journal.ts:33) uses a fixed `path + '.tmp'`. [`task.ts:742`](src/main/engine/task.ts:742):",
+          "kind": "link"
+        },
+        {
+          "from": "AUDIT.md",
+          "target": "src/main/engine/manager.ts:557",
+          "to": null,
+          "alias": "                    ",
+          "line": 170,
+          "context": "[`manager.ts:557–661`](src/main/engine/manager.ts:557). Currently unreachable, so these are latent:",
+          "kind": "link"
+        },
+        {
+          "from": "AUDIT.md",
+          "target": "host/main.go:48",
+          "to": null,
+          "alias": "                 ",
+          "line": 181,
+          "context": "[`host/main.go:48`](host/main.go:48)",
+          "kind": "link"
+        },
+        {
+          "from": "AUDIT.md",
+          "target": "src/main/hls/dash.ts:60",
+          "to": null,
+          "alias": "                   ",
+          "line": 194,
+          "context": "[`hls/dash.ts:60–75`](src/main/hls/dash.ts:60)",
+          "kind": "link"
+        },
+        {
+          "from": "AUDIT.md",
+          "target": "src/main/engine/naming.ts",
+          "to": null,
+          "alias": "           ",
+          "line": 204,
+          "context": "- **`uniquePath` is TOCTOU.** ([`naming.ts`](src/main/engine/naming.ts)) Two tasks finishing at the same instant can both be handed the same free path; the second `moveFile` overwrites the first.",
+          "kind": "link"
+        },
+        {
+          "from": "AUDIT.md",
+          "target": "src/main/engine/task.ts",
+          "to": null,
+          "alias": "         ",
+          "line": 206,
+          "context": "- **`pumpUntilDone` has an unreachable `break`** ([`task.ts`](src/main/engine/task.ts)): the preceding `if (!segmenter.complete) throw` makes it dead.",
+          "kind": "link"
+        },
+        {
+          "from": "AUDIT.md",
+          "target": "src/main/engine/worker.ts:33",
+          "to": null,
+          "alias": "                 ",
+          "line": 207,
+          "context": "- **The `ServerBusyError` docblock sits above `HttpStatusError`** ([`worker.ts:33–41`](src/main/engine/worker.ts:33)) — the comment describes the class below it, not the one it is attached to.",
+          "kind": "link"
+        },
+        {
+          "from": "AUDIT.md",
+          "target": "src/renderer/index.html",
+          "to": null,
+          "alias": "            ",
+          "line": 209,
+          "context": "- **`icons.ts`' docblock claims the CSP is `img-src 'self' data:`**, but [`index.html`](src/renderer/index.html) actually sends `img-src 'self' data: https:`. Either tighten the CSP (nothing needs remote images — every icon arrives as a data URL) or fix the comment.",
+          "kind": "link"
+        },
+        {
+          "from": "AUDIT.md",
+          "target": "extension/background.js",
+          "to": null,
+          "alias": "                         ",
+          "line": 210,
+          "context": "- **Chrome's `storage.onChanged` handler drops the dedupe/cap** that `prefsReady` applies to `excludedChannelIds`/`excludedVideoIds` ([`extension/background.js`](extension/background.js)), so the in-memory copy can exceed the bounds the initial load enforces.",
+          "kind": "link"
+        },
+        {
+          "from": "AUDIT.md",
+          "target": "src/main/bootstrap/paths.ts:56",
+          "to": null,
+          "alias": "                       ",
+          "line": 237,
+          "context": "[`bootstrap/paths.ts:56`](src/main/bootstrap/paths.ts:56)",
+          "kind": "link"
+        },
+        {
+          "from": "AUDIT.md",
+          "target": "src/main/hls/ffmpeg.ts",
+          "to": null,
+          "alias": "               ",
+          "line": 277,
+          "context": "[`hls/ffmpeg.ts`](src/main/hls/ffmpeg.ts) — the gyan.dev source carries `sha256Url` and is checked. The BtbN GitHub fallback has none, so a ~170 MB binary is downloaded and executed on TLS trust alone. GitHub publishes checksums for those releases; wire them up, or drop the fallback.",
+          "kind": "link"
+        },
+        {
+          "from": "AUDIT.md",
+          "target": "src/main/engine/manager.ts",
+          "to": null,
+          "alias": "            ",
+          "line": 281,
+          "context": "[`manager.ts`](src/main/engine/manager.ts) — when `scanFile` rejects (which is how a scanner reports a detection), the file is already renamed to its final name and the task is already `done`. All that happens is `task.detail` gets a sentence. Nothing quarantines, deletes, or marks the task as failed. If this is intentional the comment should say so; if not, a non-zero scanner exit should at minimum move the file aside and set `status: 'error'`.",
+          "kind": "link"
+        },
+        {
+          "from": "AUDIT.md",
+          "target": "src/main/engine/create.ts",
+          "to": null,
+          "alias": "           ",
+          "line": 285,
+          "context": "`validateUrl` ([`create.ts`](src/main/engine/create.ts)) accepts any `http(s)` URL, including `127.0.0.1`, RFC1918 addresses and `.local`. A page can invoke the extension's link-click path with such a URL and have Draco fetch it with browser-supplied cookies. Low severity for a download manager — the response only lands in a file — but the extension is explicitly an untrusted input path, and a private-address denylist is a few lines.",
+          "kind": "link"
+        },
+        {
+          "from": "AUDIT.md",
+          "target": "src/main/engine/preallocate.ts",
+          "to": null,
+          "alias": "                ",
+          "line": 289,
+          "context": "Documented honestly in [`preallocate.ts`](src/main/engine/preallocate.ts), so this is a note rather than a finding: on an elevated run, unwritten regions of a `.dracodl` contain whatever the previous tenant of those clusters left. If a download is abandoned partway, that data sits readable in the part file. Worth a line in the user-facing docs.",
+          "kind": "link"
+        },
+        {
+          "from": "AUDIT.md",
+          "target": "extension/background.js",
+          "to": null,
+          "alias": "                         ",
+          "line": 297,
+          "context": "`sendUrls` in [`extension/background.js`](extension/background.js) loops `await callHost(...)` per URL, and `chrome.runtime.sendNativeMessage` starts a **fresh `draco-host.exe`** for each call. Two hundred links is two hundred sequential process launches, two hundred pipe connections, and two hundred appends to the unrotated `host.log` (B-8).",
+          "kind": "link"
+        },
+        {
+          "from": "AUDIT.md",
+          "target": "src/main/queue/scheduler.ts:160",
+          "to": null,
+          "alias": "                      ",
+          "line": 303,
+          "context": "[`scheduler.ts:160,171`](src/main/queue/scheduler.ts:160) — `JSON.stringify(this.queues)` before and after, purely to detect change. Cheap today; it scales with `taskIds`, which grows with the download list.",
+          "kind": "link"
+        },
+        {
+          "from": "AUDIT.md",
+          "target": "extension/background.js",
+          "to": null,
+          "alias": "                         ",
+          "line": 309,
+          "context": "[`extension/background.js`](extension/background.js) — that event fires several times per navigation, and each call reaches `stateForTab` → `pageIdentity` → `chrome.scripting.executeScript` in the MAIN world (for YouTube URLs). `refreshAllTabs` does it for every open tab at once. Debounce per tab.",
+          "kind": "link"
+        }
+      ],
+      "frontmatter": {},
+      "excerpt": "Draco — code audit Date: 2026-09-04 · Commit 1259ae0 · Scope: src/main, src/preload, src/renderer, extension/, host/, tools/, tests/ How this was verified. Every file in src/, extension/, host/ and tools/ was read. Claim"
+    },
+    "CLAUDE.md": {
+      "path": "CLAUDE.md",
+      "title": "CLAUDE.md",
+      "aliases": [],
+      "mtime": 1788536641498.0127,
+      "createdAt": 1788533470388.7908,
+      "wordCount": 1195,
+      "headings": [
+        {
+          "level": 1,
+          "text": "CLAUDE.md",
+          "line": 0
+        },
+        {
+          "level": 2,
+          "text": "Commands",
+          "line": 4
+        },
+        {
+          "level": 2,
+          "text": "Architecture",
+          "line": 32
+        },
+        {
+          "level": 3,
+          "text": "Browser bridge",
+          "line": 42
+        },
+        {
+          "level": 3,
+          "text": "Download engine (                  )",
+          "line": 52
+        },
+        {
+          "level": 3,
+          "text": "Renderer",
+          "line": 75
+        },
+        {
+          "level": 3,
+          "text": "Persistence",
+          "line": 79
+        },
+        {
+          "level": 3,
+          "text": "External tools",
+          "line": 85
+        },
+        {
+          "level": 2,
+          "text": "Conventions",
+          "line": 89
+        },
+        {
+          "level": 2,
+          "text": "Untrusted input",
+          "line": 99
+        },
+        {
+          "level": 2,
+          "text": "Build config",
+          "line": 103
+        }
+      ],
+      "tags": [],
+      "links": [],
+      "frontmatter": {},
+      "excerpt": "CLAUDE.md This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository. Commands Run a single test file: Drive the engine headlessly, without Electron or any UI (prints the live s"
+    }
+  },
+  "search": "{\"documentCount\":4,\"nextId\":8,\"documentIds\":{\"3\":\"AUDIT.md\",\"5\":\"CLAUDE.md\",\"6\":\"reports/2026-09-05/codebase-review.md\",\"7\":\"AGENTS.md\"},\"fieldIds\":{\"title\":0,\"tags\":1,\"body\":2},\"fieldLength\":{\"3\":[3,1,1632],\"5\":[2,1,738],\"6\":[3,1,861],\"7\":[2,1,248]},\"averageFieldLength\":[2.5,1,869.75],\"storedFields\":{\"3\":{\"title\":\"Draco — code audit\"},\"5\":{\"title\":\"CLAUDE.md\"},\"6\":{\"title\":\"Draco codebase review\"},\"7\":{\"title\":\"Repository Guidelines\"}},\"dirtCount\":4,\"index\":[[\"<feature>\",{\"2\":{\"7\":1}}],[\"<task\",{\"2\":{\"6\":1}}],[\"<url>\",{\"2\":{\"0\":1,\"4\":1,\"5\":1}}],[\"to\",{\"2\":{\"0\":11,\"1\":40,\"2\":40,\"3\":47,\"4\":15,\"5\":15,\"6\":15,\"7\":1}}],[\"torrent\",{\"2\":{\"0\":1,\"1\":1,\"2\":1,\"3\":1,\"4\":1,\"5\":1,\"6\":11}}],[\"token\",{\"2\":{\"0\":1,\"4\":1,\"5\":1}}],[\"touches\",{\"2\":{\"0\":1,\"4\":1,\"5\":1}}],[\"top\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"toctou\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"today\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"toggling\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"together\",{\"2\":{\"1\":1,\"2\":1,\"3\":1,\"7\":1}}],[\"total\",{\"2\":{\"3\":1}}],[\"tools\",{\"2\":{\"0\":2,\"4\":2,\"5\":2}}],[\"tooling\",{\"2\":{\"1\":1,\"2\":1,\"3\":1,\"7\":1}}],[\"too\",{\"2\":{\"3\":1}}],[\"the\",{\"2\":{\"0\":47,\"1\":191,\"2\":194,\"3\":250,\"4\":58,\"5\":58,\"6\":100,\"7\":5}}],[\"them\",{\"2\":{\"0\":2,\"1\":4,\"2\":4,\"3\":5,\"4\":2,\"5\":2,\"6\":1}}],[\"themselves\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"there\",{\"2\":{\"0\":1,\"1\":4,\"2\":4,\"3\":4,\"4\":1,\"5\":1}}],[\"therefore\",{\"2\":{\"0\":1,\"4\":1,\"5\":1,\"6\":4}}],[\"then\",{\"2\":{\"0\":1,\"1\":5,\"2\":5,\"3\":5,\"4\":1,\"5\":1,\"6\":6,\"7\":1}}],[\"they\",{\"2\":{\"0\":1,\"1\":6,\"2\":6,\"3\":6,\"4\":2,\"5\":2,\"6\":1}}],[\"their\",{\"2\":{\"1\":3,\"2\":3,\"3\":5,\"4\":1,\"5\":1}}],[\"these\",{\"2\":{\"1\":2,\"2\":2,\"3\":2,\"6\":2}}],[\"than\",{\"2\":{\"0\":4,\"1\":8,\"2\":8,\"3\":13,\"4\":5,\"5\":5,\"6\":5}}],[\"that\",{\"2\":{\"0\":3,\"1\":25,\"2\":26,\"3\":34,\"4\":4,\"5\":4,\"6\":13}}],[\"threshold\",{\"2\":{\"7\":1}}],[\"three\",{\"2\":{\"0\":1,\"1\":1,\"2\":1,\"3\":1,\"4\":1,\"5\":1}}],[\"through\",{\"2\":{\"0\":1,\"1\":4,\"2\":4,\"3\":7,\"4\":1,\"5\":1,\"6\":3,\"7\":1}}],[\"throws\",{\"2\":{\"0\":1,\"1\":4,\"2\":4,\"3\":4,\"4\":1,\"5\":1,\"6\":1}}],[\"throw\",{\"2\":{\"1\":2,\"2\":2,\"3\":2}}],[\"throw`\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"this\",{\"2\":{\"0\":3,\"1\":28,\"2\":27,\"3\":29,\"4\":4,\"5\":4,\"6\":6}}],[\"things\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"thorough\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"those\",{\"2\":{\"1\":2,\"2\":2,\"3\":2,\"4\":1,\"5\":1,\"6\":1}}],[\"typechecking\",{\"2\":{\"7\":1}}],[\"typechecks\",{\"2\":{\"6\":1}}],[\"typecheck\",{\"2\":{\"0\":2,\"1\":1,\"2\":1,\"3\":1,\"4\":2,\"5\":2,\"6\":1,\"7\":1}}],[\"typecheck`\",{\"2\":{\"0\":1,\"1\":1,\"2\":1,\"3\":2,\"4\":1,\"5\":1,\"6\":1,\"7\":1}}],[\"types\",{\"2\":{\"0\":3,\"1\":1,\"4\":4,\"5\":4,\"6\":2,\"7\":3}}],[\"typescript\",{\"2\":{\"1\":2,\"2\":2,\"3\":2,\"7\":5}}],[\"type\",{\"2\":{\"0\":1,\"1\":2,\"2\":2,\"3\":3,\"4\":1,\"5\":1}}],[\"type`\",{\"2\":{\"0\":1,\"4\":1,\"5\":1,\"7\":1}}],[\"typed\",{\"2\":{\"3\":1}}],[\"tsc\",{\"2\":{\"0\":1,\"4\":1,\"5\":1}}],[\"tsconfig\",{\"2\":{\"0\":2,\"4\":2,\"5\":2}}],[\"ts\",{\"2\":{\"0\":1,\"1\":52,\"2\":52,\"3\":53,\"4\":1,\"5\":1,\"6\":60}}],[\"ts`\",{\"2\":{\"0\":35,\"1\":27,\"2\":27,\"3\":33,\"4\":36,\"5\":36,\"7\":4}}],[\"tsx`\",{\"2\":{\"0\":1,\"4\":1,\"5\":1}}],[\"tsx\",{\"2\":{\"1\":4,\"2\":4,\"3\":4}}],[\"tailwind\",{\"2\":{\"0\":1,\"4\":1,\"5\":1,\"7\":1}}],[\"task\",{\"2\":{\"0\":6,\"1\":29,\"2\":29,\"3\":34,\"4\":7,\"5\":7,\"6\":30}}],[\"tasks\",{\"2\":{\"1\":4,\"2\":4,\"3\":6,\"6\":4}}],[\"taskrunner\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"talks\",{\"2\":{\"0\":1,\"4\":1,\"5\":1}}],[\"takeover\",{\"2\":{\"0\":1,\"1\":1,\"2\":1,\"3\":1,\"4\":1,\"5\":1,\"6\":1}}],[\"takes\",{\"2\":{\"0\":1,\"1\":1,\"2\":1,\"3\":3,\"4\":1,\"5\":1}}],[\"take\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"target\",{\"2\":{\"0\":1,\"1\":2,\"2\":2,\"3\":2,\"4\":1,\"5\":1}}],[\"targeted\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"table\",{\"2\":{\"0\":1,\"4\":1,\"5\":1}}],[\"tab\",{\"2\":{\"1\":2,\"2\":2,\"3\":4}}],[\"tcp\",{\"2\":{\"0\":1,\"4\":1,\"5\":1}}],[\"test\",{\"2\":{\"0\":8,\"1\":8,\"2\":6,\"3\":10,\"4\":9,\"5\":9,\"6\":4,\"7\":7}}],[\"tests\",{\"2\":{\"0\":4,\"1\":1,\"3\":2,\"4\":5,\"5\":5,\"6\":5,\"7\":7}}],[\"test`\",{\"2\":{\"0\":2,\"1\":3,\"2\":4,\"3\":6,\"4\":2,\"5\":2,\"6\":1,\"7\":2}}],[\"testing\",{\"2\":{\"0\":1,\"4\":1,\"5\":1,\"7\":1}}],[\"temporary\",{\"2\":{\"6\":6}}],[\"temp\",{\"2\":{\"0\":3,\"1\":10,\"2\":10,\"3\":11,\"4\":3,\"5\":3,\"6\":2}}],[\"tempdir\",{\"2\":{\"1\":2,\"2\":2,\"3\":3}}],[\"terse\",{\"2\":{\"0\":1,\"4\":1,\"5\":1,\"7\":1}}],[\"terminal\",{\"2\":{\"1\":2,\"2\":2,\"3\":2,\"6\":3}}],[\"tens\",{\"2\":{\"1\":2,\"2\":2,\"3\":2}}],[\"tenant\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"teardown\",{\"2\":{\"3\":1}}],[\"time\",{\"2\":{\"0\":1,\"1\":4,\"2\":4,\"3\":7,\"4\":2,\"5\":2,\"6\":3}}],[\"timeout\",{\"2\":{\"0\":1,\"1\":1,\"2\":1,\"3\":1,\"4\":1,\"5\":1,\"6\":1}}],[\"timer\",{\"2\":{\"1\":1,\"2\":1,\"3\":2}}],[\"timers\",{\"2\":{\"3\":1}}],[\"times\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"tick\",{\"2\":{\"1\":2,\"2\":2,\"3\":3}}],[\"tick`\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"tighter\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"tighten\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"tightened\",{\"2\":{\"3\":1}}],[\"treat\",{\"2\":{\"6\":1,\"7\":1}}],[\"treats\",{\"2\":{\"6\":1}}],[\"trees\",{\"2\":{\"6\":1}}],[\"tree\",{\"2\":{\"1\":1,\"2\":1,\"3\":1,\"6\":1}}],[\"tracks\",{\"2\":{\"6\":1}}],[\"traces\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"tray\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"transiently\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"transitively\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"transitions\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"transfer\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"translated\",{\"2\":{\"3\":1}}],[\"travels\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"truncated\",{\"2\":{\"6\":1}}],[\"truncates\",{\"2\":{\"1\":1,\"2\":1,\"3\":1,\"6\":1}}],[\"truth\",{\"2\":{\"0\":1,\"4\":1,\"5\":1}}],[\"true\",{\"2\":{\"1\":1,\"2\":1,\"3\":1,\"6\":1}}],[\"true`\",{\"2\":{\"1\":4,\"2\":4,\"3\":4,\"6\":2}}],[\"trusting\",{\"2\":{\"1\":1}}],[\"trust\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"trigger\",{\"2\":{\"3\":1}}],[\"t\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"tmp`\",{\"2\":{\"1\":1,\"2\":1,\"3\":2}}],[\"tmp\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"tls\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"two\",{\"2\":{\"0\":1,\"1\":11,\"2\":11,\"3\":13,\"4\":1,\"5\":1,\"6\":4,\"7\":1}}],[\"twice\",{\"2\":{\"1\":1,\"2\":1,\"3\":2}}],[\"turkish\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"txt`\",{\"2\":{\"1\":1,\"2\":1,\"3\":2}}],[\"css\",{\"2\":{\"7\":1}}],[\"csp\",{\"2\":{\"1\":3,\"2\":3,\"3\":4}}],[\"current\",{\"2\":{\"6\":3}}],[\"currently\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"coding\",{\"2\":{\"7\":1}}],[\"code\",{\"0\":{\"1\":1,\"2\":1,\"3\":1},\"2\":{\"0\":3,\"1\":4,\"2\":3,\"3\":3,\"4\":3,\"5\":3,\"6\":2}}],[\"codebase\",{\"0\":{\"6\":1},\"2\":{\"0\":1,\"1\":1,\"2\":1,\"3\":1,\"4\":1,\"5\":1,\"6\":1}}],[\"corrupted\",{\"2\":{\"6\":1}}],[\"corrupt\",{\"2\":{\"6\":3}}],[\"correct\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"correctly\",{\"2\":{\"1\":2,\"2\":2,\"3\":2,\"6\":1}}],[\"correctness\",{\"2\":{\"1\":2,\"2\":2,\"3\":2,\"6\":1}}],[\"corrected\",{\"2\":{\"2\":1,\"3\":2}}],[\"correction\",{\"2\":{\"2\":1,\"3\":1}}],[\"coverage\",{\"2\":{\"7\":1}}],[\"covered\",{\"2\":{\"6\":1}}],[\"cover\",{\"2\":{\"6\":1}}],[\"covers\",{\"2\":{\"0\":1,\"1\":1,\"2\":1,\"3\":1,\"4\":1,\"5\":1}}],[\"conn\",{\"2\":{\"0\":1,\"4\":1,\"5\":1}}],[\"connection\",{\"2\":{\"0\":1,\"1\":1,\"2\":1,\"3\":1,\"4\":1,\"5\":1}}],[\"connections\",{\"2\":{\"0\":2,\"1\":1,\"2\":1,\"3\":1,\"4\":2,\"5\":2,\"6\":1}}],[\"contract\",{\"2\":{\"6\":1}}],[\"contradicts\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"controlled\",{\"2\":{\"6\":1}}],[\"contaminate\",{\"2\":{\"6\":1}}],[\"containing\",{\"2\":{\"6\":1}}],[\"contains\",{\"2\":{\"1\":2,\"2\":2,\"3\":2,\"6\":1}}],[\"contain\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"continue\",{\"2\":{\"0\":1,\"4\":1,\"5\":1}}],[\"content\",{\"2\":{\"0\":2,\"4\":2,\"5\":2,\"6\":1}}],[\"contents\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"contextisolation\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"context\",{\"2\":{\"1\":5,\"2\":5,\"3\":6}}],[\"conclusive\",{\"2\":{\"6\":1}}],[\"concise\",{\"2\":{\"0\":1,\"4\":1,\"5\":1}}],[\"concurrent\",{\"2\":{\"0\":1,\"1\":1,\"2\":1,\"3\":1,\"4\":1,\"5\":1,\"6\":1}}],[\"concurrency\",{\"2\":{\"3\":1}}],[\"confirm\",{\"2\":{\"0\":1,\"4\":1,\"5\":1}}],[\"confirmed\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"configuration\",{\"2\":{\"7\":1}}],[\"configured\",{\"2\":{\"1\":2,\"2\":2,\"3\":2,\"7\":2}}],[\"config\",{\"2\":{\"0\":1,\"1\":4,\"2\":4,\"3\":6,\"4\":2,\"5\":2}}],[\"console\",{\"2\":{\"0\":1,\"4\":1,\"5\":1}}],[\"const\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"construction\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"constant\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"constants\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"consequences\",{\"2\":{\"1\":3,\"2\":3,\"3\":3}}],[\"considering\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"consume\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"conventions\",{\"2\":{\"0\":1,\"4\":1,\"5\":1,\"7\":1}}],[\"convention\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"committed\",{\"2\":{\"0\":1,\"4\":1,\"5\":1}}],[\"commit\",{\"2\":{\"0\":2,\"1\":4,\"2\":4,\"3\":4,\"4\":2,\"5\":2,\"7\":2}}],[\"commits\",{\"2\":{\"0\":1,\"4\":1,\"5\":1,\"7\":1}}],[\"comments\",{\"2\":{\"0\":2,\"1\":1,\"2\":1,\"3\":1,\"4\":2,\"5\":2}}],[\"comment\",{\"2\":{\"1\":4,\"2\":4,\"3\":5}}],[\"commands\",{\"2\":{\"0\":1,\"4\":1,\"5\":1,\"7\":1}}],[\"command\",{\"2\":{\"2\":1,\"3\":1}}],[\"comes\",{\"2\":{\"0\":1,\"4\":1,\"5\":1}}],[\"compile\",{\"2\":{\"7\":1}}],[\"compiles\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"compatible\",{\"2\":{\"7\":1}}],[\"compatibility\",{\"2\":{\"0\":1,\"4\":1,\"5\":1}}],[\"compare\",{\"2\":{\"6\":1}}],[\"components\",{\"2\":{\"0\":1,\"1\":1,\"2\":1,\"3\":1,\"4\":1,\"5\":1,\"7\":2}}],[\"component\",{\"2\":{\"0\":1,\"4\":1,\"5\":1,\"7\":1}}],[\"compounding\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"completion\",{\"2\":{\"1\":4,\"2\":4,\"3\":5,\"6\":6}}],[\"completed\",{\"2\":{\"1\":2,\"2\":2,\"3\":2,\"6\":2}}],[\"complete\",{\"2\":{\"1\":1,\"2\":1,\"3\":1,\"6\":4}}],[\"completeness\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"completes\",{\"2\":{\"3\":1,\"6\":1}}],[\"complaint\",{\"2\":{\"3\":1}}],[\"coalesced\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"copy\",{\"2\":{\"0\":2,\"1\":3,\"2\":3,\"3\":3,\"4\":3,\"5\":3}}],[\"copied\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"costs\",{\"2\":{\"0\":1,\"1\":1,\"2\":1,\"3\":1,\"4\":1,\"5\":1}}],[\"cost\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"counted\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"coupling\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"could\",{\"2\":{\"1\":1,\"2\":1,\"3\":2}}],[\"cookies\",{\"2\":{\"1\":4,\"2\":4,\"3\":5,\"4\":1,\"5\":1}}],[\"cookie\",{\"2\":{\"1\":2,\"2\":2,\"3\":2}}],[\"cookie`\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"collision\",{\"2\":{\"6\":1}}],[\"collected\",{\"2\":{\"3\":1}}],[\"cold\",{\"2\":{\"0\":1,\"3\":1,\"4\":1,\"5\":1}}],[\"column\",{\"2\":{\"3\":1}}],[\"callback\",{\"2\":{\"6\":2}}],[\"call\",{\"2\":{\"0\":1,\"1\":4,\"2\":4,\"3\":4,\"4\":2,\"5\":2,\"6\":2}}],[\"calls\",{\"2\":{\"1\":5,\"2\":5,\"3\":6,\"6\":2}}],[\"callhost\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"canonicalizes\",{\"2\":{\"6\":1}}],[\"can\",{\"2\":{\"0\":2,\"1\":11,\"2\":11,\"3\":11,\"4\":3,\"5\":3,\"6\":12}}],[\"cannot\",{\"2\":{\"1\":3,\"2\":3,\"3\":5,\"6\":6}}],[\"cancel\",{\"2\":{\"1\":1,\"2\":1,\"3\":1,\"6\":1}}],[\"cancels\",{\"2\":{\"3\":1}}],[\"cancellation\",{\"2\":{\"6\":4}}],[\"cancellable\",{\"2\":{\"3\":1}}],[\"cancelled\",{\"2\":{\"1\":1,\"2\":1,\"3\":1,\"6\":1}}],[\"cases\",{\"2\":{\"6\":1}}],[\"case\",{\"2\":{\"0\":1,\"4\":1,\"5\":1,\"7\":1}}],[\"catch\",{\"2\":{\"6\":2}}],[\"catch`\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"category\",{\"2\":{\"0\":1,\"1\":1,\"2\":1,\"3\":1,\"4\":1,\"5\":1}}],[\"cat\",{\"2\":{\"1\":4,\"2\":4,\"3\":5}}],[\"card\",{\"2\":{\"0\":1,\"4\":1,\"5\":1}}],[\"carries\",{\"2\":{\"1\":3,\"2\":3,\"3\":6}}],[\"carrying\",{\"2\":{\"3\":1}}],[\"capability\",{\"2\":{\"0\":1,\"4\":1,\"5\":1}}],[\"cap\",{\"2\":{\"1\":1,\"2\":1,\"3\":1,\"6\":2}}],[\"cache\",{\"2\":{\"1\":1,\"2\":1,\"3\":2}}],[\"cause\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"camelcase\",{\"2\":{\"7\":1}}],[\"came\",{\"2\":{\"2\":1,\"3\":1}}],[\"chromium\",{\"2\":{\"7\":1}}],[\"chrome\",{\"2\":{\"0\":5,\"1\":2,\"2\":2,\"3\":2,\"4\":5,\"5\":5}}],[\"choose\",{\"2\":{\"0\":1,\"4\":1,\"5\":1}}],[\"chosen\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"channel\",{\"2\":{\"0\":2,\"1\":1,\"2\":1,\"3\":2,\"4\":2,\"5\":2}}],[\"changing\",{\"2\":{\"0\":1,\"4\":1,\"5\":1,\"6\":1,\"7\":1}}],[\"changes\",{\"2\":{\"0\":1,\"1\":1,\"2\":1,\"3\":1,\"4\":1,\"5\":1,\"6\":6,\"7\":3}}],[\"change\",{\"2\":{\"1\":1,\"2\":1,\"3\":2,\"6\":5}}],[\"changed\",{\"2\":{\"2\":1,\"3\":2}}],[\"chain\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"charges\",{\"2\":{\"3\":1}}],[\"children\",{\"2\":{\"1\":2,\"2\":2,\"3\":3}}],[\"child\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"checksum\",{\"2\":{\"6\":2}}],[\"checksums\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"checks\",{\"2\":{\"6\":3}}],[\"check\",{\"2\":{\"0\":3,\"1\":3,\"2\":3,\"3\":4,\"4\":2,\"5\":2,\"6\":2,\"7\":1}}],[\"checkdiskspace\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"checked\",{\"2\":{\"1\":1,\"2\":1,\"3\":1,\"6\":1}}],[\"cheapest\",{\"2\":{\"1\":2,\"2\":2,\"3\":2}}],[\"cheap\",{\"2\":{\"1\":1,\"2\":1,\"3\":2}}],[\"claude\",{\"0\":{\"0\":1,\"4\":1,\"5\":1},\"2\":{\"0\":3,\"4\":3,\"5\":3}}],[\"class\",{\"2\":{\"1\":1,\"2\":1,\"3\":3,\"6\":1}}],[\"claiming\",{\"2\":{\"6\":1}}],[\"claims\",{\"2\":{\"1\":2,\"2\":2,\"3\":3}}],[\"claim\",{\"2\":{\"2\":1,\"3\":1}}],[\"claimed\",{\"2\":{\"2\":1,\"3\":1,\"6\":1}}],[\"clamps\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"clamp\",{\"2\":{\"3\":1}}],[\"cluster\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"clusters\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"cleanup\",{\"2\":{\"6\":5}}],[\"cleanly\",{\"2\":{\"6\":2}}],[\"clean\",{\"2\":{\"0\":1,\"1\":2,\"2\":2,\"3\":3,\"4\":1,\"5\":1,\"6\":1}}],[\"cleaned\",{\"2\":{\"1\":2,\"2\":2,\"3\":2}}],[\"cleans\",{\"2\":{\"3\":1,\"6\":1}}],[\"clears\",{\"2\":{\"6\":1}}],[\"cleared\",{\"2\":{\"1\":2,\"2\":2,\"3\":3}}],[\"clear\",{\"2\":{\"1\":1,\"2\":1,\"3\":1,\"6\":3}}],[\"closed\",{\"2\":{\"6\":1}}],[\"close\",{\"2\":{\"6\":3}}],[\"closes\",{\"2\":{\"6\":1}}],[\"clobber\",{\"2\":{\"0\":1,\"4\":1,\"5\":1}}],[\"clones\",{\"2\":{\"1\":2,\"2\":2,\"3\":2}}],[\"client\",{\"2\":{\"6\":3}}],[\"climb\",{\"2\":{\"0\":1,\"1\":1,\"2\":1,\"3\":1,\"4\":1,\"5\":1}}],[\"click\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"c\",{\"2\":{\"1\":11,\"2\":11,\"3\":15}}],[\"cycle\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"cjs\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"ci`\",{\"2\":{\"7\":1}}],[\"ci\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"cross\",{\"2\":{\"6\":2}}],[\"crash\",{\"2\":{\"0\":1,\"4\":1,\"5\":1}}],[\"crawler\",{\"2\":{\"6\":3}}],[\"crawling\",{\"2\":{\"6\":1}}],[\"crawl\",{\"2\":{\"1\":3,\"2\":3,\"3\":7,\"6\":1}}],[\"creation\",{\"2\":{\"6\":2}}],[\"creates\",{\"2\":{\"6\":1}}],[\"created\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"create\",{\"2\":{\"1\":1,\"2\":1,\"3\":1,\"6\":2}}],[\"create`\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"credentials\",{\"2\":{\"3\":1}}],[\"centralize\",{\"2\":{\"6\":1}}],[\"centralised\",{\"2\":{\"3\":1}}],[\"ceiling\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"cdn\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"cd\",{\"2\":{\"4\":1,\"5\":1}}],[\"with\",{\"2\":{\"0\":6,\"1\":25,\"2\":23,\"3\":31,\"4\":8,\"5\":8,\"6\":12,\"7\":6}}],[\"without\",{\"2\":{\"0\":2,\"1\":4,\"2\":3,\"3\":3,\"4\":2,\"5\":2,\"6\":2}}],[\"win\",{\"2\":{\"0\":1,\"4\":1,\"5\":1}}],[\"windows\",{\"2\":{\"0\":2,\"1\":4,\"2\":3,\"3\":4,\"4\":2,\"5\":2,\"7\":4}}],[\"window\",{\"2\":{\"0\":3,\"1\":6,\"2\":6,\"3\":7,\"4\":3,\"5\":3}}],[\"wins\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"wire\",{\"2\":{\"0\":1,\"1\":1,\"2\":1,\"3\":1,\"4\":1,\"5\":1}}],[\"wired\",{\"2\":{\"1\":2,\"2\":2,\"3\":4,\"4\":1,\"5\":1}}],[\"wires\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"wiping\",{\"2\":{\"1\":2,\"2\":2,\"3\":2}}],[\"will\",{\"2\":{\"1\":1,\"2\":1,\"3\":1,\"6\":1}}],[\"what\",{\"2\":{\"0\":2,\"1\":2,\"2\":3,\"3\":6,\"4\":2,\"5\":2}}],[\"whatever\",{\"2\":{\"1\":4,\"2\":4,\"3\":4,\"4\":1,\"5\":1}}],[\"when\",{\"2\":{\"0\":1,\"1\":6,\"2\":6,\"3\":8,\"4\":2,\"5\":2,\"6\":8,\"7\":1}}],[\"where\",{\"2\":{\"0\":2,\"1\":3,\"2\":3,\"3\":4,\"4\":2,\"5\":2}}],[\"whose\",{\"2\":{\"6\":2}}],[\"whole\",{\"2\":{\"0\":1,\"1\":4,\"2\":4,\"3\":6,\"4\":2,\"5\":2}}],[\"whoever\",{\"2\":{\"0\":2,\"4\":2,\"5\":2}}],[\"why\",{\"2\":{\"0\":1,\"1\":4,\"2\":4,\"3\":5,\"4\":1,\"5\":1}}],[\"whichever\",{\"2\":{\"0\":1,\"4\":1,\"5\":1}}],[\"which\",{\"2\":{\"1\":10,\"2\":11,\"3\":16,\"4\":2,\"5\":2,\"6\":3}}],[\"while\",{\"2\":{\"1\":6,\"2\":5,\"3\":6,\"6\":4}}],[\"wrap\",{\"2\":{\"6\":1}}],[\"wrapper\",{\"2\":{\"0\":1,\"4\":1,\"5\":1}}],[\"written\",{\"2\":{\"0\":3,\"1\":5,\"2\":5,\"3\":5,\"4\":3,\"5\":3}}],[\"writable\",{\"2\":{\"0\":1,\"1\":1,\"2\":1,\"3\":1,\"4\":1,\"5\":1}}],[\"writes\",{\"2\":{\"0\":2,\"1\":3,\"2\":3,\"3\":3,\"4\":2,\"5\":2,\"6\":1}}],[\"write\",{\"2\":{\"0\":1,\"1\":1,\"2\":1,\"3\":1,\"4\":1,\"5\":1}}],[\"wrong\",{\"2\":{\"1\":3,\"2\":5,\"3\":5}}],[\"would\",{\"2\":{\"0\":1,\"1\":1,\"2\":1,\"3\":1,\"4\":1,\"5\":1}}],[\"working\",{\"2\":{\"0\":1,\"4\":1,\"5\":1,\"6\":1}}],[\"work\",{\"2\":{\"0\":1,\"1\":2,\"2\":2,\"3\":4,\"4\":1,\"5\":1,\"6\":5}}],[\"worker\",{\"2\":{\"0\":1,\"1\":1,\"2\":1,\"3\":1,\"4\":1,\"5\":1,\"6\":3}}],[\"workers\",{\"2\":{\"0\":1,\"4\":1,\"5\":1}}],[\"works\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"workspace\",{\"2\":{\"3\":4,\"4\":1,\"5\":1,\"6\":4}}],[\"worth\",{\"2\":{\"0\":1,\"1\":3,\"2\":3,\"3\":4,\"4\":1,\"5\":1}}],[\"worse\",{\"2\":{\"1\":1}}],[\"world\",{\"2\":{\"1\":2,\"2\":2,\"3\":2}}],[\"web\",{\"2\":{\"0\":2,\"4\":3,\"5\":3}}],[\"webtorrent\",{\"2\":{\"0\":1,\"4\":1,\"5\":1,\"6\":3}}],[\"were\",{\"2\":{\"1\":2,\"2\":2,\"3\":2}}],[\"well\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"weight\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"was\",{\"2\":{\"0\":1,\"1\":4,\"2\":8,\"3\":11,\"4\":1,\"5\":1}}],[\"wasn\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"watch\",{\"2\":{\"1\":2,\"2\":2,\"3\":2}}],[\"way\",{\"2\":{\"1\":3,\"2\":3,\"3\":3}}],[\"waits\",{\"2\":{\"3\":2}}],[\"r7\",{\"2\":{\"6\":1}}],[\"r6\",{\"2\":{\"6\":1}}],[\"r5\",{\"2\":{\"6\":1}}],[\"r4\",{\"2\":{\"6\":1}}],[\"r3\",{\"2\":{\"6\":1}}],[\"r2\",{\"2\":{\"6\":1}}],[\"r1\",{\"2\":{\"6\":1}}],[\"reusable\",{\"2\":{\"7\":1}}],[\"reuse\",{\"2\":{\"6\":1}}],[\"rebinding\",{\"2\":{\"6\":1}}],[\"rebuilt\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"revision\",{\"2\":{\"6\":1}}],[\"reviewed\",{\"2\":{\"6\":1}}],[\"review\",{\"0\":{\"6\":1},\"2\":{\"6\":2}}],[\"relevant\",{\"2\":{\"7\":2}}],[\"releases\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"release\",{\"2\":{\"4\":1,\"5\":1,\"6\":3,\"7\":1}}],[\"reload\",{\"2\":{\"0\":1,\"4\":1,\"5\":1,\"7\":1}}],[\"relays\",{\"2\":{\"0\":1,\"4\":2,\"5\":2}}],[\"relative\",{\"2\":{\"0\":1,\"4\":1,\"5\":1}}],[\"related\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"reappears\",{\"2\":{\"6\":1}}],[\"reason\",{\"2\":{\"0\":1,\"4\":1,\"5\":1}}],[\"reactivated\",{\"2\":{\"6\":1}}],[\"react\",{\"2\":{\"0\":2,\"4\":2,\"5\":2,\"7\":2}}],[\"reaches\",{\"2\":{\"0\":1,\"1\":3,\"2\":3,\"3\":3,\"4\":1,\"5\":1,\"6\":1}}],[\"reachable\",{\"2\":{\"0\":1,\"4\":1,\"5\":1}}],[\"reaching\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"reach\",{\"2\":{\"1\":1,\"2\":1,\"3\":3,\"4\":1,\"5\":1}}],[\"real\",{\"2\":{\"0\":1,\"3\":1,\"4\":1,\"5\":1,\"6\":2}}],[\"really\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"reading\",{\"2\":{\"0\":1,\"2\":1,\"3\":1,\"4\":1,\"5\":1}}],[\"read\",{\"2\":{\"1\":5,\"2\":5,\"3\":5,\"6\":1}}],[\"reads\",{\"2\":{\"1\":4,\"2\":4,\"3\":4}}],[\"readable\",{\"2\":{\"1\":2,\"2\":2,\"3\":2}}],[\"renderer\",{\"2\":{\"0\":6,\"1\":2,\"2\":2,\"3\":2,\"4\":6,\"5\":6,\"6\":1,\"7\":5}}],[\"renderers\",{\"2\":{\"0\":1,\"4\":1,\"5\":1,\"7\":1}}],[\"renderer`\",{\"2\":{\"1\":1,\"2\":1,\"3\":1,\"6\":1}}],[\"rename\",{\"2\":{\"0\":2,\"1\":3,\"2\":3,\"3\":4,\"4\":3,\"5\":3,\"6\":1}}],[\"renamed\",{\"2\":{\"1\":2,\"2\":2,\"3\":3,\"6\":1}}],[\"renames\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"result\",{\"2\":{\"6\":2}}],[\"resulting\",{\"2\":{\"6\":2}}],[\"resumed\",{\"2\":{\"6\":4}}],[\"resume\",{\"2\":{\"0\":2,\"1\":3,\"2\":3,\"3\":3,\"4\":2,\"5\":2,\"6\":4,\"7\":1}}],[\"restores\",{\"2\":{\"6\":1}}],[\"restore\",{\"2\":{\"0\":1,\"3\":1,\"4\":2,\"5\":2}}],[\"restored\",{\"2\":{\"1\":4,\"2\":4,\"3\":4}}],[\"rest\",{\"2\":{\"1\":1,\"2\":1,\"3\":1,\"6\":1}}],[\"restarted\",{\"2\":{\"6\":1}}],[\"restarting\",{\"2\":{\"6\":1}}],[\"restart\",{\"2\":{\"6\":2}}],[\"restarts\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"restating\",{\"2\":{\"0\":1,\"4\":1,\"5\":1}}],[\"resolution\",{\"2\":{\"6\":1}}],[\"resolve\",{\"2\":{\"6\":1}}],[\"resolves\",{\"2\":{\"1\":1,\"2\":1,\"3\":1,\"6\":2}}],[\"resource\",{\"2\":{\"0\":1,\"4\":1,\"5\":1,\"6\":3}}],[\"resources\",{\"2\":{\"0\":2,\"4\":2,\"5\":2,\"6\":3}}],[\"resourcespath`\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"resourceroot\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"response\",{\"2\":{\"1\":1,\"2\":1,\"3\":1,\"6\":2}}],[\"respects\",{\"2\":{\"3\":1}}],[\"resets\",{\"2\":{\"0\":1,\"1\":1,\"2\":1,\"3\":2,\"4\":1,\"5\":1,\"6\":1}}],[\"reset\",{\"2\":{\"1\":1,\"2\":1,\"3\":1,\"6\":2}}],[\"reserves\",{\"2\":{\"3\":1}}],[\"requires\",{\"2\":{\"0\":1,\"4\":1,\"5\":1}}],[\"required\",{\"2\":{\"0\":1,\"4\":1,\"5\":1}}],[\"require\",{\"2\":{\"1\":1,\"2\":1,\"3\":1,\"7\":1}}],[\"requests\",{\"2\":{\"0\":1,\"1\":1,\"2\":1,\"3\":1,\"4\":1,\"5\":1,\"6\":3}}],[\"requested\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"request\",{\"2\":{\"1\":2,\"2\":2,\"3\":2,\"6\":2,\"7\":1}}],[\"re\",{\"2\":{\"0\":2,\"1\":7,\"2\":7,\"3\":8,\"4\":2,\"5\":2,\"6\":1}}],[\"retain\",{\"2\":{\"6\":1}}],[\"retried\",{\"2\":{\"6\":1}}],[\"retry\",{\"2\":{\"0\":1,\"4\":1,\"5\":1}}],[\"retired\",{\"2\":{\"6\":2}}],[\"retire\",{\"2\":{\"0\":1,\"4\":1,\"5\":1}}],[\"return\",{\"2\":{\"1\":3,\"2\":3,\"3\":3}}],[\"returns\",{\"2\":{\"1\":2,\"2\":2,\"3\":2,\"6\":1}}],[\"return`\",{\"2\":{\"1\":2,\"2\":2,\"3\":2}}],[\"returning\",{\"2\":{\"3\":1}}],[\"repeated\",{\"2\":{\"6\":1}}],[\"representation\",{\"2\":{\"6\":1}}],[\"reproduction\",{\"2\":{\"6\":8}}],[\"reproduce\",{\"2\":{\"6\":3}}],[\"reproduced\",{\"2\":{\"1\":1,\"2\":1,\"3\":1,\"6\":1}}],[\"repository\",{\"0\":{\"7\":1},\"2\":{\"0\":1,\"4\":1,\"5\":1,\"7\":1}}],[\"reported\",{\"2\":{\"0\":1,\"2\":1,\"3\":1,\"4\":1,\"5\":1}}],[\"reports\",{\"2\":{\"1\":4,\"2\":3,\"3\":3,\"6\":1}}],[\"report\",{\"2\":{\"1\":1,\"2\":3,\"3\":3,\"6\":1,\"7\":1}}],[\"reporting\",{\"2\":{\"3\":1}}],[\"replies\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"replace\",{\"2\":{\"6\":1}}],[\"replacement\",{\"2\":{\"6\":1}}],[\"replaces\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"replaced\",{\"2\":{\"3\":1,\"6\":1}}],[\"reply\",{\"2\":{\"3\":1}}],[\"regexes\",{\"2\":{\"6\":1}}],[\"regex\",{\"2\":{\"6\":1}}],[\"regenerate\",{\"2\":{\"1\":1,\"2\":1,\"3\":1,\"7\":1}}],[\"regress\",{\"2\":{\"6\":1}}],[\"regression\",{\"2\":{\"1\":3,\"2\":3,\"3\":6,\"7\":1}}],[\"registration\",{\"2\":{\"6\":1}}],[\"registry\",{\"2\":{\"0\":1,\"4\":1,\"5\":1}}],[\"register\",{\"2\":{\"0\":1,\"4\":1,\"5\":1}}],[\"registers\",{\"2\":{\"3\":1}}],[\"regions\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"records\",{\"2\":{\"7\":1}}],[\"record\",{\"2\":{\"0\":2,\"4\":2,\"5\":2}}],[\"reconcile\",{\"2\":{\"6\":1}}],[\"reconciled\",{\"2\":{\"1\":2,\"2\":2,\"3\":2}}],[\"reconciliation`\",{\"2\":{\"0\":1,\"4\":1,\"5\":1,\"7\":1}}],[\"reconciliation\",{\"2\":{\"3\":1,\"4\":1,\"5\":1,\"6\":1}}],[\"received\",{\"2\":{\"6\":1}}],[\"received`\",{\"2\":{\"1\":1,\"2\":1,\"3\":1,\"6\":1}}],[\"recent\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"recur\",{\"2\":{\"3\":1}}],[\"removal\",{\"2\":{\"6\":1}}],[\"removing\",{\"2\":{\"6\":1}}],[\"removes\",{\"2\":{\"1\":2,\"2\":2,\"3\":3,\"6\":4}}],[\"remove\",{\"2\":{\"1\":1,\"2\":1,\"3\":1,\"6\":2}}],[\"remove`\",{\"2\":{\"3\":1,\"4\":1,\"5\":1}}],[\"removed\",{\"2\":{\"3\":2}}],[\"remote\",{\"2\":{\"1\":1,\"2\":1,\"3\":1,\"6\":2}}],[\"remains\",{\"2\":{\"6\":6}}],[\"remaining\",{\"2\":{\"0\":1,\"4\":1,\"5\":1}}],[\"remain\",{\"2\":{\"3\":1}}],[\"rewrite\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"rewritten\",{\"2\":{\"1\":1,\"2\":1,\"3\":1,\"6\":1}}],[\"refs\",{\"2\":{\"6\":11}}],[\"reflects\",{\"2\":{\"0\":1,\"4\":1,\"5\":1}}],[\"refresh\",{\"2\":{\"1\":2,\"2\":2,\"3\":2}}],[\"refreshyoutube\",{\"2\":{\"1\":2,\"2\":2,\"3\":2}}],[\"refreshyoutube`\",{\"2\":{\"1\":2,\"2\":2,\"3\":2}}],[\"refreshing\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"references\",{\"2\":{\"1\":1,\"2\":1,\"3\":2}}],[\"refuses\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"refusing\",{\"2\":{\"3\":1}}],[\"reinstall\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"reject\",{\"2\":{\"6\":1}}],[\"rejection\",{\"2\":{\"1\":1,\"2\":1,\"3\":1,\"6\":3}}],[\"rejects\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"reduces\",{\"2\":{\"6\":1}}],[\"redownload\",{\"2\":{\"6\":1}}],[\"redownload`\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"redesigned\",{\"2\":{\"3\":1}}],[\"range`\",{\"2\":{\"6\":3}}],[\"ranges\",{\"2\":{\"6\":3}}],[\"ranged\",{\"2\":{\"0\":1,\"4\":1,\"5\":1}}],[\"range\",{\"2\":{\"0\":1,\"4\":1,\"5\":1,\"6\":4}}],[\"ramp\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"race\",{\"2\":{\"1\":1,\"2\":1,\"3\":1,\"6\":1}}],[\"racing\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"rather\",{\"2\":{\"0\":4,\"1\":4,\"2\":4,\"3\":9,\"4\":5,\"5\":5,\"6\":4}}],[\"ratelimiter\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"radius\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"raised\",{\"2\":{\"3\":1}}],[\"run\",{\"2\":{\"0\":10,\"1\":9,\"2\":9,\"3\":12,\"4\":10,\"5\":10,\"6\":7,\"7\":10}}],[\"runtime\",{\"2\":{\"0\":1,\"1\":3,\"2\":3,\"3\":3,\"4\":1,\"5\":1}}],[\"runs\",{\"2\":{\"0\":2,\"1\":4,\"2\":4,\"3\":5,\"4\":2,\"5\":2,\"6\":1}}],[\"runner\",{\"2\":{\"0\":3,\"1\":3,\"2\":4,\"3\":6,\"4\":4,\"5\":4,\"6\":12,\"7\":1}}],[\"runners\",{\"2\":{\"1\":1,\"2\":1,\"3\":1,\"6\":4}}],[\"runners`\",{\"2\":{\"1\":1,\"2\":1,\"3\":1,\"6\":2}}],[\"running\",{\"2\":{\"1\":5,\"2\":5,\"3\":7,\"6\":2}}],[\"runnable\",{\"2\":{\"3\":1}}],[\"rules\",{\"2\":{\"1\":2,\"2\":2,\"3\":2}}],[\"rule\",{\"2\":{\"3\":2}}],[\"rotation\",{\"2\":{\"1\":2,\"2\":2,\"3\":3}}],[\"rollup\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"rolled\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"row\",{\"2\":{\"1\":2,\"2\":2,\"3\":3,\"6\":1}}],[\"root\",{\"2\":{\"1\":2,\"2\":2,\"3\":2}}],[\"routed\",{\"2\":{\"3\":1}}],[\"roughly\",{\"2\":{\"3\":1}}],[\"rfc1918\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"right\",{\"2\":{\"3\":1}}],[\"risk\",{\"2\":{\"3\":1,\"6\":1}}],[\"null\",{\"2\":{\"6\":1}}],[\"npm\",{\"2\":{\"0\":8,\"3\":1,\"4\":9,\"5\":9}}],[\"noemit\",{\"2\":{\"0\":1,\"4\":1,\"5\":1}}],[\"node\",{\"2\":{\"0\":6,\"1\":3,\"2\":2,\"3\":2,\"4\":6,\"5\":6,\"6\":1,\"7\":4}}],[\"no\",{\"2\":{\"0\":8,\"1\":17,\"2\":17,\"3\":19,\"4\":8,\"5\":8,\"6\":1,\"7\":3}}],[\"notification\",{\"2\":{\"6\":2}}],[\"not\",{\"2\":{\"0\":5,\"1\":15,\"2\":17,\"3\":23,\"4\":5,\"5\":5,\"6\":13}}],[\"nothing\",{\"2\":{\"0\":1,\"1\":8,\"2\":8,\"3\":8,\"4\":1,\"5\":1}}],[\"note\",{\"2\":{\"0\":1,\"1\":4,\"2\":4,\"3\":4}}],[\"notes\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"non\",{\"2\":{\"0\":1,\"1\":3,\"2\":1,\"3\":2,\"4\":1,\"5\":1,\"6\":1}}],[\"none\",{\"2\":{\"1\":5,\"2\":5,\"3\":5}}],[\"normalize\",{\"2\":{\"6\":1}}],[\"normalised\",{\"2\":{\"3\":1}}],[\"normally\",{\"2\":{\"6\":1}}],[\"normal\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"now\",{\"2\":{\"1\":2,\"2\":2,\"3\":12}}],[\"nowhere\",{\"2\":{\"4\":1,\"5\":1}}],[\"native\",{\"2\":{\"0\":4,\"1\":1,\"2\":1,\"3\":1,\"4\":5,\"5\":5,\"7\":3}}],[\"names\",{\"2\":{\"6\":1}}],[\"named\",{\"2\":{\"0\":2,\"1\":2,\"2\":2,\"3\":2,\"4\":2,\"5\":2,\"6\":1}}],[\"name\",{\"2\":{\"0\":3,\"1\":5,\"2\":5,\"3\":6,\"4\":3,\"5\":3,\"6\":1,\"7\":1}}],[\"naming\",{\"2\":{\"0\":1,\"1\":2,\"2\":2,\"3\":2,\"4\":1,\"5\":1,\"7\":1}}],[\"narrow\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"navigation\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"nas\",{\"2\":{\"3\":1,\"4\":1,\"5\":1}}],[\"need\",{\"2\":{\"0\":1,\"4\":1,\"5\":1}}],[\"needs\",{\"2\":{\"1\":3,\"2\":3,\"3\":4}}],[\"never\",{\"2\":{\"0\":5,\"1\":12,\"2\":12,\"3\":12,\"4\":5,\"5\":5,\"6\":2,\"7\":1}}],[\"next\",{\"2\":{\"0\":1,\"1\":2,\"2\":2,\"3\":2,\"6\":1}}],[\"net\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"newer\",{\"2\":{\"7\":1}}],[\"new\",{\"2\":{\"1\":1,\"2\":1,\"3\":8,\"6\":3}}],[\"neither\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"nested\",{\"2\":{\"3\":1}}],[\"n\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"+\",{\"2\":{\"0\":13,\"1\":2,\"2\":2,\"3\":2,\"4\":14,\"5\":14,\"6\":1}}],[\"occupying\",{\"2\":{\"6\":1}}],[\"occurrence\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"observes\",{\"2\":{\"6\":4}}],[\"observations\",{\"2\":{\"6\":1}}],[\"object\",{\"2\":{\"1\":2,\"2\":2,\"3\":3,\"6\":1}}],[\"os\",{\"2\":{\"6\":2}}],[\"over\",{\"2\":{\"0\":2,\"1\":5,\"2\":5,\"3\":8,\"4\":2,\"5\":2}}],[\"overlapping\",{\"2\":{\"6\":1}}],[\"overlap\",{\"2\":{\"0\":1,\"4\":1,\"5\":1}}],[\"oversight\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"overwritten\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"overwrites\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"outer\",{\"2\":{\"6\":2}}],[\"out\",{\"2\":{\"0\":3,\"1\":3,\"2\":3,\"3\":3,\"4\":3,\"5\":3}}],[\"output\",{\"2\":{\"0\":1,\"1\":3,\"2\":4,\"3\":4,\"4\":1,\"5\":1,\"6\":1,\"7\":2}}],[\"outright\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"only\",{\"2\":{\"0\":6,\"1\":12,\"2\":12,\"3\":15,\"4\":7,\"5\":7,\"6\":10}}],[\"one\",{\"2\":{\"0\":8,\"1\":16,\"2\":17,\"3\":22,\"4\":11,\"5\":11,\"6\":7,\"7\":1}}],[\"onetime\",{\"2\":{\"1\":1,\"2\":1,\"3\":1,\"6\":2}}],[\"onetimecompleted\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"on\",{\"2\":{\"0\":5,\"1\":24,\"2\":24,\"3\":31,\"4\":5,\"5\":5,\"6\":12}}],[\"onupdate\",{\"2\":{\"1\":2,\"2\":2,\"3\":2}}],[\"onupdated`\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"onfinished\",{\"2\":{\"1\":2,\"2\":2,\"3\":2,\"6\":2}}],[\"onprobed\",{\"2\":{\"1\":2,\"2\":2,\"3\":2}}],[\"oncomplete\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"once\",{\"2\":{\"1\":5,\"2\":5,\"3\":6,\"6\":1}}],[\"onchanged`\",{\"2\":{\"1\":1,\"2\":1,\"3\":2}}],[\"organization\",{\"2\":{\"7\":1}}],[\"or\",{\"2\":{\"0\":4,\"1\":16,\"2\":16,\"3\":17,\"4\":5,\"5\":5,\"6\":14,\"7\":3}}],[\"ordered\",{\"2\":{\"6\":1}}],[\"order\",{\"2\":{\"1\":2,\"2\":2,\"3\":2,\"6\":1}}],[\"origin\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"original\",{\"2\":{\"2\":2,\"3\":2,\"6\":2}}],[\"orphaned\",{\"2\":{\"3\":1}}],[\"ownership\",{\"2\":{\"6\":2}}],[\"own\",{\"2\":{\"0\":1,\"1\":5,\"2\":4,\"3\":5,\"4\":2,\"5\":2}}],[\"owns\",{\"2\":{\"0\":2,\"4\":2,\"5\":2}}],[\"of\",{\"2\":{\"0\":5,\"1\":18,\"2\":18,\"3\":23,\"4\":5,\"5\":5,\"6\":1,\"7\":1}}],[\"offsets\",{\"2\":{\"0\":1,\"4\":1,\"5\":1}}],[\"often\",{\"2\":{\"0\":1,\"4\":1,\"5\":1}}],[\"optional\",{\"2\":{\"0\":1,\"1\":1,\"2\":1,\"3\":1,\"4\":1,\"5\":1,\"6\":1}}],[\"options\",{\"2\":{\"0\":1,\"1\":2,\"2\":2,\"3\":2}}],[\"operational\",{\"2\":{\"6\":1}}],[\"opera\",{\"2\":{\"0\":1,\"4\":1,\"5\":1}}],[\"openexternal`\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"opens\",{\"2\":{\"1\":1,\"2\":1,\"3\":1,\"6\":1}}],[\"open\",{\"2\":{\"1\":1,\"2\":1,\"3\":1,\"6\":1}}],[\"openable\",{\"2\":{\"3\":1,\"6\":1}}],[\"otherwise\",{\"2\":{\"0\":1,\"4\":1,\"5\":1,\"6\":2}}],[\"other\",{\"2\":{\"0\":1,\"1\":4,\"2\":4,\"3\":4,\"4\":1,\"5\":1,\"6\":2}}],[\"omits\",{\"2\":{\"1\":2,\"2\":2,\"3\":2}}],[\"o\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"old\",{\"2\":{\"3\":2,\"6\":2}}],[\">\",{\"2\":{\"0\":1,\"2\":1,\"3\":1,\"4\":1,\"5\":1}}],[\"especially\",{\"2\":{\"6\":1}}],[\"escape\",{\"2\":{\"6\":1}}],[\"esm\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"effort\",{\"2\":{\"6\":1}}],[\"effect\",{\"2\":{\"1\":2,\"2\":2,\"3\":2}}],[\"etag\",{\"2\":{\"6\":5}}],[\"eight\",{\"2\":{\"6\":2}}],[\"either\",{\"2\":{\"1\":2,\"2\":2,\"3\":2,\"6\":1}}],[\"evidence\",{\"2\":{\"6\":1}}],[\"every\",{\"2\":{\"0\":4,\"1\":20,\"2\":20,\"3\":25,\"4\":5,\"5\":5,\"6\":5}}],[\"everything\",{\"2\":{\"0\":2,\"1\":3,\"2\":3,\"3\":3,\"4\":2,\"5\":2}}],[\"ever\",{\"2\":{\"0\":1,\"1\":3,\"2\":3,\"3\":3,\"4\":1,\"5\":1}}],[\"eventually\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"event\",{\"2\":{\"1\":2,\"2\":2,\"3\":4,\"6\":1}}],[\"example\",{\"2\":{\"6\":1}}],[\"exact\",{\"2\":{\"1\":2,\"2\":2,\"3\":2}}],[\"exactly\",{\"2\":{\"1\":4,\"2\":4,\"3\":5,\"6\":1}}],[\"executable\",{\"2\":{\"7\":1}}],[\"executes\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"executescript`\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"executed\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"exercised\",{\"2\":{\"7\":1}}],[\"exercise\",{\"2\":{\"6\":1}}],[\"exe\",{\"2\":{\"0\":2,\"4\":2,\"5\":2}}],[\"exe`\",{\"2\":{\"0\":2,\"1\":1,\"2\":1,\"3\":1,\"4\":2,\"5\":2}}],[\"experimental\",{\"2\":{\"0\":2,\"1\":1,\"4\":2,\"5\":2,\"6\":1,\"7\":1}}],[\"explicit\",{\"2\":{\"0\":3,\"4\":3,\"5\":3,\"6\":1,\"7\":2}}],[\"explicitly\",{\"2\":{\"1\":3,\"2\":3,\"3\":4,\"6\":2}}],[\"explain\",{\"2\":{\"0\":1,\"1\":1,\"2\":1,\"3\":1,\"4\":1,\"5\":1,\"7\":1}}],[\"exploitable\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"expired\",{\"2\":{\"1\":2,\"2\":2,\"3\":2}}],[\"exponential\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"export\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"exporting\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"exposed\",{\"2\":{\"7\":1}}],[\"expose\",{\"2\":{\"6\":2}}],[\"exposes\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"exposure\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"expand\",{\"2\":{\"1\":1}}],[\"exhaustion\",{\"2\":{\"0\":1,\"4\":1,\"5\":1}}],[\"existing\",{\"2\":{\"6\":3}}],[\"existingpending`\",{\"2\":{\"6\":1}}],[\"exists\",{\"2\":{\"0\":1,\"1\":4,\"2\":4,\"3\":5,\"4\":1,\"5\":1}}],[\"exist\",{\"2\":{\"0\":1}}],[\"exits\",{\"2\":{\"1\":2,\"2\":3,\"3\":3,\"6\":2}}],[\"exit\",{\"2\":{\"1\":1,\"2\":1,\"3\":1,\"6\":1}}],[\"extends\",{\"2\":{\"6\":1}}],[\"extension\",{\"2\":{\"0\":9,\"1\":5,\"2\":5,\"3\":8,\"4\":11,\"5\":11,\"6\":3,\"7\":2}}],[\"extensionless\",{\"2\":{\"0\":1,\"4\":1,\"5\":1}}],[\"external\",{\"2\":{\"0\":1,\"4\":1,\"5\":1}}],[\"extracts\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"exceed\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"exclude\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"entire\",{\"2\":{\"0\":1,\"1\":3,\"2\":3,\"3\":3,\"4\":1,\"5\":1}}],[\"entirely\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"entries\",{\"2\":{\"0\":1,\"3\":1,\"4\":1,\"5\":1}}],[\"enforces\",{\"2\":{\"1\":2,\"2\":2,\"3\":2}}],[\"end\",{\"2\":{\"1\":2,\"2\":3,\"3\":3,\"6\":1}}],[\"encrypt\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"engine\",{\"2\":{\"0\":7,\"1\":23,\"2\":23,\"3\":25,\"4\":7,\"5\":7,\"6\":22,\"7\":2}}],[\"english\",{\"2\":{\"1\":1,\"2\":1,\"3\":2}}],[\"earlier\",{\"2\":{\"6\":1}}],[\"early\",{\"2\":{\"0\":1,\"1\":1,\"2\":1,\"3\":1,\"4\":1,\"5\":1}}],[\"each\",{\"2\":{\"0\":1,\"1\":3,\"2\":3,\"3\":3,\"4\":1,\"5\":1,\"6\":4}}],[\"errors\",{\"2\":{\"6\":2}}],[\"error\",{\"2\":{\"0\":1,\"1\":4,\"2\":4,\"3\":4,\"4\":1,\"5\":1,\"6\":3}}],[\"error`\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"else\",{\"2\":{\"0\":1,\"1\":1,\"2\":1,\"3\":1,\"4\":2,\"5\":2}}],[\"electron\",{\"2\":{\"0\":10,\"1\":4,\"2\":4,\"3\":4,\"4\":10,\"5\":10,\"6\":1,\"7\":4}}],[\"elevated\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"edge\",{\"2\":{\"0\":1,\"4\":1,\"5\":1}}],[\"edit\",{\"2\":{\"0\":1,\"7\":1}}],[\"e\",{\"2\":{\"1\":6,\"2\":6,\"3\":10}}],[\"empty\",{\"2\":{\"3\":1}}],[\"md\",{\"0\":{\"0\":1,\"4\":1,\"5\":1},\"2\":{\"0\":1,\"4\":1,\"5\":1}}],[\"md`\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"mjs\",{\"2\":{\"0\":2,\"4\":2,\"5\":2,\"6\":2}}],[\"mjs`\",{\"2\":{\"0\":2,\"1\":3,\"2\":2,\"3\":4,\"4\":2,\"5\":2,\"6\":1,\"7\":3}}],[\"making\",{\"2\":{\"6\":1}}],[\"makes\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"make\",{\"2\":{\"1\":1,\"6\":5}}],[\"mapped\",{\"2\":{\"6\":4}}],[\"map\",{\"2\":{\"6\":1}}],[\"main\",{\"2\":{\"0\":10,\"1\":36,\"2\":36,\"3\":40,\"4\":10,\"5\":10,\"6\":30,\"7\":4}}],[\"main`\",{\"2\":{\"1\":1,\"2\":1,\"3\":1,\"6\":1}}],[\"may\",{\"2\":{\"0\":3,\"3\":1,\"4\":3,\"5\":3}}],[\"manually\",{\"2\":{\"6\":1}}],[\"manager\",{\"2\":{\"0\":2,\"1\":6,\"2\":6,\"3\":7,\"4\":2,\"5\":2,\"6\":19,\"7\":1}}],[\"manifest\",{\"2\":{\"0\":2,\"4\":2,\"5\":2}}],[\"many\",{\"2\":{\"0\":1,\"4\":1,\"5\":1,\"6\":1}}],[\"malformed\",{\"2\":{\"0\":1,\"4\":1,\"5\":1,\"6\":2}}],[\"made\",{\"2\":{\"0\":1,\"3\":1,\"4\":1,\"5\":1}}],[\"materialization\",{\"2\":{\"6\":2}}],[\"matched\",{\"2\":{\"6\":1}}],[\"matching\",{\"2\":{\"6\":1}}],[\"match\",{\"2\":{\"0\":1,\"3\":2,\"4\":1,\"5\":1,\"6\":1}}],[\"matters\",{\"2\":{\"0\":1}}],[\"matter\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"maxlogbytes\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"markers\",{\"2\":{\"0\":1,\"4\":1,\"5\":1,\"7\":1}}],[\"marked\",{\"2\":{\"1\":2,\"2\":2,\"3\":2,\"6\":1}}],[\"marks\",{\"2\":{\"1\":2,\"2\":2,\"3\":3}}],[\"marking\",{\"2\":{\"3\":1}}],[\"mv3\",{\"2\":{\"0\":1,\"4\":1,\"5\":1}}],[\"metadata\",{\"2\":{\"0\":1,\"1\":1,\"2\":1,\"3\":1,\"4\":1,\"5\":1,\"6\":3}}],[\"media\",{\"2\":{\"1\":2,\"2\":2,\"3\":3}}],[\"messaging\",{\"2\":{\"0\":3,\"4\":3,\"5\":3,\"7\":1}}],[\"message\",{\"2\":{\"1\":2,\"2\":2,\"3\":4,\"4\":1,\"5\":1}}],[\"messages\",{\"2\":{\"1\":2,\"2\":2,\"3\":3,\"4\":1,\"5\":1,\"7\":1}}],[\"member\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"memory\",{\"2\":{\"1\":1,\"2\":1,\"3\":1,\"6\":1}}],[\"means\",{\"2\":{\"0\":1,\"1\":2,\"2\":2,\"3\":2,\"4\":1,\"5\":1}}],[\"measures\",{\"2\":{\"3\":1}}],[\"merely\",{\"2\":{\"3\":2}}],[\"menu\",{\"2\":{\"3\":1}}],[\"mechanical\",{\"2\":{\"3\":1}}],[\"most\",{\"2\":{\"0\":2,\"1\":2,\"2\":2,\"3\":2,\"4\":2,\"5\":2,\"6\":1}}],[\"moves\",{\"2\":{\"6\":1}}],[\"move\",{\"2\":{\"0\":1,\"1\":1,\"2\":1,\"3\":2,\"4\":1,\"5\":1}}],[\"moved\",{\"2\":{\"3\":2}}],[\"modified`\",{\"2\":{\"6\":1}}],[\"modules\",{\"2\":{\"0\":2,\"4\":2,\"5\":2,\"7\":2}}],[\"module\",{\"2\":{\"0\":1,\"1\":3,\"2\":3,\"3\":4,\"4\":1,\"5\":1,\"7\":1}}],[\"modes\",{\"2\":{\"6\":1}}],[\"mode\",{\"2\":{\"1\":6,\"2\":6,\"3\":8}}],[\"months\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"more\",{\"2\":{\"1\":1,\"2\":1,\"3\":1,\"6\":1}}],[\"mutable\",{\"2\":{\"6\":1}}],[\"mutation\",{\"2\":{\"0\":1,\"4\":1,\"5\":1}}],[\"mux\",{\"2\":{\"0\":1,\"1\":2,\"2\":2,\"3\":2,\"4\":1,\"5\":1}}],[\"must\",{\"2\":{\"0\":1,\"3\":1,\"4\":1,\"5\":1,\"6\":4}}],[\"multi\",{\"2\":{\"1\":1,\"2\":1,\"3\":1,\"4\":1,\"5\":1}}],[\"ms\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"mixed\",{\"2\":{\"6\":1}}],[\"mime\",{\"2\":{\"0\":1,\"4\":1,\"5\":1}}],[\"mismatch\",{\"2\":{\"6\":1}}],[\"missing\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"mislead\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"mitigations\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"minutes\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"minimum\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"migrating\",{\"2\":{\"6\":1}}],[\"migration\",{\"2\":{\"3\":1,\"6\":1}}],[\"migrates\",{\"2\":{\"4\":1,\"5\":1}}],[\"mp4`\",{\"2\":{\"1\":2,\"2\":2,\"3\":2}}],[\"m4a`\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"mb\",{\"2\":{\"1\":2,\"2\":2,\"3\":2}}],[\"m\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"dns\",{\"2\":{\"6\":1}}],[\"diagnostic\",{\"2\":{\"7\":1}}],[\"diagnostics\",{\"2\":{\"6\":1}}],[\"dialog\",{\"2\":{\"1\":1,\"2\":1,\"3\":4}}],[\"did\",{\"2\":{\"6\":1}}],[\"directly\",{\"2\":{\"6\":1,\"7\":1}}],[\"directories\",{\"2\":{\"6\":1}}],[\"directory\",{\"2\":{\"1\":8,\"2\":7,\"3\":8,\"6\":3}}],[\"dirty\",{\"2\":{\"6\":1}}],[\"dir\",{\"2\":{\"0\":3,\"1\":3,\"2\":3,\"3\":3,\"4\":3,\"5\":3}}],[\"dir`\",{\"2\":{\"1\":3,\"2\":3,\"3\":3}}],[\"dist`\",{\"2\":{\"7\":1}}],[\"dist\",{\"2\":{\"0\":1,\"4\":1,\"5\":1}}],[\"disk\",{\"2\":{\"0\":1,\"1\":10,\"2\":10,\"3\":11,\"4\":1,\"5\":1,\"6\":2}}],[\"disagree\",{\"2\":{\"0\":1,\"1\":1,\"2\":1,\"3\":1,\"4\":1,\"5\":1}}],[\"dispatchers\",{\"2\":{\"6\":1}}],[\"dispatcher\",{\"2\":{\"1\":1,\"2\":1,\"3\":2,\"6\":2}}],[\"different\",{\"2\":{\"1\":1,\"2\":1,\"3\":1,\"6\":2}}],[\"dies\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"drive\",{\"2\":{\"0\":1,\"1\":2,\"2\":2,\"3\":2,\"4\":1,\"5\":1}}],[\"driven\",{\"2\":{\"0\":1,\"4\":1,\"5\":1}}],[\"dropzone\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"drop\",{\"2\":{\"1\":3,\"2\":3,\"3\":3}}],[\"drops\",{\"2\":{\"1\":2,\"2\":2,\"3\":3}}],[\"drain\",{\"2\":{\"6\":1}}],[\"drained\",{\"2\":{\"6\":1}}],[\"draining\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"dracoparts`\",{\"2\":{\"6\":1}}],[\"draco\",{\"0\":{\"1\":1,\"2\":1,\"3\":1,\"6\":1},\"2\":{\"0\":7,\"1\":4,\"2\":4,\"3\":5,\"4\":9,\"5\":9,\"6\":1,\"7\":1}}],[\"dracodl`\",{\"2\":{\"0\":1,\"1\":2,\"2\":2,\"3\":2,\"4\":1,\"5\":1,\"6\":2}}],[\"dracodl\",{\"2\":{\"0\":1,\"1\":1,\"2\":1,\"3\":1,\"4\":1,\"5\":1}}],[\"draco`\",{\"2\":{\"0\":1,\"4\":1,\"5\":1}}],[\"dracotemp\",{\"2\":{\"0\":2,\"1\":1,\"2\":1,\"3\":1,\"4\":1,\"5\":1}}],[\"dracotemp`\",{\"2\":{\"1\":6,\"2\":6,\"3\":7}}],[\"dl\",{\"2\":{\"0\":3,\"1\":3,\"2\":3,\"3\":4,\"4\":3,\"5\":3}}],[\"dlp`\",{\"2\":{\"0\":1,\"4\":1,\"5\":1}}],[\"dedicated\",{\"2\":{\"7\":1}}],[\"dedupe\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"dev`\",{\"2\":{\"7\":1}}],[\"development\",{\"2\":{\"7\":1}}],[\"dev\",{\"2\":{\"0\":2,\"1\":1,\"2\":1,\"3\":1,\"4\":2,\"5\":2}}],[\"demand\",{\"2\":{\"0\":2,\"4\":2,\"5\":2}}],[\"demuxer\",{\"2\":{\"0\":1,\"4\":1,\"5\":1}}],[\"delivery\",{\"2\":{\"6\":1}}],[\"deliberately\",{\"2\":{\"0\":1,\"1\":2,\"2\":2,\"3\":3,\"4\":1,\"5\":1}}],[\"delay\",{\"2\":{\"6\":1}}],[\"deleting\",{\"2\":{\"0\":1,\"1\":1,\"2\":1,\"3\":1,\"4\":1,\"5\":1}}],[\"deleted\",{\"2\":{\"1\":3,\"2\":3,\"3\":5}}],[\"delete\",{\"2\":{\"1\":2,\"2\":2,\"3\":2,\"6\":1}}],[\"deletes\",{\"2\":{\"1\":3,\"2\":3,\"3\":4,\"6\":1}}],[\"descriptive\",{\"2\":{\"7\":1}}],[\"describes\",{\"2\":{\"1\":1,\"2\":1,\"3\":2}}],[\"design\",{\"2\":{\"1\":3,\"2\":3,\"3\":3}}],[\"despite\",{\"2\":{\"1\":2,\"2\":3,\"3\":3}}],[\"destroys\",{\"2\":{\"6\":1}}],[\"destroyed\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"destination\",{\"2\":{\"1\":5,\"2\":5,\"3\":8,\"4\":1,\"5\":1,\"6\":1}}],[\"decides\",{\"2\":{\"0\":1,\"4\":1,\"5\":1}}],[\"decision\",{\"2\":{\"0\":1,\"4\":1,\"5\":1}}],[\"declares\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"declared\",{\"2\":{\"1\":1,\"2\":1,\"3\":2}}],[\"declaration\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"dead\",{\"2\":{\"1\":4,\"2\":4,\"3\":5}}],[\"deps\",{\"2\":{\"1\":2,\"2\":2,\"3\":2}}],[\"dependencies\",{\"2\":{\"7\":2}}],[\"dependency\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"dependent\",{\"2\":{\"0\":1,\"4\":1,\"5\":1}}],[\"derived\",{\"2\":{\"0\":1,\"4\":1,\"5\":1}}],[\"derives\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"derive\",{\"2\":{\"3\":2,\"4\":1,\"5\":1}}],[\"default\",{\"2\":{\"0\":1,\"1\":1,\"2\":1,\"3\":1,\"4\":1,\"5\":1}}],[\"defaults\",{\"2\":{\"0\":1,\"4\":1,\"5\":1}}],[\"defaulting\",{\"2\":{\"1\":2,\"2\":2,\"3\":2}}],[\"define\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"defect\",{\"2\":{\"3\":1}}],[\"detail`\",{\"2\":{\"1\":2,\"2\":2,\"3\":2}}],[\"detects\",{\"2\":{\"6\":1}}],[\"detection\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"detect\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"density\",{\"2\":{\"0\":1,\"4\":1,\"5\":1}}],[\"denylist\",{\"2\":{\"1\":1,\"2\":1,\"3\":1,\"6\":1}}],[\"debounce\",{\"2\":{\"1\":1,\"2\":1,\"3\":2}}],[\"dotted\",{\"2\":{\"6\":1}}],[\"download\",{\"2\":{\"0\":3,\"1\":11,\"2\":11,\"3\":12,\"4\":4,\"5\":4,\"6\":3,\"7\":2}}],[\"downloads\",{\"2\":{\"0\":2,\"1\":5,\"2\":5,\"3\":5,\"4\":2,\"5\":2,\"6\":1}}],[\"downloading\",{\"2\":{\"1\":2,\"2\":2,\"3\":2,\"6\":2}}],[\"downloaded\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"do\",{\"2\":{\"0\":1,\"1\":4,\"2\":4,\"3\":5,\"4\":2,\"5\":2,\"6\":2}}],[\"does\",{\"2\":{\"1\":15,\"2\":14,\"3\":14,\"6\":7}}],[\"docblock\",{\"2\":{\"1\":5,\"2\":5,\"3\":7}}],[\"documents\",{\"2\":{\"1\":2,\"2\":2,\"3\":2}}],[\"documented\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"document\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"docs\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"done\",{\"2\":{\"3\":2,\"6\":2}}],[\"dynamic\",{\"2\":{\"0\":1,\"3\":1,\"4\":1,\"5\":1,\"6\":1}}],[\"dangerous\",{\"2\":{\"6\":1}}],[\"dash\",{\"2\":{\"0\":2,\"1\":2,\"2\":2,\"3\":3,\"4\":2,\"5\":2,\"6\":1}}],[\"date\",{\"2\":{\"1\":1,\"2\":1,\"3\":1,\"6\":1}}],[\"data\",{\"2\":{\"1\":5,\"2\":5,\"3\":6,\"6\":2}}],[\"d\",{\"2\":{\"1\":8,\"2\":8,\"3\":12}}],[\"duplicated\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"duplicate\",{\"2\":{\"3\":1,\"4\":1,\"5\":1}}],[\"p2\",{\"2\":{\"6\":5}}],[\"p1\",{\"2\":{\"6\":7}}],[\"ps1\",{\"2\":{\"0\":1,\"4\":1,\"5\":1}}],[\"prs\",{\"2\":{\"7\":1}}],[\"promoted\",{\"2\":{\"6\":1}}],[\"promises\",{\"2\":{\"6\":1}}],[\"promise\",{\"2\":{\"1\":2,\"2\":2,\"3\":2,\"6\":1}}],[\"production\",{\"2\":{\"6\":1}}],[\"produce\",{\"2\":{\"6\":1}}],[\"produced\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"produces\",{\"2\":{\"3\":1}}],[\"protocol\",{\"2\":{\"0\":1,\"1\":1,\"2\":1,\"3\":2,\"4\":1,\"5\":1}}],[\"proxy\",{\"2\":{\"0\":1,\"1\":1,\"2\":1,\"3\":2,\"4\":1,\"5\":1,\"6\":3}}],[\"processing\",{\"2\":{\"6\":1}}],[\"process\",{\"2\":{\"0\":1,\"1\":2,\"2\":2,\"3\":3,\"4\":2,\"5\":2,\"6\":2}}],[\"proceeds\",{\"2\":{\"6\":1}}],[\"proceed\",{\"2\":{\"0\":1,\"1\":1,\"2\":1,\"3\":1,\"4\":1,\"5\":1}}],[\"progress\",{\"2\":{\"1\":4,\"2\":4,\"3\":6,\"6\":1,\"7\":1}}],[\"progressive\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"program\",{\"2\":{\"1\":2,\"2\":2,\"3\":2}}],[\"probe\",{\"2\":{\"0\":1,\"1\":1,\"2\":1,\"3\":1,\"4\":1,\"5\":1,\"6\":2}}],[\"probes\",{\"2\":{\"1\":1,\"2\":1,\"3\":1,\"6\":1}}],[\"problems\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"provides\",{\"2\":{\"0\":1,\"4\":1,\"5\":1}}],[\"provide\",{\"2\":{\"1\":1,\"2\":1,\"3\":1,\"6\":2}}],[\"propagating\",{\"2\":{\"1\":1}}],[\"profile\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"projects\",{\"2\":{\"1\":1,\"2\":1,\"3\":1,\"6\":6,\"7\":1}}],[\"project\",{\"2\":{\"1\":1,\"2\":1,\"3\":3,\"7\":1}}],[\"priorities\",{\"2\":{\"6\":1}}],[\"priority\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"prints\",{\"2\":{\"0\":1,\"1\":1,\"4\":1,\"5\":1}}],[\"privileged\",{\"2\":{\"0\":1,\"4\":1,\"5\":1}}],[\"privacy\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"private\",{\"2\":{\"1\":1,\"2\":1,\"3\":1,\"6\":2}}],[\"preload\",{\"2\":{\"0\":2,\"4\":2,\"5\":2,\"7\":3}}],[\"preload`\",{\"2\":{\"1\":1,\"2\":1,\"3\":1,\"6\":1}}],[\"prefer\",{\"2\":{\"0\":1,\"4\":1,\"5\":1,\"7\":2}}],[\"prefers\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"pre\",{\"2\":{\"1\":2,\"2\":2,\"3\":3}}],[\"precede\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"precedence\",{\"2\":{\"3\":1}}],[\"preceding\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"preallocated\",{\"2\":{\"6\":1}}],[\"preallocate\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"preview\",{\"2\":{\"7\":1}}],[\"previous\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"previously\",{\"2\":{\"3\":1}}],[\"prevent\",{\"2\":{\"1\":1,\"2\":1,\"3\":1,\"6\":1}}],[\"preserve\",{\"2\":{\"7\":2}}],[\"preserving\",{\"2\":{\"6\":1}}],[\"present\",{\"2\":{\"0\":1}}],[\"prescribed\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"pruned\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"practice\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"practical\",{\"2\":{\"3\":1}}],[\"pem\",{\"2\":{\"0\":1,\"4\":1,\"5\":1}}],[\"pem`\",{\"2\":{\"0\":2,\"4\":2,\"5\":2,\"7\":1}}],[\"performs\",{\"2\":{\"6\":2}}],[\"performance\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"per\",{\"2\":{\"0\":6,\"1\":8,\"2\":8,\"3\":12,\"4\":8,\"5\":8}}],[\"periodic\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"period\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"permanent\",{\"2\":{\"6\":1}}],[\"permanently\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"permitted\",{\"2\":{\"0\":1,\"4\":1,\"5\":1}}],[\"permits\",{\"2\":{\"1\":2,\"2\":2,\"3\":2}}],[\"persistence\",{\"2\":{\"0\":1,\"1\":1,\"2\":1,\"3\":1,\"4\":1,\"5\":1,\"6\":2,\"7\":1}}],[\"persisted\",{\"2\":{\"1\":2,\"2\":2,\"3\":2,\"6\":2,\"7\":1}}],[\"pendinghandoffs`\",{\"2\":{\"0\":1,\"4\":1,\"5\":1}}],[\"pending\",{\"2\":{\"1\":3,\"2\":3,\"3\":3,\"6\":5}}],[\"pin\",{\"2\":{\"6\":1}}],[\"pins\",{\"2\":{\"0\":1,\"4\":1,\"5\":1}}],[\"pinned\",{\"2\":{\"0\":1,\"4\":1,\"5\":1}}],[\"pieces\",{\"2\":{\"0\":1,\"4\":1,\"5\":1}}],[\"pick\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"pipe\",{\"2\":{\"0\":2,\"1\":1,\"2\":1,\"3\":1,\"4\":2,\"5\":2}}],[\"pipeserver\",{\"2\":{\"0\":1,\"4\":1,\"5\":1}}],[\"piping\",{\"2\":{\"2\":1,\"3\":1}}],[\"pausing\",{\"2\":{\"6\":1}}],[\"pauses\",{\"2\":{\"6\":1}}],[\"paused\",{\"2\":{\"6\":1}}],[\"pause\",{\"2\":{\"1\":2,\"2\":2,\"3\":2,\"6\":5}}],[\"pause`\",{\"2\":{\"3\":1}}],[\"pack\",{\"2\":{\"0\":1,\"4\":1,\"5\":1}}],[\"packages\",{\"2\":{\"7\":1}}],[\"packaged\",{\"2\":{\"1\":3,\"2\":3,\"3\":3}}],[\"packaging\",{\"2\":{\"0\":1,\"1\":2,\"2\":2,\"3\":3,\"4\":1,\"5\":1,\"7\":1}}],[\"pack`\",{\"2\":{\"1\":1,\"2\":1,\"3\":1,\"7\":1}}],[\"park\",{\"2\":{\"0\":1,\"4\":1,\"5\":1}}],[\"partial\",{\"2\":{\"0\":1,\"1\":4,\"2\":4,\"3\":4,\"4\":1,\"5\":1,\"6\":6}}],[\"partials\",{\"2\":{\"1\":2,\"2\":2,\"3\":4,\"4\":1,\"5\":1}}],[\"partway\",{\"2\":{\"1\":2,\"2\":2,\"3\":2}}],[\"parts\",{\"2\":{\"1\":1,\"2\":1,\"3\":1,\"6\":1}}],[\"part\",{\"2\":{\"1\":1,\"2\":1,\"3\":1,\"4\":1,\"5\":1,\"6\":3}}],[\"parsing\",{\"2\":{\"0\":1,\"4\":1,\"5\":1}}],[\"parser\",{\"2\":{\"6\":2}}],[\"parse\",{\"2\":{\"1\":1,\"2\":1,\"3\":1,\"6\":1}}],[\"parent\",{\"2\":{\"3\":2}}],[\"paths\",{\"2\":{\"0\":1,\"1\":5,\"2\":5,\"3\":7,\"4\":2,\"5\":2,\"6\":3}}],[\"path\",{\"2\":{\"0\":2,\"1\":12,\"2\":12,\"3\":13,\"4\":2,\"5\":2}}],[\"pascalcase\",{\"2\":{\"7\":1}}],[\"past\",{\"2\":{\"0\":1,\"1\":1,\"2\":1,\"3\":1,\"4\":1,\"5\":1}}],[\"passes\",{\"2\":{\"1\":3,\"2\":2,\"3\":3}}],[\"passed\",{\"2\":{\"1\":1,\"2\":2,\"3\":4,\"6\":4}}],[\"pass\",{\"2\":{\"1\":3,\"2\":3,\"3\":4}}],[\"passing\",{\"2\":{\"1\":1,\"6\":1}}],[\"passive\",{\"2\":{\"3\":1}}],[\"page\",{\"2\":{\"1\":4,\"2\":4,\"3\":5,\"4\":1,\"5\":1,\"6\":2}}],[\"pages\",{\"2\":{\"1\":1,\"2\":1,\"3\":2}}],[\"powershell\",{\"2\":{\"7\":1}}],[\"pool\",{\"2\":{\"6\":1}}],[\"pools\",{\"2\":{\"0\":1,\"4\":1,\"5\":1,\"6\":3}}],[\"policy\",{\"2\":{\"6\":2}}],[\"port\",{\"2\":{\"0\":1,\"1\":2,\"2\":2,\"3\":2,\"4\":1,\"5\":1}}],[\"portable\",{\"2\":{\"0\":2,\"1\":2,\"2\":2,\"3\":2,\"4\":1,\"5\":1}}],[\"portability\",{\"2\":{\"3\":1}}],[\"point\",{\"2\":{\"1\":1,\"2\":1,\"3\":1,\"4\":1,\"5\":1}}],[\"post\",{\"2\":{\"6\":2}}],[\"positions\",{\"2\":{\"6\":1}}],[\"positioned\",{\"2\":{\"0\":1,\"4\":1,\"5\":1}}],[\"possibly\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"pull\",{\"2\":{\"7\":1}}],[\"publication\",{\"2\":{\"6\":1}}],[\"publish\",{\"2\":{\"6\":2}}],[\"publishes\",{\"2\":{\"1\":2,\"2\":2,\"3\":2}}],[\"published\",{\"2\":{\"3\":1,\"6\":1}}],[\"purpose\",{\"2\":{\"0\":1,\"4\":1,\"5\":1}}],[\"purely\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"plain\",{\"2\":{\"0\":1,\"1\":2,\"2\":2,\"3\":3,\"4\":1,\"5\":1}}],[\"plaintext\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"playlist\",{\"2\":{\"0\":1,\"4\":1,\"5\":1}}],[\"placeholder\",{\"2\":{\"0\":2,\"4\":2,\"5\":2}}],[\"place\",{\"2\":{\"1\":1,\"2\":2,\"3\":3}}],[\"places\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"plus\",{\"2\":{\"1\":1,\"2\":1,\"3\":3,\"6\":2}}],[\"go\",{\"2\":{\"0\":4,\"1\":6,\"2\":6,\"3\":7,\"4\":4,\"5\":4,\"6\":1,\"7\":4}}],[\"goes\",{\"2\":{\"0\":1,\"4\":2,\"5\":2}}],[\"good\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"googlevideo\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"go`\",{\"2\":{\"3\":1}}],[\"gone\",{\"2\":{\"4\":1,\"5\":1,\"6\":1}}],[\"genuinely\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"generation\",{\"2\":{\"6\":1}}],[\"generate\",{\"2\":{\"7\":1}}],[\"generates\",{\"2\":{\"0\":1,\"4\":1,\"5\":1}}],[\"generated\",{\"2\":{\"0\":1,\"4\":1,\"5\":1,\"7\":3}}],[\"generous\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"get\",{\"2\":{\"1\":1,\"2\":1,\"3\":2}}],[\"getsettings\",{\"2\":{\"1\":1,\"2\":1,\"3\":2}}],[\"gets\",{\"2\":{\"1\":2,\"2\":2,\"3\":2}}],[\"getall\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"guidelines\",{\"0\":{\"7\":1},\"2\":{\"7\":3}}],[\"guidance\",{\"2\":{\"0\":1,\"1\":1,\"2\":1,\"3\":1,\"4\":1,\"5\":1}}],[\"guarantee\",{\"2\":{\"1\":2,\"2\":2,\"3\":2,\"6\":1}}],[\"guards\",{\"2\":{\"1\":2,\"2\":2,\"3\":2}}],[\"guard\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"give\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"given\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"gitignored\",{\"2\":{\"0\":1,\"1\":1,\"2\":1,\"3\":1,\"4\":1,\"5\":1}}],[\"github\",{\"2\":{\"1\":2,\"2\":2,\"3\":2}}],[\"gigabytes\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"gigabyte\",{\"2\":{\"4\":1,\"5\":1}}],[\"gb\",{\"2\":{\"1\":2,\"2\":2,\"3\":2}}],[\"group\",{\"2\":{\"1\":1,\"2\":1,\"3\":3,\"6\":1}}],[\"grouped\",{\"2\":{\"3\":1}}],[\"grows\",{\"2\":{\"1\":2,\"2\":2,\"3\":2}}],[\"growth\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"grace\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"graph\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"grabber\",{\"2\":{\"1\":2,\"2\":2,\"3\":3,\"6\":4}}],[\"green\",{\"2\":{\"1\":1,\"2\":1,\"3\":2}}],[\"global\",{\"2\":{\"0\":1,\"1\":3,\"2\":3,\"3\":3,\"4\":1,\"5\":1}}],[\"glob\",{\"2\":{\"1\":1}}],[\"gyan\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"gates\",{\"2\":{\"0\":1,\"4\":1,\"5\":1}}],[\"gated\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"gap\",{\"2\":{\"3\":1}}],[\"apis\",{\"2\":{\"7\":2}}],[\"apply\",{\"2\":{\"6\":1}}],[\"application\",{\"2\":{\"6\":1,\"7\":3}}],[\"applied\",{\"2\":{\"1\":1,\"2\":1,\"3\":2,\"4\":1,\"5\":1,\"6\":1}}],[\"applies\",{\"2\":{\"1\":1,\"2\":1,\"3\":2}}],[\"appears\",{\"2\":{\"6\":1}}],[\"append`\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"appends\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"app\",{\"2\":{\"0\":6,\"1\":9,\"2\":9,\"3\":10,\"4\":5,\"5\":5}}],[\"appdata\",{\"2\":{\"0\":2,\"1\":4,\"2\":4,\"3\":5,\"4\":4,\"5\":4}}],[\"available\",{\"2\":{\"6\":1}}],[\"avoids\",{\"2\":{\"0\":1,\"4\":1,\"5\":1}}],[\"ai\",{\"2\":{\"0\":1,\"4\":1,\"5\":1}}],[\"a\",{\"2\":{\"0\":20,\"1\":89,\"2\":88,\"3\":115,\"4\":29,\"5\":29,\"6\":40,\"7\":1}}],[\"and\",{\"2\":{\"0\":14,\"1\":92,\"2\":92,\"3\":114,\"4\":17,\"5\":17,\"6\":65,\"7\":22}}],[\"any\",{\"2\":{\"0\":1,\"1\":3,\"2\":2,\"3\":3,\"4\":1,\"5\":1,\"6\":3}}],[\"anything\",{\"2\":{\"0\":2,\"4\":2,\"5\":2}}],[\"an\",{\"2\":{\"0\":7,\"1\":14,\"2\":14,\"3\":18,\"4\":8,\"5\":8,\"6\":12,\"7\":1}}],[\"antivirus\",{\"2\":{\"0\":1,\"1\":1,\"2\":1,\"3\":2,\"4\":1,\"5\":1,\"6\":2}}],[\"another\",{\"2\":{\"1\":1,\"2\":1,\"3\":1,\"6\":1}}],[\"answers\",{\"2\":{\"0\":1,\"3\":1,\"4\":1,\"5\":1}}],[\"answer\",{\"2\":{\"4\":1,\"5\":1}}],[\"around\",{\"2\":{\"6\":2}}],[\"array\",{\"2\":{\"6\":2}}],[\"arrives\",{\"2\":{\"1\":1,\"2\":1,\"3\":1,\"4\":1,\"5\":1}}],[\"architecture\",{\"2\":{\"0\":1,\"4\":1,\"5\":1}}],[\"aria2\",{\"2\":{\"0\":1,\"4\":1,\"5\":1}}],[\"are\",{\"2\":{\"0\":2,\"1\":20,\"2\":20,\"3\":22,\"4\":3,\"5\":3,\"6\":2}}],[\"armed\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"attach\",{\"2\":{\"6\":1}}],[\"attached\",{\"2\":{\"1\":2,\"2\":2,\"3\":2,\"4\":1,\"5\":1}}],[\"at\",{\"2\":{\"0\":2,\"1\":16,\"2\":18,\"3\":21,\"4\":2,\"5\":2,\"6\":3}}],[\"atomically\",{\"2\":{\"3\":1}}],[\"after\",{\"2\":{\"0\":2,\"1\":4,\"2\":5,\"3\":5,\"4\":2,\"5\":2,\"6\":10}}],[\"acl\",{\"2\":{\"0\":1,\"4\":1,\"5\":1}}],[\"across\",{\"2\":{\"0\":1,\"4\":3,\"5\":3}}],[\"active\",{\"2\":{\"6\":3}}],[\"action\",{\"2\":{\"1\":4,\"2\":4,\"3\":5,\"4\":1,\"5\":1,\"6\":4}}],[\"actual\",{\"2\":{\"6\":1}}],[\"actually\",{\"2\":{\"0\":2,\"1\":4,\"2\":4,\"3\":4,\"4\":1,\"5\":1}}],[\"account\",{\"2\":{\"6\":1}}],[\"accumulate\",{\"2\":{\"1\":1,\"2\":1,\"3\":1,\"6\":2}}],[\"acceptance\",{\"2\":{\"6\":1}}],[\"accepting\",{\"2\":{\"6\":2}}],[\"acceptmedia`\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"accepts\",{\"2\":{\"1\":2,\"2\":2,\"3\":2,\"6\":1}}],[\"alive\",{\"2\":{\"6\":1}}],[\"always\",{\"2\":{\"0\":1,\"1\":3,\"2\":3,\"3\":5,\"4\":1,\"5\":1}}],[\"all\",{\"2\":{\"0\":1,\"1\":6,\"2\":7,\"3\":8,\"4\":2,\"5\":2,\"6\":4}}],[\"allow\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"allowprivate\",{\"2\":{\"3\":1,\"4\":1,\"5\":1}}],[\"also\",{\"2\":{\"0\":1,\"1\":3,\"2\":3,\"3\":6,\"4\":1,\"5\":1,\"6\":1}}],[\"almost\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"already\",{\"2\":{\"1\":9,\"2\":9,\"3\":10,\"6\":3}}],[\"alone\",{\"2\":{\"1\":2,\"2\":2,\"3\":2,\"6\":1}}],[\"advertised\",{\"2\":{\"6\":1}}],[\"advisory\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"adopt\",{\"2\":{\"6\":1}}],[\"adding\",{\"2\":{\"0\":1,\"3\":1,\"4\":1,\"5\":1,\"6\":2}}],[\"add\",{\"2\":{\"1\":4,\"2\":4,\"3\":4,\"6\":7}}],[\"adds\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"addresses\",{\"2\":{\"1\":1,\"2\":1,\"3\":2,\"6\":1}}],[\"address\",{\"2\":{\"1\":1,\"2\":1,\"3\":1,\"6\":4}}],[\"addmany`\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"added\",{\"2\":{\"3\":2,\"6\":2}}],[\"adaptive\",{\"2\":{\"0\":1,\"1\":1,\"2\":1,\"3\":1,\"4\":1,\"5\":1}}],[\"adapter\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"asynchronously\",{\"2\":{\"6\":1}}],[\"asymmetry\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"assets\",{\"2\":{\"7\":1}}],[\"assert\",{\"2\":{\"0\":1,\"4\":1,\"5\":1,\"7\":1}}],[\"asserted\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"assertion\",{\"2\":{\"2\":1,\"3\":1}}],[\"asserts\",{\"2\":{\"3\":1}}],[\"assume\",{\"2\":{\"0\":1,\"4\":1,\"5\":1}}],[\"as\",{\"2\":{\"1\":8,\"2\":8,\"3\":10,\"4\":1,\"5\":1,\"6\":10,\"7\":3}}],[\"aside\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"audit\",{\"0\":{\"1\":1,\"2\":1,\"3\":1},\"2\":{\"1\":1,\"2\":1,\"3\":1,\"6\":1}}],[\"audio\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"absent\",{\"2\":{\"1\":2,\"2\":2,\"3\":3}}],[\"aborts\",{\"2\":{\"1\":1,\"2\":1,\"3\":2}}],[\"above\",{\"2\":{\"1\":1,\"2\":1,\"3\":2}}],[\"about\",{\"2\":{\"1\":1}}],[\"abandoned\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"abandon\",{\"2\":{\"3\":1}}],[\"awaiting\",{\"2\":{\"6\":1}}],[\"await\",{\"2\":{\"1\":2,\"2\":2,\"3\":2}}],[\"away\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"against\",{\"2\":{\"1\":1,\"2\":1,\"3\":1,\"6\":1}}],[\"again\",{\"2\":{\"1\":4,\"2\":4,\"3\":6}}],[\"ago\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"ip\",{\"2\":{\"6\":1}}],[\"ipv6\",{\"2\":{\"6\":3}}],[\"ipv4\",{\"2\":{\"6\":5}}],[\"ipc\",{\"2\":{\"0\":7,\"1\":5,\"2\":5,\"3\":6,\"4\":7,\"5\":7,\"7\":3}}],[\"i\",{\"2\":{\"6\":2}}],[\"in\",{\"2\":{\"0\":15,\"1\":41,\"2\":45,\"3\":49,\"4\":14,\"5\":14,\"6\":14,\"7\":3}}],[\"integrity\",{\"2\":{\"6\":1}}],[\"integration\",{\"2\":{\"0\":3,\"1\":2,\"2\":2,\"3\":4,\"4\":3,\"5\":3,\"6\":1}}],[\"integration`\",{\"2\":{\"0\":1,\"4\":1,\"5\":1}}],[\"integers\",{\"2\":{\"6\":1}}],[\"intentionally\",{\"2\":{\"6\":2}}],[\"intentional\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"intermediate\",{\"2\":{\"6\":2}}],[\"intermediates\",{\"2\":{\"3\":2,\"4\":1,\"5\":1,\"6\":2}}],[\"interface\",{\"2\":{\"0\":1,\"4\":1,\"5\":1}}],[\"interrupt\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"into\",{\"2\":{\"0\":4,\"1\":5,\"2\":6,\"3\":8,\"4\":5,\"5\":5,\"6\":1,\"7\":1}}],[\"introduced\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"intranet\",{\"2\":{\"3\":1,\"4\":1,\"5\":1}}],[\"index\",{\"2\":{\"0\":4,\"1\":8,\"2\":8,\"3\":9,\"4\":4,\"5\":4,\"6\":4,\"7\":1}}],[\"indexes\",{\"2\":{\"3\":1}}],[\"indentation\",{\"2\":{\"7\":1}}],[\"indent\",{\"2\":{\"0\":1,\"4\":1,\"5\":1}}],[\"indefinitely\",{\"2\":{\"1\":1,\"2\":1,\"3\":2}}],[\"instead\",{\"2\":{\"0\":1,\"1\":1,\"2\":1,\"3\":5,\"4\":1,\"5\":1}}],[\"installer\",{\"2\":{\"0\":1,\"4\":1,\"5\":1}}],[\"installed\",{\"2\":{\"0\":1,\"4\":2,\"5\":2}}],[\"install\",{\"2\":{\"1\":4,\"2\":4,\"3\":4,\"7\":1}}],[\"installing\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"instant\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"inspecting\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"inside\",{\"2\":{\"1\":5,\"2\":5,\"3\":5}}],[\"inherited\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"initialize\",{\"2\":{\"6\":1}}],[\"initial\",{\"2\":{\"1\":1,\"2\":1,\"3\":2}}],[\"invisible\",{\"2\":{\"1\":3,\"2\":2,\"3\":2}}],[\"invariant\",{\"2\":{\"1\":2,\"2\":2,\"3\":3}}],[\"invoke\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"injection\",{\"2\":{\"6\":1}}],[\"injects\",{\"2\":{\"6\":1}}],[\"inject\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"injected\",{\"2\":{\"3\":1,\"6\":1}}],[\"incorrectly\",{\"2\":{\"6\":1}}],[\"incomplete\",{\"2\":{\"0\":1,\"4\":1,\"5\":1}}],[\"incomplete`\",{\"2\":{\"3\":1,\"4\":2,\"5\":2}}],[\"inconsistent\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"include\",{\"2\":{\"7\":2}}],[\"included\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"including\",{\"2\":{\"1\":1,\"2\":1,\"3\":1,\"4\":1,\"5\":1,\"6\":2}}],[\"inputs\",{\"2\":{\"6\":1}}],[\"input\",{\"2\":{\"1\":1,\"2\":1,\"3\":1,\"4\":1,\"5\":1,\"6\":2,\"7\":1}}],[\"idempotent\",{\"2\":{\"6\":2}}],[\"identifiers\",{\"2\":{\"7\":1}}],[\"identity\",{\"2\":{\"6\":4}}],[\"identical\",{\"2\":{\"0\":1,\"4\":1,\"5\":1}}],[\"id>\",{\"2\":{\"6\":1}}],[\"id\",{\"2\":{\"0\":2,\"1\":2,\"2\":2,\"3\":4,\"4\":2,\"5\":2}}],[\"issues\",{\"2\":{\"7\":1}}],[\"isnan\",{\"2\":{\"6\":1}}],[\"isolated\",{\"2\":{\"6\":1}}],[\"isolation\",{\"2\":{\"2\":1,\"3\":1}}],[\"is\",{\"2\":{\"0\":16,\"1\":74,\"2\":73,\"3\":95,\"4\":21,\"5\":21,\"6\":22,\"7\":4}}],[\"iterating\",{\"2\":{\"6\":1}}],[\"items\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"it\",{\"2\":{\"0\":10,\"1\":49,\"2\":50,\"3\":61,\"4\":13,\"5\":13,\"6\":6}}],[\"its\",{\"2\":{\"0\":1,\"1\":11,\"2\":11,\"3\":14,\"4\":1,\"5\":1,\"6\":6,\"7\":1}}],[\"itself\",{\"2\":{\"1\":1,\"2\":1,\"3\":1,\"6\":1}}],[\"if\",{\"2\":{\"0\":1,\"1\":12,\"2\":12,\"3\":12,\"6\":3}}],[\"improvements\",{\"2\":{\"6\":1}}],[\"imports\",{\"2\":{\"0\":1,\"1\":6,\"2\":6,\"3\":7,\"4\":1,\"5\":1,\"7\":1}}],[\"import\",{\"2\":{\"0\":1,\"1\":3,\"2\":3,\"3\":5,\"4\":1,\"5\":1,\"6\":1}}],[\"importing\",{\"2\":{\"0\":1,\"1\":1,\"2\":1,\"3\":1,\"4\":1,\"5\":1}}],[\"impersonate\",{\"2\":{\"0\":1,\"4\":1,\"5\":1}}],[\"imperative\",{\"2\":{\"0\":1,\"1\":1,\"2\":1,\"3\":1,\"4\":1,\"5\":1,\"7\":1}}],[\"implementations\",{\"2\":{\"0\":1,\"4\":1,\"5\":1}}],[\"implemented\",{\"2\":{\"1\":1,\"2\":1,\"3\":2}}],[\"implement\",{\"2\":{\"1\":1,\"2\":1,\"3\":1,\"6\":1}}],[\"implements\",{\"2\":{\"3\":1}}],[\"immediately\",{\"2\":{\"1\":2,\"2\":2,\"3\":3}}],[\"images\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"icon\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"ignores\",{\"2\":{\"1\":2,\"2\":2,\"3\":2}}],[\"ignore\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"slot\",{\"2\":{\"6\":4}}],[\"stdlib\",{\"2\":{\"0\":1,\"4\":1,\"5\":1}}],[\"stable\",{\"2\":{\"6\":1}}],[\"starting\",{\"2\":{\"6\":1}}],[\"start\",{\"2\":{\"0\":2,\"1\":1,\"2\":1,\"3\":1,\"4\":2,\"5\":2,\"6\":3}}],[\"startup\",{\"2\":{\"0\":1,\"1\":2,\"2\":2,\"3\":3,\"4\":1,\"5\":1,\"6\":1}}],[\"starts\",{\"2\":{\"1\":1,\"2\":1,\"3\":1,\"4\":1,\"5\":1,\"6\":1}}],[\"start`\",{\"2\":{\"1\":1,\"2\":1,\"3\":1,\"6\":1,\"7\":1}}],[\"started\",{\"2\":{\"3\":1}}],[\"stays\",{\"2\":{\"6\":1}}],[\"stay\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"stale\",{\"2\":{\"1\":2,\"2\":2,\"3\":3,\"6\":1}}],[\"stat\",{\"2\":{\"6\":1}}],[\"static\",{\"2\":{\"0\":1,\"1\":1,\"2\":1,\"3\":2,\"4\":1,\"5\":1}}],[\"status\",{\"2\":{\"1\":2,\"2\":3,\"3\":4,\"6\":4}}],[\"stated\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"state\",{\"2\":{\"3\":1,\"6\":4}}],[\"storage\",{\"2\":{\"6\":1}}],[\"stored\",{\"2\":{\"6\":1}}],[\"stores\",{\"2\":{\"0\":2,\"4\":2,\"5\":2}}],[\"store\",{\"2\":{\"0\":2,\"4\":2,\"5\":2}}],[\"stopped\",{\"2\":{\"6\":1}}],[\"stops\",{\"2\":{\"0\":1,\"3\":1,\"4\":1,\"5\":1}}],[\"stop\",{\"2\":{\"1\":1,\"2\":1,\"3\":2}}],[\"step\",{\"2\":{\"0\":3,\"1\":1,\"2\":1,\"3\":1,\"4\":3,\"5\":3}}],[\"style\",{\"2\":{\"0\":1,\"4\":1,\"5\":1,\"7\":1}}],[\"still\",{\"2\":{\"1\":7,\"2\":6,\"3\":8,\"4\":2,\"5\":2,\"6\":4}}],[\"structure\",{\"2\":{\"7\":1}}],[\"structural\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"strategy\",{\"2\":{\"6\":1}}],[\"strand\",{\"2\":{\"1\":1,\"2\":1,\"3\":1,\"6\":2}}],[\"stranded\",{\"2\":{\"4\":1,\"5\":1}}],[\"strengthen\",{\"2\":{\"6\":1}}],[\"stronger\",{\"2\":{\"6\":1}}],[\"strong\",{\"2\":{\"6\":2}}],[\"strip\",{\"2\":{\"0\":2,\"1\":1,\"4\":2,\"5\":2,\"6\":1,\"7\":1}}],[\"stripping\",{\"2\":{\"0\":1,\"1\":1,\"2\":1,\"3\":1,\"4\":1,\"5\":1,\"7\":1}}],[\"strict`\",{\"2\":{\"0\":1,\"4\":1,\"5\":1,\"7\":1}}],[\"string\",{\"2\":{\"1\":2,\"2\":2,\"3\":2}}],[\"stringify\",{\"2\":{\"1\":2,\"2\":2,\"3\":2}}],[\"stringify`\",{\"2\":{\"3\":1}}],[\"strings\",{\"2\":{\"1\":2,\"2\":2,\"3\":2}}],[\"serves\",{\"2\":{\"6\":1}}],[\"server\",{\"2\":{\"6\":1}}],[\"serialize\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"serializes\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"segment\",{\"2\":{\"0\":4,\"4\":4,\"5\":4,\"6\":3}}],[\"segmenter\",{\"2\":{\"0\":1,\"1\":1,\"2\":1,\"3\":1,\"4\":1,\"5\":1,\"7\":1}}],[\"segmented\",{\"2\":{\"0\":1,\"4\":1,\"5\":1}}],[\"segments\",{\"2\":{\"0\":1,\"4\":1,\"5\":1}}],[\"sec\",{\"2\":{\"0\":1,\"4\":1,\"5\":1}}],[\"secret\",{\"2\":{\"0\":1,\"4\":1,\"5\":1}}],[\"second\",{\"2\":{\"1\":4,\"2\":4,\"3\":4}}],[\"seconds\",{\"2\":{\"1\":3,\"2\":3,\"3\":3}}],[\"security\",{\"2\":{\"1\":1,\"2\":1,\"3\":1,\"7\":1}}],[\"secure\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"seen\",{\"2\":{\"6\":1}}],[\"see\",{\"2\":{\"0\":1,\"1\":1,\"2\":1,\"3\":1,\"4\":1,\"5\":1}}],[\"sees\",{\"2\":{\"1\":2,\"2\":2,\"3\":2,\"6\":1}}],[\"semicolons\",{\"2\":{\"0\":1,\"4\":1,\"5\":1,\"7\":1}}],[\"separately\",{\"2\":{\"7\":1}}],[\"separate\",{\"2\":{\"1\":1,\"2\":1,\"3\":1,\"4\":1,\"5\":1}}],[\"setup\",{\"2\":{\"6\":5}}],[\"settings\",{\"2\":{\"0\":2,\"1\":1,\"2\":1,\"3\":3,\"4\":2,\"5\":2,\"6\":1}}],[\"setting\",{\"2\":{\"1\":3,\"2\":3,\"3\":4}}],[\"settles\",{\"2\":{\"0\":1,\"4\":1,\"5\":1}}],[\"settle\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"sets\",{\"2\":{\"1\":1,\"2\":1,\"3\":1,\"6\":3}}],[\"set\",{\"2\":{\"1\":3,\"2\":3,\"3\":4,\"6\":4}}],[\"setvaliddata`\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"selection\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"self\",{\"2\":{\"1\":2,\"2\":2,\"3\":3}}],[\"session\",{\"2\":{\"1\":2,\"2\":2,\"3\":3,\"6\":1}}],[\"sendnativemessage\",{\"2\":{\"0\":1,\"4\":1,\"5\":1}}],[\"sendnativemessage`\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"sends\",{\"2\":{\"1\":2,\"2\":2,\"3\":3}}],[\"send\",{\"2\":{\"1\":1,\"2\":1,\"3\":2,\"6\":2}}],[\"sentence\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"several\",{\"2\":{\"1\":2,\"2\":2,\"3\":2}}],[\"severity\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"sequence\",{\"2\":{\"0\":1,\"4\":1,\"5\":1}}],[\"sequential\",{\"2\":{\"1\":2,\"2\":2,\"3\":2}}],[\"successful\",{\"2\":{\"6\":2}}],[\"such\",{\"2\":{\"1\":1,\"2\":1,\"3\":1,\"7\":2}}],[\"submitting\",{\"2\":{\"0\":1,\"4\":1,\"5\":1,\"7\":1}}],[\"subtitle\",{\"2\":{\"0\":1,\"1\":1,\"2\":1,\"3\":1,\"4\":1,\"5\":1,\"6\":1}}],[\"subtitles\",{\"2\":{\"1\":1,\"2\":1,\"3\":1,\"6\":1}}],[\"subsequent\",{\"2\":{\"6\":1}}],[\"subsystem\",{\"2\":{\"0\":1,\"4\":1,\"5\":1}}],[\"subscription\",{\"2\":{\"0\":1,\"4\":1,\"5\":1}}],[\"subjects\",{\"2\":{\"0\":1,\"1\":1,\"2\":1,\"3\":1,\"4\":1,\"5\":1,\"7\":1}}],[\"summary\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"surfaces\",{\"2\":{\"0\":1,\"3\":1,\"4\":1,\"5\":1}}],[\"surface\",{\"2\":{\"0\":1,\"1\":1,\"2\":1,\"3\":2,\"4\":1,\"5\":1}}],[\"survives\",{\"2\":{\"1\":2,\"2\":2,\"3\":2}}],[\"superset\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"support\",{\"2\":{\"7\":1}}],[\"suppressed\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"supplied\",{\"2\":{\"1\":2,\"2\":2,\"3\":3}}],[\"supplies\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"suite\",{\"2\":{\"1\":2,\"2\":1,\"3\":3,\"6\":1}}],[\"suggested\",{\"2\":{\"1\":1,\"2\":1,\"3\":1,\"6\":1}}],[\"s\",{\"2\":{\"0\":7,\"1\":24,\"2\":26,\"3\":30,\"4\":10,\"5\":10,\"6\":5,\"7\":1}}],[\"so\",{\"2\":{\"0\":11,\"1\":29,\"2\":28,\"3\":36,\"4\":13,\"5\":13,\"6\":4}}],[\"sockets\",{\"2\":{\"6\":1}}],[\"socket\",{\"2\":{\"0\":2,\"4\":2,\"5\":2,\"6\":1}}],[\"sources\",{\"2\":{\"6\":1}}],[\"source\",{\"2\":{\"1\":4,\"2\":4,\"3\":4,\"7\":1}}],[\"solved\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"someone\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"scheduling\",{\"2\":{\"7\":1}}],[\"scheduled\",{\"2\":{\"6\":1}}],[\"scheduler\",{\"2\":{\"0\":1,\"1\":3,\"2\":3,\"3\":3,\"4\":1,\"5\":1,\"6\":7}}],[\"scheduleaction\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"schedules\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"schema\",{\"2\":{\"6\":2}}],[\"scopes\",{\"2\":{\"0\":1,\"4\":1,\"5\":1}}],[\"scope\",{\"2\":{\"1\":2,\"2\":2,\"3\":2,\"6\":1}}],[\"screenshots\",{\"2\":{\"7\":1}}],[\"screen\",{\"2\":{\"0\":1,\"4\":1,\"5\":1}}],[\"scripts\",{\"2\":{\"7\":1}}],[\"script\",{\"2\":{\"1\":1,\"3\":1,\"6\":3}}],[\"scripting\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"scan\",{\"2\":{\"1\":1,\"2\":1,\"3\":2,\"6\":3}}],[\"scanner\",{\"2\":{\"0\":1,\"1\":2,\"2\":2,\"3\":2,\"4\":1,\"5\":1}}],[\"scanning\",{\"2\":{\"3\":1,\"6\":3}}],[\"scales\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"safe\",{\"2\":{\"6\":1}}],[\"same\",{\"2\":{\"0\":1,\"1\":8,\"2\":8,\"3\":11,\"4\":1,\"5\":1,\"6\":7}}],[\"sanitize\",{\"2\":{\"0\":1,\"1\":1,\"2\":1,\"3\":1,\"4\":1,\"5\":1}}],[\"sanitized\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"sanitization\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"sandboxed\",{\"2\":{\"0\":1,\"4\":1,\"5\":1,\"7\":1}}],[\"sandbox\",{\"2\":{\"1\":1,\"2\":1,\"3\":1,\"7\":1}}],[\"saves\",{\"2\":{\"0\":1,\"4\":1,\"5\":1}}],[\"saved\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"says\",{\"2\":{\"1\":3,\"2\":3,\"3\":4}}],[\"say\",{\"2\":{\"1\":2,\"2\":2,\"3\":2}}],[\"sat\",{\"2\":{\"3\":1,\"4\":1,\"5\":1}}],[\"small\",{\"2\":{\"0\":1,\"4\":1,\"5\":1}}],[\"smaller\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"silently\",{\"2\":{\"0\":1,\"1\":3,\"2\":4,\"3\":4,\"4\":1,\"5\":1,\"6\":2}}],[\"silent\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"simply\",{\"2\":{\"1\":1,\"2\":2,\"3\":2}}],[\"sits\",{\"2\":{\"0\":1,\"1\":3,\"2\":3,\"3\":3,\"4\":1,\"5\":1}}],[\"site\",{\"2\":{\"1\":3,\"2\":3,\"3\":4,\"6\":4}}],[\"sites`\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"sit\",{\"2\":{\"4\":1,\"5\":1}}],[\"sized\",{\"2\":{\"0\":1,\"4\":1,\"5\":1,\"6\":1}}],[\"size\",{\"2\":{\"1\":1,\"2\":1,\"3\":1,\"6\":2}}],[\"single\",{\"2\":{\"0\":2,\"1\":2,\"2\":2,\"3\":2,\"4\":3,\"5\":3,\"6\":1,\"7\":1}}],[\"since\",{\"2\":{\"1\":3,\"2\":3,\"3\":3}}],[\"side\",{\"2\":{\"1\":2,\"2\":2,\"3\":2}}],[\"six\",{\"2\":{\"1\":1,\"2\":1,\"3\":1,\"6\":1}}],[\"signed\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"signal\",{\"2\":{\"3\":1}}],[\"split\",{\"2\":{\"0\":1,\"4\":1,\"5\":1}}],[\"splits\",{\"2\":{\"0\":1,\"4\":1,\"5\":1}}],[\"splash\",{\"2\":{\"0\":1,\"1\":2,\"2\":2,\"3\":2,\"4\":1,\"5\":1,\"7\":1}}],[\"spreads\",{\"2\":{\"6\":1}}],[\"spread\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"sparse\",{\"2\":{\"6\":1}}],[\"space\",{\"2\":{\"0\":1,\"1\":3,\"2\":3,\"3\":4,\"4\":1,\"5\":1,\"6\":1,\"7\":1}}],[\"spawned\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"spawns\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"specific\",{\"2\":{\"6\":1}}],[\"specifiers\",{\"2\":{\"0\":2,\"4\":2,\"5\":2}}],[\"specifier\",{\"2\":{\"0\":1,\"1\":1,\"2\":1,\"3\":1,\"4\":1,\"5\":1}}],[\"speed\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"src\",{\"2\":{\"0\":1,\"1\":28,\"2\":28,\"3\":29,\"4\":1,\"5\":1,\"6\":30,\"7\":1}}],[\"shutdown\",{\"2\":{\"1\":3,\"2\":3,\"3\":3,\"6\":3}}],[\"shell\",{\"2\":{\"1\":1}}],[\"short\",{\"2\":{\"6\":1}}],[\"show\",{\"2\":{\"1\":1,\"2\":1,\"3\":1,\"6\":1}}],[\"shown\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"shows\",{\"2\":{\"1\":2,\"2\":2,\"3\":2}}],[\"showing\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"should\",{\"2\":{\"1\":3,\"2\":3,\"3\":3,\"6\":1,\"7\":1}}],[\"shipped\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"ships\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"shared\",{\"2\":{\"0\":4,\"1\":1,\"2\":1,\"3\":3,\"4\":5,\"5\":5,\"6\":2,\"7\":3}}],[\"share\",{\"2\":{\"0\":1,\"4\":1,\"5\":1}}],[\"shares\",{\"2\":{\"3\":1,\"4\":1,\"5\":1}}],[\"shape\",{\"2\":{\"1\":2,\"2\":2,\"3\":2}}],[\"symptom\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"syncdropzonewindow\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"syntaxerror\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"ssrf\",{\"2\":{\"1\":1,\"2\":1,\"3\":1,\"6\":3}}],[\"swallowing\",{\"2\":{\"6\":1}}],[\"switch\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"sweeps\",{\"2\":{\"1\":1,\"2\":1,\"3\":2}}],[\"sweep\",{\"2\":{\"3\":1}}],[\"skips\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"skip\",{\"2\":{\"3\":1}}],[\"hot\",{\"2\":{\"0\":1,\"4\":1,\"5\":1,\"7\":1}}],[\"host`\",{\"2\":{\"7\":1}}],[\"hostname\",{\"2\":{\"6\":2}}],[\"host\",{\"2\":{\"0\":10,\"1\":9,\"2\":9,\"3\":13,\"4\":15,\"5\":15,\"7\":6}}],[\"hostile\",{\"2\":{\"0\":1,\"4\":1,\"5\":1,\"6\":1}}],[\"how\",{\"2\":{\"1\":2,\"2\":2,\"3\":3}}],[\"holds\",{\"2\":{\"0\":2,\"4\":2,\"5\":2}}],[\"hold\",{\"2\":{\"0\":1,\"1\":1,\"2\":1,\"3\":1,\"4\":1,\"5\":1}}],[\"holes\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"honestly\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"honours\",{\"2\":{\"1\":1,\"2\":1,\"3\":2}}],[\"hexadecimal\",{\"2\":{\"6\":2}}],[\"helpers\",{\"2\":{\"6\":1}}],[\"helper\",{\"2\":{\"6\":1}}],[\"here\",{\"2\":{\"0\":1,\"1\":1,\"2\":1,\"3\":2,\"4\":1,\"5\":1}}],[\"headlessly\",{\"2\":{\"0\":1,\"4\":1,\"5\":1}}],[\"headline\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"header\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"headings\",{\"2\":{\"3\":1}}],[\"http\",{\"2\":{\"0\":2,\"4\":2,\"5\":2,\"6\":8}}],[\"https\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"httponly\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"html`\",{\"2\":{\"0\":4,\"1\":1,\"2\":1,\"3\":1,\"4\":4,\"5\":4}}],[\"html\",{\"2\":{\"1\":1,\"2\":1,\"3\":1,\"6\":1}}],[\"has\",{\"2\":{\"0\":3,\"1\":6,\"2\":6,\"3\":7,\"4\":3,\"5\":3,\"6\":1}}],[\"handoff\",{\"2\":{\"7\":1}}],[\"handoffs\",{\"2\":{\"0\":1,\"4\":1,\"5\":1}}],[\"hand\",{\"2\":{\"0\":1,\"4\":1,\"5\":1}}],[\"handed\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"handle\",{\"2\":{\"0\":1,\"4\":1,\"5\":1}}],[\"handler\",{\"2\":{\"1\":1,\"2\":1,\"3\":1,\"6\":1}}],[\"handles\",{\"2\":{\"3\":1}}],[\"handling\",{\"2\":{\"1\":2,\"2\":1,\"3\":1,\"6\":1}}],[\"hands\",{\"2\":{\"3\":1,\"4\":1,\"5\":1}}],[\"hang\",{\"2\":{\"0\":1,\"4\":1,\"5\":1}}],[\"hangs\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"hazard\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"hardening\",{\"2\":{\"6\":2}}],[\"hard\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"hardcoded\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"harness\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"have\",{\"2\":{\"1\":1,\"2\":2,\"3\":2,\"6\":2}}],[\"had\",{\"2\":{\"2\":1,\"3\":2}}],[\"half\",{\"2\":{\"0\":1,\"1\":1,\"2\":1,\"3\":1,\"4\":1,\"5\":1}}],[\"halves\",{\"2\":{\"3\":1}}],[\"happens\",{\"2\":{\"1\":2,\"2\":2,\"3\":2}}],[\"happen\",{\"2\":{\"3\":1,\"6\":1}}],[\"history\",{\"2\":{\"0\":1,\"1\":1,\"2\":1,\"3\":1,\"4\":1,\"5\":1,\"7\":1}}],[\"hides\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"higher\",{\"2\":{\"6\":1}}],[\"highest\",{\"2\":{\"6\":1}}],[\"high\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"hls\",{\"2\":{\"1\":3,\"2\":3,\"3\":3,\"6\":2}}],[\"hundred\",{\"2\":{\"1\":4,\"2\":4,\"3\":4}}],[\"822\",{\"2\":{\"6\":2}}],[\"82\",{\"2\":{\"6\":2}}],[\"8\",{\"2\":{\"0\":2,\"1\":3,\"2\":3,\"3\":4,\"4\":2,\"5\":2,\"6\":1}}],[\"8885`\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"bypass\",{\"2\":{\"6\":2}}],[\"bypasses\",{\"2\":{\"1\":2,\"2\":2,\"3\":2}}],[\"by\",{\"2\":{\"0\":4,\"1\":3,\"2\":3,\"3\":6,\"4\":4,\"5\":4,\"6\":5,\"7\":1}}],[\"bytes\",{\"2\":{\"0\":4,\"1\":3,\"2\":3,\"3\":4,\"4\":4,\"5\":4,\"6\":5}}],[\"byte\",{\"2\":{\"0\":1,\"4\":1,\"5\":1,\"6\":1}}],[\"broke\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"broken\",{\"2\":{\"1\":2,\"2\":2,\"3\":2}}],[\"browser\",{\"2\":{\"0\":4,\"1\":1,\"2\":1,\"3\":1,\"4\":5,\"5\":5,\"7\":2}}],[\"browsing\",{\"2\":{\"3\":1}}],[\"brave\",{\"2\":{\"0\":1,\"4\":1,\"5\":1}}],[\"branch\",{\"2\":{\"1\":3,\"2\":3,\"3\":3,\"6\":1}}],[\"briefly\",{\"2\":{\"6\":1}}],[\"bridge\",{\"2\":{\"0\":3,\"1\":1,\"2\":1,\"3\":1,\"4\":3,\"5\":3,\"7\":1}}],[\"bricks\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"break\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"breadth\",{\"2\":{\"3\":1}}],[\"behavior\",{\"2\":{\"7\":1}}],[\"behind\",{\"2\":{\"6\":1}}],[\"best\",{\"2\":{\"6\":1}}],[\"beside\",{\"2\":{\"0\":1,\"1\":2,\"2\":2,\"3\":2,\"4\":2,\"5\":2}}],[\"before\",{\"2\":{\"0\":2,\"1\":3,\"2\":2,\"3\":3,\"4\":2,\"5\":2,\"6\":4,\"7\":1}}],[\"bearing\",{\"2\":{\"0\":1,\"4\":1,\"5\":1}}],[\"be\",{\"2\":{\"0\":1,\"1\":3,\"2\":3,\"3\":4,\"4\":1,\"5\":1,\"6\":4}}],[\"belongs\",{\"2\":{\"0\":1,\"4\":1,\"5\":1}}],[\"below\",{\"2\":{\"1\":2,\"2\":3,\"3\":3,\"6\":1}}],[\"becomes\",{\"2\":{\"0\":1,\"4\":1,\"5\":1,\"6\":2}}],[\"because\",{\"2\":{\"1\":1,\"2\":1,\"3\":1,\"4\":2,\"5\":2,\"6\":2}}],[\"between\",{\"2\":{\"1\":1,\"2\":1,\"3\":2,\"6\":1}}],[\"better\",{\"2\":{\"1\":2,\"2\":2,\"3\":2}}],[\"been\",{\"2\":{\"2\":2,\"3\":2,\"6\":1}}],[\"bucket\",{\"2\":{\"0\":1,\"4\":1,\"5\":1}}],[\"build\",{\"2\":{\"0\":9,\"1\":4,\"2\":4,\"3\":5,\"4\":9,\"5\":9,\"6\":1,\"7\":6}}],[\"builds\",{\"2\":{\"0\":2,\"1\":1,\"2\":1,\"3\":2,\"4\":2,\"5\":2,\"7\":1}}],[\"builder\",{\"2\":{\"0\":4,\"1\":4,\"2\":4,\"3\":6,\"4\":3,\"5\":3}}],[\"build`\",{\"2\":{\"1\":1,\"2\":1,\"3\":3,\"6\":1,\"7\":1}}],[\"building\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"built\",{\"2\":{\"1\":1,\"2\":1,\"3\":1,\"7\":1}}],[\"but\",{\"2\":{\"1\":10,\"2\":10,\"3\":11,\"6\":8}}],[\"bundled\",{\"2\":{\"0\":1,\"4\":1,\"5\":1}}],[\"bundle\",{\"2\":{\"1\":3,\"2\":3,\"3\":4,\"6\":1}}],[\"bugs\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"bug\",{\"2\":{\"1\":1,\"2\":1,\"3\":2}}],[\"bulk\",{\"2\":{\"3\":1,\"4\":1,\"5\":1}}],[\"both\",{\"2\":{\"0\":1,\"1\":12,\"2\":13,\"3\":15}}],[\"boundaries\",{\"2\":{\"7\":1}}],[\"boundary\",{\"2\":{\"1\":1,\"2\":1,\"3\":2,\"4\":1,\"5\":1,\"6\":3}}],[\"bound\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"bounds\",{\"2\":{\"1\":1,\"2\":1,\"3\":3,\"6\":1}}],[\"bounded\",{\"2\":{\"1\":1,\"2\":1,\"3\":3,\"6\":1}}],[\"bootstrap\",{\"2\":{\"1\":3,\"2\":3,\"3\":3}}],[\"b\",{\"2\":{\"1\":23,\"2\":23,\"3\":35,\"6\":3}}],[\"baseline\",{\"2\":{\"6\":1}}],[\"based\",{\"2\":{\"6\":4}}],[\"backwards\",{\"2\":{\"0\":1,\"4\":1,\"5\":1}}],[\"backpressure\",{\"2\":{\"0\":1,\"4\":1,\"5\":1}}],[\"back\",{\"2\":{\"0\":1,\"1\":2,\"2\":2,\"3\":2,\"4\":2,\"5\":2}}],[\"backoff\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"background\",{\"2\":{\"1\":7,\"2\":7,\"3\":7}}],[\"batch\",{\"2\":{\"1\":2,\"2\":2,\"3\":2}}],[\"bare\",{\"2\":{\"1\":2,\"2\":2,\"3\":2}}],[\"block\",{\"2\":{\"0\":1,\"1\":4,\"2\":4,\"3\":5,\"4\":1,\"5\":1,\"6\":1}}],[\"blocks\",{\"2\":{\"1\":3,\"2\":3,\"3\":3,\"6\":1}}],[\"blocking\",{\"2\":{\"3\":1}}],[\"blast\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"btbn\",{\"2\":{\"1\":1,\"2\":1,\"3\":2}}],[\"binaries\",{\"2\":{\"7\":1}}],[\"binary\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"bin`\",{\"2\":{\"0\":1,\"4\":1,\"5\":1,\"6\":1}}],[\"`4142000000000000`\",{\"2\":{\"6\":1}}],[\"`<temp>\",{\"2\":{\"6\":1}}],[\"`<name>\",{\"2\":{\"0\":2,\"4\":2,\"5\":2}}],[\"```bash\",{\"2\":{\"0\":3,\"4\":3,\"5\":3}}],[\"```\",{\"2\":{\"0\":3,\"1\":8,\"2\":8,\"3\":8,\"4\":3,\"5\":3}}],[\"```ts\",{\"2\":{\"1\":5,\"2\":5,\"3\":5}}],[\"```go\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"`\",{\"2\":{\"0\":26,\"1\":75,\"2\":74,\"3\":90,\"4\":28,\"5\":28,\"6\":45,\"7\":18}}],[\"`src\",{\"2\":{\"0\":10,\"1\":7,\"2\":7,\"3\":8,\"4\":10,\"5\":10,\"6\":3,\"7\":8}}],[\"`splash\",{\"2\":{\"0\":1,\"4\":1,\"5\":1}}],[\"`setproxyurl\",{\"2\":{\"6\":1}}],[\"`settings`\",{\"2\":{\"1\":1,\"2\":1,\"3\":2}}],[\"`settabindicator`\",{\"2\":{\"1\":1,\"2\":1,\"3\":2}}],[\"`segments\",{\"2\":{\"6\":1}}],[\"`segments`\",{\"2\":{\"6\":1}}],[\"`segmenter\",{\"2\":{\"0\":1,\"4\":1,\"5\":1}}],[\"`serverbusyerror`\",{\"2\":{\"0\":1,\"1\":1,\"2\":1,\"3\":2,\"4\":1,\"5\":1}}],[\"`security\",{\"2\":{\"0\":1,\"4\":1,\"5\":1}}],[\"`selectedfiles`\",{\"2\":{\"1\":1,\"2\":1,\"3\":2}}],[\"`sendurls`\",{\"2\":{\"1\":2,\"2\":2,\"3\":2}}],[\"`sendnativemessage`\",{\"2\":{\"4\":1,\"5\":1}}],[\"`start\",{\"2\":{\"6\":2}}],[\"`state\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"`statefortab`\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"`statfs\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"`status\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"`statusbar`\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"`store\",{\"2\":{\"0\":2,\"1\":3,\"2\":3,\"3\":3,\"4\":2,\"5\":2}}],[\"`storage\",{\"2\":{\"1\":1,\"2\":1,\"3\":2}}],[\"`s`\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"`subtitles`\",{\"2\":{\"1\":1,\"2\":1,\"3\":2}}],[\"`sourceurl`\",{\"2\":{\"1\":1,\"2\":1,\"3\":2}}],[\"`same\",{\"2\":{\"6\":1}}],[\"`sanitizetasks`\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"`safestorage`\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"`saving\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"`saveasdialog`\",{\"2\":{\"3\":1}}],[\"`shell\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"`sha256url`\",{\"2\":{\"1\":1,\"2\":1,\"3\":2}}],[\"`shouldlaunchformessage`\",{\"2\":{\"3\":1}}],[\"`scanning`\",{\"2\":{\"6\":1}}],[\"`scanfile`\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"`schedule\",{\"2\":{\"6\":1}}],[\"`scheduler\",{\"2\":{\"1\":4,\"2\":4,\"3\":4}}],[\"`scheduler`\",{\"2\":{\"3\":1}}],[\"`schedulerdialog`\",{\"2\":{\"3\":1}}],[\"`scheduleaction`\",{\"2\":{\"1\":2,\"2\":2,\"3\":3}}],[\"`syncdropzonewindow`\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"`synchronizemembership`\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"`size`\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"`sitegrabber\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"`siteprojectmanager\",{\"2\":{\"1\":1,\"2\":1,\"3\":1,\"6\":1}}],[\"`sidebar`\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"`handoff\",{\"2\":{\"0\":1,\"1\":1,\"2\":1,\"3\":1,\"4\":1,\"5\":1}}],[\"`handoffwindow`\",{\"2\":{\"3\":1}}],[\"`host`\",{\"2\":{\"6\":1}}],[\"`host\",{\"2\":{\"0\":2,\"1\":5,\"2\":5,\"3\":6,\"4\":2,\"5\":2,\"6\":1,\"7\":2}}],[\"`hkcu`\",{\"2\":{\"0\":1,\"4\":1,\"5\":1}}],[\"`hlsrunner`\",{\"2\":{\"0\":1,\"4\":1,\"5\":1}}],[\"`hls`\",{\"2\":{\"0\":1,\"4\":1,\"5\":1}}],[\"`hls\",{\"2\":{\"0\":2,\"1\":2,\"2\":2,\"3\":2,\"4\":2,\"5\":2}}],[\"`http\",{\"2\":{\"0\":1,\"1\":1,\"2\":1,\"3\":1,\"4\":1,\"5\":1,\"6\":1}}],[\"`httpstatuserror`\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"`headers`\",{\"2\":{\"1\":2,\"2\":2,\"3\":2}}],[\"`headers\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"`drained`\",{\"2\":{\"6\":1}}],[\"`draco\",{\"2\":{\"0\":1,\"1\":1,\"2\":1,\"3\":1,\"4\":1,\"5\":1}}],[\"`dashrunner`\",{\"2\":{\"0\":1,\"1\":2,\"2\":2,\"3\":3,\"4\":1,\"5\":1}}],[\"`dash`\",{\"2\":{\"0\":1,\"4\":1,\"5\":1}}],[\"`dash\",{\"2\":{\"0\":1,\"4\":1,\"5\":1}}],[\"`deps\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"`destination\",{\"2\":{\"0\":1,\"4\":1,\"5\":1}}],[\"`description`\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"`done`\",{\"2\":{\"1\":3,\"2\":3,\"3\":3,\"6\":2}}],[\"`downloadmanager`\",{\"2\":{\"0\":1,\"4\":1,\"5\":1}}],[\"`downloadmanager\",{\"2\":{\"1\":1,\"2\":1,\"3\":1,\"6\":3}}],[\"`downloadtable`\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"`downloadsubtitles`\",{\"2\":{\"1\":1,\"2\":1,\"3\":2}}],[\"`download`\",{\"2\":{\"3\":1,\"4\":1,\"5\":1,\"6\":1}}],[\"`downloadbatch`\",{\"2\":{\"3\":2,\"4\":2,\"5\":2}}],[\"`dir`\",{\"2\":{\"1\":2,\"2\":2,\"3\":3,\"6\":1}}],[\"`dist\",{\"2\":{\"0\":2,\"1\":1,\"2\":1,\"3\":1,\"4\":2,\"5\":2,\"7\":1}}],[\"`dist`\",{\"2\":{\"0\":1,\"1\":2,\"2\":2,\"3\":2}}],[\"`dispose\",{\"2\":{\"1\":1,\"2\":1,\"3\":3}}],[\"`disallow\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"`discardreservedpath`\",{\"2\":{\"3\":1}}],[\"`d\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"`tmpdir`\",{\"2\":{\"6\":2}}],[\"`try\",{\"2\":{\"6\":1}}],[\"`true`\",{\"2\":{\"1\":2,\"2\":2,\"3\":2}}],[\"`torrentrunner\",{\"2\":{\"6\":3}}],[\"`torrentrunner`\",{\"2\":{\"0\":1,\"4\":1,\"5\":1}}],[\"`torrent`\",{\"2\":{\"0\":1,\"4\":1,\"5\":1}}],[\"`torrentfiles`\",{\"2\":{\"1\":1,\"2\":1,\"3\":2}}],[\"`tools`\",{\"2\":{\"6\":1}}],[\"`tools\",{\"2\":{\"0\":4,\"1\":5,\"2\":5,\"3\":6,\"4\":4,\"5\":4,\"7\":1}}],[\"`toolbar`\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"`this\",{\"2\":{\"1\":2,\"2\":2,\"3\":2}}],[\"`tests`\",{\"2\":{\"6\":1}}],[\"`tests\",{\"2\":{\"0\":1,\"1\":4,\"2\":3,\"3\":3,\"4\":1,\"5\":1,\"7\":3}}],[\"`tempdir`\",{\"2\":{\"1\":6,\"2\":6,\"3\":8}}],[\"`tempdir\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"`task\",{\"2\":{\"1\":12,\"2\":12,\"3\":13,\"6\":2}}],[\"`tasks\",{\"2\":{\"1\":4,\"2\":4,\"3\":5}}],[\"`tasksof`\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"`taskrunner`\",{\"2\":{\"0\":1,\"1\":2,\"2\":2,\"3\":3,\"4\":1,\"5\":1}}],[\"`taskrunner\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"`taskids`\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"`taskdetaildialog`\",{\"2\":{\"3\":1}}],[\"`tabs\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"`tail`\",{\"2\":{\"2\":2,\"3\":2}}],[\"`ticker`\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"`titlebar`\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"`engine\",{\"2\":{\"0\":2,\"3\":1,\"4\":2,\"5\":2}}],[\"`enginesettings`\",{\"2\":{\"1\":4,\"2\":4,\"3\":5}}],[\"`end`\",{\"2\":{\"0\":1,\"4\":1,\"5\":1}}],[\"`ensurecattimer`\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"`ensuredirs\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"`ensuredirs`\",{\"2\":{\"4\":1,\"5\":1}}],[\"`ensureffmpeg`\",{\"2\":{\"3\":1}}],[\"`electron\",{\"2\":{\"0\":2,\"1\":3,\"2\":3,\"3\":5,\"4\":1,\"5\":1}}],[\"`electron`\",{\"2\":{\"1\":4,\"2\":4,\"3\":4}}],[\"`exdev`\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"`exponentialbackoff`\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"`expectedchecksum`\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"`excludedchannelids`\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"`excludedvideoids`\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"`exits\",{\"2\":{\"1\":1}}],[\"`extension`\",{\"2\":{\"6\":1}}],[\"`extension\",{\"2\":{\"0\":7,\"1\":8,\"2\":8,\"3\":9,\"4\":7,\"5\":7,\"7\":4}}],[\"`extraresources`\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"`echo\",{\"2\":{\"1\":1}}],[\"`eperm`\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"`error`\",{\"2\":{\"3\":1,\"6\":1}}],[\"`main\",{\"2\":{\"0\":3,\"1\":1,\"2\":1,\"3\":1,\"4\":3,\"5\":3}}],[\"`manager\",{\"2\":{\"1\":14,\"2\":14,\"3\":16,\"4\":1,\"5\":1,\"6\":2}}],[\"`manageroptions`\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"`map`\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"`maxconnectionspertask`\",{\"2\":{\"0\":1,\"1\":2,\"2\":2,\"3\":2,\"4\":1,\"5\":1}}],[\"`maxconcurrenttasks`\",{\"2\":{\"1\":1,\"2\":1,\"3\":2}}],[\"`maxlogbytes`\",{\"2\":{\"3\":1}}],[\"`mode\",{\"2\":{\"6\":1}}],[\"`module\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"`movefile`\",{\"2\":{\"1\":2,\"2\":2,\"3\":2,\"4\":1,\"5\":1}}],[\"`mpdrunner`\",{\"2\":{\"0\":1,\"4\":1,\"5\":1}}],[\"`mpdrunner\",{\"2\":{\"1\":1,\"2\":1,\"3\":2}}],[\"`mkdirsync`\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"`media`\",{\"2\":{\"3\":1,\"4\":1,\"5\":1,\"6\":1}}],[\"`activecount`\",{\"2\":{\"6\":1}}],[\"`aaaabbbb`\",{\"2\":{\"6\":1}}],[\"`a`\",{\"2\":{\"6\":1}}],[\"`appcontext\",{\"2\":{\"0\":1,\"4\":1,\"5\":1}}],[\"`appdata\",{\"2\":{\"0\":1,\"4\":1,\"5\":1}}],[\"`appdata`\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"`announcetoolupdates`\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"`add\",{\"2\":{\"6\":1}}],[\"`adaptiveconnectionceiling`\",{\"2\":{\"0\":1,\"1\":2,\"2\":2,\"3\":2,\"4\":1,\"5\":1}}],[\"`adoptfinishedhalf`\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"`await\",{\"2\":{\"1\":2,\"2\":2,\"3\":2}}],[\"`allowprivate\",{\"2\":{\"6\":1}}],[\"`allowimportingtsextensions`\",{\"2\":{\"0\":1,\"4\":1,\"5\":1}}],[\"`allowtochangeinstallationdirectory\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"`allow\",{\"2\":{\"1\":2,\"2\":2,\"3\":3}}],[\"`all\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"`abortsignal`\",{\"2\":{\"1\":1,\"2\":1,\"3\":3}}],[\"`agent`\",{\"2\":{\"0\":1,\"4\":1,\"5\":1}}],[\"`agents\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"`audiourl`\",{\"2\":{\"1\":2,\"2\":2,\"3\":2}}],[\"`authorization`\",{\"2\":{\"3\":1}}],[\"`b`\",{\"2\":{\"6\":1}}],[\"`bodytimeout`\",{\"2\":{\"0\":1,\"4\":1,\"5\":1}}],[\"`bootstrap\",{\"2\":{\"0\":1,\"1\":2,\"2\":2,\"3\":2,\"4\":1,\"5\":1}}],[\"`build`\",{\"2\":{\"0\":1,\"1\":1,\"2\":1,\"3\":2,\"4\":1,\"5\":1}}],[\"`bridge\",{\"2\":{\"0\":1,\"4\":1,\"5\":1}}],[\"`break`\",{\"2\":{\"1\":1,\"2\":1,\"3\":2}}],[\"`retireddispatchers`\",{\"2\":{\"6\":1}}],[\"`return`s\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"`releasedrainedwithwork\",{\"2\":{\"6\":1}}],[\"`releasedrainedwithwork`\",{\"2\":{\"3\":1}}],[\"`require\",{\"2\":{\"1\":2,\"2\":2,\"3\":3}}],[\"`require`\",{\"2\":{\"1\":1,\"2\":1,\"3\":2}}],[\"`readjournal\",{\"2\":{\"1\":1,\"2\":1,\"3\":1,\"6\":1}}],[\"`reconcilewithjournal\",{\"2\":{\"6\":1}}],[\"`reconcilewithjournal`\",{\"2\":{\"1\":2,\"2\":2,\"3\":2}}],[\"`received`\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"`resources\",{\"2\":{\"7\":1}}],[\"`resourceroot`\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"`restoreorreset\",{\"2\":{\"6\":1}}],[\"`restoreorreset`\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"`refreshyoutube\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"`refreshyoutube`\",{\"2\":{\"1\":1,\"2\":1,\"3\":2}}],[\"`refreshalltabs`\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"`remove`\",{\"2\":{\"1\":2,\"2\":2,\"3\":2}}],[\"`remove\",{\"2\":{\"3\":2}}],[\"`removejournal`\",{\"2\":{\"3\":1}}],[\"`redownload`\",{\"2\":{\"3\":1}}],[\"`run\",{\"2\":{\"1\":2,\"2\":2,\"3\":2}}],[\"`runner`\",{\"2\":{\"0\":1,\"4\":1,\"5\":1}}],[\"`runner\",{\"2\":{\"0\":1,\"4\":1,\"5\":1}}],[\"`runnercontext`\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"`running\",{\"2\":{\"1\":1,\"2\":1,\"3\":1,\"6\":2}}],[\"`running`\",{\"2\":{\"3\":1}}],[\"`ramp\",{\"2\":{\"0\":1,\"4\":1,\"5\":1}}],[\"`randomuuid\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"`ratelimiter`\",{\"2\":{\"1\":1,\"2\":1,\"3\":2}}],[\"`robots\",{\"2\":{\"1\":1,\"2\":1,\"3\":2}}],[\"`crawlsite\",{\"2\":{\"6\":1}}],[\"`createtask`\",{\"2\":{\"6\":1}}],[\"`create\",{\"2\":{\"0\":1,\"1\":1,\"2\":1,\"3\":1,\"4\":1,\"5\":1}}],[\"`createhlsrunner`\",{\"2\":{\"1\":3,\"2\":3,\"3\":3}}],[\"`createdashrunner`\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"`closedispatchers\",{\"2\":{\"6\":1}}],[\"`closesplash\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"`client\",{\"2\":{\"6\":1}}],[\"`camelcase`\",{\"2\":{\"0\":1,\"4\":1,\"5\":1}}],[\"`catmode`\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"`categoryid`\",{\"2\":{\"1\":1,\"2\":1,\"3\":2}}],[\"`cattimer`\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"`cancontinue\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"`c\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"`context\",{\"2\":{\"6\":1}}],[\"`consume\",{\"2\":{\"0\":1,\"4\":1,\"5\":1}}],[\"`connections`\",{\"2\":{\"1\":1,\"2\":1,\"3\":2}}],[\"`conn\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"`cookieheaderfor`\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"`checkforupdates`\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"`checkdiskspace`\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"`chrome\",{\"2\":{\"1\":3,\"2\":3,\"3\":3}}],[\"`number\",{\"2\":{\"6\":1}}],[\"`nan`\",{\"2\":{\"6\":3}}],[\"`naming\",{\"2\":{\"0\":1,\"1\":2,\"2\":2,\"3\":2,\"4\":1,\"5\":1}}],[\"`npm\",{\"2\":{\"0\":2,\"1\":6,\"2\":6,\"3\":10,\"4\":2,\"5\":2,\"6\":3,\"7\":9}}],[\"`node\",{\"2\":{\"0\":2,\"1\":1,\"2\":1,\"3\":1,\"4\":2,\"5\":2,\"6\":1,\"7\":3}}],[\"`newdownload`\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"`new\",{\"2\":{\"1\":1,\"2\":1,\"3\":1,\"6\":1}}],[\"`feed\",{\"2\":{\"6\":1}}],[\"`feed`\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"`ffmpeg`\",{\"2\":{\"0\":1,\"4\":1,\"5\":1}}],[\"`finally`\",{\"2\":{\"6\":1}}],[\"`finish\",{\"2\":{\"1\":1,\"2\":1,\"3\":1,\"6\":1}}],[\"`fix\",{\"2\":{\"0\":1,\"4\":1,\"5\":1,\"7\":1}}],[\"`file`\",{\"2\":{\"0\":1,\"4\":1,\"5\":1}}],[\"`filename`\",{\"2\":{\"1\":2,\"2\":2,\"3\":2}}],[\"`filenamelocked`\",{\"2\":{\"1\":1,\"2\":1,\"3\":2}}],[\"`filenamelocked\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"`filter`\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"`force\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"`fail\",{\"2\":{\"1\":1}}],[\"`fsutil\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"`position\",{\"2\":{\"6\":1}}],[\"`position`\",{\"2\":{\"6\":1}}],[\"`postprocess`\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"`pause\",{\"2\":{\"6\":1}}],[\"`partpathfor\",{\"2\":{\"6\":1}}],[\"`pascalcase\",{\"2\":{\"0\":1,\"4\":1,\"5\":1}}],[\"`package\",{\"2\":{\"0\":1,\"1\":2,\"2\":2,\"3\":3,\"4\":1,\"5\":1}}],[\"`path\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"`pageidentity`\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"`placetask`\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"`pumpuntildone`\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"`progress\",{\"2\":{\"0\":1,\"4\":1,\"5\":1}}],[\"`provisionalsettings\",{\"2\":{\"0\":1,\"4\":1,\"5\":1}}],[\"`process\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"`protocol\",{\"2\":{\"3\":1}}],[\"`prefsready`\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"`preallocate\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"`private\",{\"2\":{\"3\":1}}],[\"`periodic`\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"`persisttasks`\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"`isprivatehost\",{\"2\":{\"6\":1}}],[\"`isprivatehost`\",{\"2\":{\"3\":1}}],[\"`index\",{\"2\":{\"0\":1,\"1\":3,\"2\":3,\"3\":3,\"4\":1,\"5\":1}}],[\"`ipc\",{\"2\":{\"1\":2,\"2\":2,\"3\":2}}],[\"`if\",{\"2\":{\"1\":6,\"2\":6,\"3\":6,\"6\":3}}],[\"`import\",{\"2\":{\"0\":1,\"1\":1,\"2\":1,\"3\":1,\"4\":1,\"5\":1,\"7\":1}}],[\"`img\",{\"2\":{\"1\":2,\"2\":2,\"3\":3}}],[\"`icons\",{\"2\":{\"1\":3,\"2\":3,\"3\":3}}],[\"`iconcache\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"`iconforsite`\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"`out\",{\"2\":{\"0\":1,\"1\":3,\"2\":3,\"3\":4,\"4\":1,\"5\":1,\"7\":2}}],[\"`onetimecompleted`\",{\"2\":{\"6\":1}}],[\"`onetime`\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"`onfinished`\",{\"2\":{\"6\":3}}],[\"`onprobed`\",{\"2\":{\"0\":1,\"4\":1,\"5\":1}}],[\"`oncomplete\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"`optionsdialog\",{\"2\":{\"1\":4,\"2\":4,\"3\":4}}],[\"`optionsdialog`\",{\"2\":{\"1\":1,\"2\":1,\"3\":2}}],[\"`openlog`\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"`o\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"`verifying`\",{\"2\":{\"6\":1}}],[\"`void\",{\"2\":{\"6\":1}}],[\"`v`\",{\"2\":{\"0\":1,\"1\":2,\"2\":2,\"3\":2,\"4\":1,\"5\":1,\"7\":1}}],[\"`v1`\",{\"2\":{\"0\":1,\"1\":1,\"2\":1,\"3\":1,\"4\":1,\"5\":1,\"7\":1}}],[\"`videoplayback\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"`validateurl`\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"`validateurl\",{\"2\":{\"3\":1,\"4\":1,\"5\":1}}],[\"`7a5ef10`\",{\"2\":{\"1\":2,\"2\":2,\"3\":2}}],[\"`queued`\",{\"2\":{\"6\":1}}],[\"`queueid`\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"`quit`\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"`quotaexceedederror`\",{\"2\":{\"0\":1,\"4\":1,\"5\":1}}],[\"`quotatimer`\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"`writefile`\",{\"2\":{\"6\":1}}],[\"`writejournal`\",{\"2\":{\"1\":1,\"2\":1,\"3\":2}}],[\"`windows\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"`worker\",{\"2\":{\"0\":1,\"1\":2,\"2\":2,\"3\":2,\"4\":1,\"5\":1}}],[\"`workspacedir\",{\"2\":{\"6\":1}}],[\"`workspacedir`\",{\"2\":{\"3\":1}}],[\"`workspace\",{\"2\":{\"3\":1,\"4\":1,\"5\":1}}],[\"`wx`\",{\"2\":{\"3\":1}}],[\"`key`\",{\"2\":{\"0\":1,\"4\":1,\"5\":1}}],[\"`kind\",{\"2\":{\"1\":2,\"2\":2,\"3\":3}}],[\"`kind`\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"`last\",{\"2\":{\"6\":1}}],[\"`launch\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"`limiter\",{\"2\":{\"0\":1,\"1\":1,\"2\":1,\"3\":1,\"4\":1,\"5\":1}}],[\"`log\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"`yt\",{\"2\":{\"0\":1,\"4\":1,\"5\":1}}],[\"`youtube`\",{\"2\":{\"1\":2,\"2\":2,\"3\":2}}],[\"`youtubeprime`\",{\"2\":{\"3\":2}}],[\"`groupid`\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"`groupname`\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"`groupfolder`\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"`grep`\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"`gofmt`\",{\"2\":{\"7\":1}}],[\"`go\",{\"2\":{\"3\":3,\"6\":1,\"7\":1}}],[\"`getpaths\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"`getpaths`\",{\"2\":{\"1\":2,\"2\":2,\"3\":3}}],[\"`getsettings`\",{\"2\":{\"3\":1}}],[\"`journalsegmentsvalid\",{\"2\":{\"6\":1}}],[\"`journal\",{\"2\":{\"0\":2,\"1\":1,\"2\":1,\"3\":1,\"4\":2,\"5\":2}}],[\"`join\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"`json\",{\"2\":{\"1\":2,\"2\":2,\"3\":3}}],[\"`url`\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"`uniquepath`\",{\"2\":{\"1\":1,\"2\":1,\"3\":2}}],[\"`userdata`\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"`uset`\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"`1259ae053ab28ce5ac717b029c0ec103c3e23f91`\",{\"2\":{\"6\":1}}],[\"`1259ae0`\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"`127\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"`$\",{\"2\":{\"2\":1,\"3\":1}}],[\"ffff\",{\"2\":{\"6\":3}}],[\"ffmpeg\",{\"2\":{\"0\":2,\"1\":3,\"2\":3,\"3\":4,\"4\":2,\"5\":2}}],[\"five\",{\"2\":{\"0\":2,\"4\":2,\"5\":2}}],[\"field\",{\"2\":{\"0\":1,\"4\":1,\"5\":1,\"6\":1}}],[\"fields\",{\"2\":{\"1\":2,\"2\":2,\"3\":3,\"6\":1}}],[\"fixtures\",{\"2\":{\"6\":1}}],[\"fix\",{\"2\":{\"1\":11,\"2\":10,\"3\":11,\"6\":3}}],[\"fixed\",{\"2\":{\"1\":4,\"2\":5,\"3\":6}}],[\"fixes\",{\"2\":{\"1\":2,\"2\":2,\"3\":2,\"6\":1}}],[\"fixing\",{\"2\":{\"3\":1}}],[\"finite\",{\"2\":{\"6\":1}}],[\"finishes\",{\"2\":{\"1\":2,\"2\":2,\"3\":2,\"6\":1}}],[\"finished\",{\"2\":{\"1\":1,\"2\":1,\"3\":1,\"6\":1}}],[\"finishing\",{\"2\":{\"1\":1,\"2\":1,\"3\":2,\"4\":1,\"5\":1}}],[\"finish\",{\"2\":{\"1\":1,\"2\":1,\"3\":1,\"6\":1}}],[\"finally`\",{\"2\":{\"6\":1}}],[\"final\",{\"2\":{\"0\":1,\"1\":1,\"2\":1,\"3\":1,\"4\":1,\"5\":1,\"6\":3}}],[\"finds\",{\"2\":{\"1\":3,\"2\":3,\"3\":3}}],[\"finding\",{\"2\":{\"1\":1,\"2\":1,\"3\":3}}],[\"findings\",{\"2\":{\"2\":1,\"3\":1,\"6\":3}}],[\"find\",{\"2\":{\"1\":2,\"2\":2,\"3\":2}}],[\"fingerprint\",{\"2\":{\"3\":1}}],[\"figure\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"filtering\",{\"2\":{\"6\":1}}],[\"file\",{\"2\":{\"0\":6,\"1\":19,\"2\":18,\"3\":19,\"4\":6,\"5\":6,\"6\":9,\"7\":1}}],[\"filenames\",{\"2\":{\"6\":1,\"7\":1}}],[\"filename\",{\"2\":{\"0\":1,\"1\":3,\"2\":3,\"3\":3,\"4\":1,\"5\":1,\"6\":2}}],[\"filenamelocked\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"filename`\",{\"2\":{\"1\":1,\"2\":1,\"3\":1,\"6\":1}}],[\"files\",{\"2\":{\"0\":3,\"1\":3,\"2\":3,\"3\":3,\"4\":3,\"5\":3,\"6\":2}}],[\"files`\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"filled\",{\"2\":{\"6\":1}}],[\"fill\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"firefox\",{\"2\":{\"0\":6,\"1\":1,\"2\":1,\"3\":1,\"4\":7,\"5\":7,\"6\":1,\"7\":3}}],[\"firefox`\",{\"2\":{\"1\":1,\"2\":1,\"3\":2}}],[\"fires\",{\"2\":{\"1\":3,\"2\":3,\"3\":3,\"6\":1}}],[\"fire\",{\"2\":{\"3\":1,\"6\":1}}],[\"first\",{\"2\":{\"1\":5,\"2\":4,\"3\":5,\"6\":2}}],[\"focused\",{\"2\":{\"0\":2,\"4\":2,\"5\":2,\"7\":2}}],[\"for\",{\"2\":{\"0\":6,\"1\":16,\"2\":16,\"3\":20,\"4\":8,\"5\":8,\"6\":11,\"7\":3}}],[\"forever\",{\"2\":{\"1\":4,\"2\":4,\"3\":4}}],[\"forced\",{\"2\":{\"1\":3,\"2\":3,\"3\":3}}],[\"force\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"forms\",{\"2\":{\"6\":1}}],[\"formatter\",{\"2\":{\"7\":1}}],[\"formatting\",{\"2\":{\"6\":1}}],[\"format\",{\"2\":{\"0\":1,\"1\":1,\"2\":1,\"3\":1,\"4\":1,\"5\":1,\"7\":1}}],[\"formats\",{\"2\":{\"0\":1,\"4\":1,\"5\":1}}],[\"form\",{\"2\":{\"1\":1,\"6\":1}}],[\"forget\",{\"2\":{\"3\":1}}],[\"four\",{\"2\":{\"0\":1,\"1\":4,\"2\":4,\"3\":5,\"4\":1,\"5\":1}}],[\"found\",{\"2\":{\"0\":1,\"3\":1,\"4\":1,\"5\":1}}],[\"found`\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"followed\",{\"2\":{\"6\":2}}],[\"following\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"folders\",{\"2\":{\"6\":1}}],[\"folder\",{\"2\":{\"0\":3,\"1\":3,\"2\":3,\"3\":4,\"4\":3,\"5\":3,\"6\":1}}],[\"from\",{\"2\":{\"0\":4,\"1\":12,\"2\":13,\"3\":22,\"4\":5,\"5\":5,\"6\":5,\"7\":1}}],[\"framing\",{\"2\":{\"0\":1,\"4\":1,\"5\":1}}],[\"frames\",{\"2\":{\"0\":2,\"4\":2,\"5\":2}}],[\"frame\",{\"2\":{\"1\":2,\"2\":2,\"3\":3,\"4\":1,\"5\":1}}],[\"free\",{\"2\":{\"0\":2,\"1\":2,\"2\":2,\"3\":2,\"4\":2,\"5\":2,\"7\":1}}],[\"freed\",{\"2\":{\"0\":1,\"4\":1,\"5\":1}}],[\"fresh\",{\"2\":{\"1\":3,\"2\":3,\"3\":3,\"4\":1,\"5\":1}}],[\"floating\",{\"2\":{\"0\":1,\"4\":1,\"5\":1}}],[\"flight\",{\"2\":{\"0\":2,\"1\":1,\"2\":1,\"3\":1,\"4\":2,\"5\":2,\"6\":1}}],[\"flush\",{\"2\":{\"0\":1,\"4\":1,\"5\":1}}],[\"flushes\",{\"2\":{\"1\":4,\"2\":4,\"3\":4}}],[\"flushpromise\",{\"2\":{\"1\":2,\"2\":2,\"3\":2}}],[\"flaw\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"flag\",{\"2\":{\"1\":1,\"2\":1,\"3\":2}}],[\"fetch\",{\"2\":{\"0\":1,\"1\":2,\"2\":2,\"3\":2,\"4\":1,\"5\":1}}],[\"fetches\",{\"2\":{\"0\":1,\"1\":1,\"2\":1,\"3\":1,\"4\":1,\"5\":1}}],[\"fetched\",{\"2\":{\"0\":1,\"4\":1,\"5\":1}}],[\"fewer\",{\"2\":{\"0\":1,\"4\":1,\"5\":1}}],[\"few\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"feed\",{\"2\":{\"6\":1}}],[\"feeds\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"feedback\",{\"2\":{\"1\":2,\"2\":1,\"3\":1}}],[\"features\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"feature\",{\"2\":{\"3\":2}}],[\"factory\",{\"2\":{\"6\":1}}],[\"facing\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"fail\",{\"2\":{\"0\":1,\"1\":1,\"4\":1,\"5\":1,\"6\":1}}],[\"failed\",{\"2\":{\"0\":1,\"1\":3,\"2\":3,\"3\":4,\"4\":1,\"5\":1,\"6\":1}}],[\"failure\",{\"2\":{\"0\":1,\"1\":2,\"2\":2,\"3\":2,\"4\":1,\"5\":1,\"6\":6}}],[\"failures\",{\"2\":{\"1\":1,\"2\":3,\"3\":3,\"6\":3}}],[\"fails\",{\"2\":{\"1\":3,\"2\":3,\"3\":3,\"6\":3}}],[\"failing\",{\"2\":{\"1\":1,\"2\":1,\"3\":3,\"6\":1}}],[\"fall\",{\"2\":{\"1\":2,\"2\":2,\"3\":2}}],[\"falls\",{\"2\":{\"1\":1,\"2\":1,\"3\":1,\"4\":1,\"5\":1}}],[\"fallback\",{\"2\":{\"1\":3,\"2\":3,\"3\":4}}],[\"false\",{\"2\":{\"1\":3,\"2\":3,\"3\":4,\"4\":1,\"5\":1}}],[\"false`\",{\"2\":{\"1\":1,\"2\":1,\"3\":1,\"6\":2}}],[\"favicon\",{\"2\":{\"1\":2,\"2\":2,\"3\":3}}],[\"family\",{\"2\":{\"3\":1}}],[\"faster\",{\"2\":{\"3\":1}}],[\"function\",{\"2\":{\"1\":1,\"2\":1,\"3\":2}}],[\"fully\",{\"2\":{\"0\":1,\"1\":2,\"2\":2,\"3\":3,\"4\":1,\"5\":1}}],[\"full\",{\"2\":{\"1\":2,\"2\":2,\"3\":3,\"4\":1,\"5\":1,\"6\":1}}],[\"f\",{\"2\":{\"1\":2,\"2\":2,\"3\":3}}],[\"lived\",{\"2\":{\"6\":1}}],[\"live\",{\"2\":{\"0\":2,\"1\":2,\"2\":2,\"3\":5,\"4\":4,\"5\":4,\"7\":1}}],[\"lives\",{\"2\":{\"0\":1,\"1\":3,\"2\":3,\"3\":3,\"4\":1,\"5\":1}}],[\"limit\",{\"2\":{\"0\":1,\"1\":1,\"2\":1,\"3\":1,\"4\":1,\"5\":1}}],[\"limiter\",{\"2\":{\"1\":2,\"2\":2,\"3\":2}}],[\"list\",{\"2\":{\"1\":3,\"2\":3,\"3\":3,\"6\":2}}],[\"listed\",{\"2\":{\"3\":1}}],[\"linter\",{\"2\":{\"0\":1,\"4\":1,\"5\":1,\"7\":1}}],[\"line\",{\"2\":{\"1\":3,\"2\":3,\"3\":3}}],[\"lines\",{\"2\":{\"1\":1,\"2\":1,\"3\":2}}],[\"link\",{\"2\":{\"1\":3,\"2\":3,\"3\":4,\"4\":1,\"5\":1,\"7\":1}}],[\"links\",{\"2\":{\"1\":2,\"2\":2,\"3\":2,\"4\":1,\"5\":1}}],[\"lies\",{\"2\":{\"1\":1}}],[\"lifecycle\",{\"2\":{\"0\":1,\"4\":1,\"5\":1,\"6\":4}}],[\"lifted\",{\"2\":{\"3\":1}}],[\"let\",{\"2\":{\"6\":1}}],[\"le\",{\"2\":{\"0\":1,\"4\":1,\"5\":1}}],[\"lengths\",{\"2\":{\"6\":1}}],[\"length\",{\"2\":{\"0\":1,\"4\":1,\"5\":1,\"6\":2}}],[\"left\",{\"2\":{\"0\":1,\"1\":1,\"2\":1,\"3\":2,\"4\":1,\"5\":1}}],[\"lesson\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"least\",{\"2\":{\"6\":1}}],[\"leak\",{\"2\":{\"1\":1,\"2\":1,\"3\":1,\"6\":2}}],[\"leaving\",{\"2\":{\"1\":1,\"2\":1,\"3\":2}}],[\"leaves\",{\"2\":{\"1\":1,\"2\":1,\"3\":1,\"6\":2}}],[\"level\",{\"2\":{\"1\":1}}],[\"legitimately\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"logic\",{\"2\":{\"0\":2,\"4\":2,\"5\":2}}],[\"logged\",{\"2\":{\"0\":1,\"4\":1,\"5\":1}}],[\"log\",{\"2\":{\"1\":4,\"2\":4,\"3\":5}}],[\"log`\",{\"2\":{\"1\":2,\"2\":2,\"3\":2}}],[\"logs\",{\"2\":{\"3\":1}}],[\"loads\",{\"2\":{\"6\":1}}],[\"load\",{\"2\":{\"0\":1,\"1\":5,\"2\":5,\"3\":9,\"4\":1,\"5\":1,\"6\":2}}],[\"loaded\",{\"2\":{\"0\":1,\"4\":1,\"5\":1,\"6\":1}}],[\"long\",{\"2\":{\"1\":1,\"2\":1,\"3\":2,\"6\":2}}],[\"longer\",{\"2\":{\"1\":3,\"2\":3,\"3\":3,\"6\":1}}],[\"longest\",{\"2\":{\"3\":1}}],[\"lose\",{\"2\":{\"6\":1}}],[\"loses\",{\"2\":{\"1\":4,\"2\":4,\"3\":4}}],[\"loss\",{\"2\":{\"6\":1}}],[\"lost\",{\"2\":{\"1\":2,\"2\":2,\"3\":2}}],[\"loudly\",{\"2\":{\"1\":1}}],[\"local`\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"localization\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"localisation\",{\"2\":{\"3\":1}}],[\"locks\",{\"2\":{\"0\":1,\"4\":1,\"5\":1}}],[\"lockstep\",{\"2\":{\"0\":1,\"4\":1,\"5\":1}}],[\"lock\",{\"2\":{\"3\":1}}],[\"low\",{\"2\":{\"1\":2,\"2\":2,\"3\":2}}],[\"lookup\",{\"2\":{\"6\":1}}],[\"looks\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"look\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"looked\",{\"2\":{\"2\":1,\"3\":1}}],[\"loopback\",{\"2\":{\"6\":2}}],[\"loops\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"loop\",{\"2\":{\"1\":1}}],[\"last\",{\"2\":{\"0\":1,\"1\":1,\"2\":1,\"3\":1,\"4\":1,\"5\":1}}],[\"lasts\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"later\",{\"2\":{\"6\":2}}],[\"latent\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"latch\",{\"2\":{\"1\":2,\"2\":2,\"3\":3,\"6\":1}}],[\"launches\",{\"2\":{\"0\":1,\"1\":2,\"2\":2,\"3\":2,\"4\":1,\"5\":1}}],[\"launch\",{\"2\":{\"1\":1,\"2\":1,\"3\":2,\"6\":2,\"7\":2}}],[\"largest\",{\"2\":{\"0\":1,\"1\":1,\"2\":1,\"3\":1,\"4\":1,\"5\":1}}],[\"larger\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"land\",{\"2\":{\"0\":1,\"1\":1,\"2\":1,\"3\":2,\"4\":1,\"5\":1}}],[\"landed\",{\"2\":{\"0\":1}}],[\"lands\",{\"2\":{\"1\":2,\"2\":2,\"3\":2}}],[\"language\",{\"2\":{\"1\":1,\"2\":1,\"3\":2}}],[\"labels\",{\"2\":{\"3\":1}}],[\"17\",{\"2\":{\"6\":2}}],[\"171`\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"116\",{\"2\":{\"6\":2}}],[\"118\",{\"2\":{\"6\":2}}],[\"127\",{\"2\":{\"6\":2}}],[\"180\",{\"2\":{\"6\":1}}],[\"1\",{\"2\":{\"0\":1,\"1\":21,\"2\":22,\"3\":28,\"4\":1,\"5\":1,\"6\":2,\"7\":1}}],[\"19\",{\"2\":{\"0\":1,\"4\":1,\"5\":1}}],[\"193`\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"194`\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"154\",{\"2\":{\"6\":4}}],[\"152\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"156`\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"156\",{\"2\":{\"1\":1,\"2\":1,\"3\":1,\"6\":4}}],[\"153\",{\"2\":{\"3\":1}}],[\"102400\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"1024\",{\"2\":{\"1\":2,\"2\":2,\"3\":2}}],[\"10\",{\"2\":{\"1\":2,\"2\":2,\"3\":3}}],[\"1000\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"163`\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"163\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"16\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"160\",{\"2\":{\"1\":2,\"2\":2,\"3\":2}}],[\"169\",{\"2\":{\"3\":1}}],[\"1`\",{\"2\":{\"1\":2,\"2\":1,\"3\":1,\"6\":2}}],[\"13\",{\"2\":{\"3\":1}}],[\"21\",{\"2\":{\"6\":2}}],[\"271\",{\"2\":{\"6\":2}}],[\"224\",{\"2\":{\"6\":2}}],[\"221`\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"258\",{\"2\":{\"6\":2}}],[\"255\",{\"2\":{\"1\":2,\"2\":2,\"3\":2}}],[\"298\",{\"2\":{\"6\":2}}],[\"28\",{\"2\":{\"6\":2}}],[\"2\",{\"2\":{\"0\":1,\"1\":20,\"2\":20,\"3\":26,\"4\":1,\"5\":1,\"6\":1}}],[\"2026\",{\"2\":{\"1\":1,\"2\":1,\"3\":1,\"6\":2}}],[\"207`\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"2000\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"20\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"231`\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"231\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"2×\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"26\",{\"2\":{\"7\":1}}],[\"267`\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"267\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"262`\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"326\",{\"2\":{\"6\":2}}],[\"3\",{\"2\":{\"0\":1,\"1\":7,\"2\":6,\"3\":10,\"4\":1,\"5\":1,\"6\":1}}],[\"380`\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"380\",{\"2\":{\"1\":2,\"2\":2,\"3\":2}}],[\"361`\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"30\",{\"2\":{\"1\":2,\"2\":2,\"3\":2}}],[\"336\",{\"2\":{\"6\":2}}],[\"33`\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"33\",{\"2\":{\"1\":3,\"2\":3,\"3\":3}}],[\"34`\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"variable\",{\"2\":{\"6\":1}}],[\"valid\",{\"2\":{\"6\":1}}],[\"validation\",{\"2\":{\"6\":1,\"7\":2}}],[\"validating\",{\"2\":{\"6\":1}}],[\"validators\",{\"2\":{\"6\":2}}],[\"validator\",{\"2\":{\"6\":3}}],[\"validate\",{\"2\":{\"6\":3}}],[\"validates\",{\"2\":{\"0\":1,\"4\":1,\"5\":1,\"6\":2}}],[\"values\",{\"2\":{\"6\":1}}],[\"value\",{\"2\":{\"1\":1,\"2\":1,\"3\":1,\"6\":1}}],[\"vulnerable\",{\"2\":{\"6\":1}}],[\"v2\",{\"2\":{\"6\":1}}],[\"v2`\",{\"2\":{\"0\":1,\"1\":1,\"2\":1,\"3\":1}}],[\"v1\",{\"2\":{\"6\":1}}],[\"vite\",{\"2\":{\"0\":3,\"4\":3,\"5\":3,\"6\":1}}],[\"via\",{\"2\":{\"0\":3,\"1\":1,\"2\":1,\"3\":1,\"4\":3,\"5\":3}}],[\"vivaldi\",{\"2\":{\"0\":1,\"4\":1,\"5\":1}}],[\"visible\",{\"2\":{\"1\":1,\"2\":2,\"3\":2}}],[\"v4\",{\"2\":{\"0\":1,\"4\":1,\"5\":1}}],[\"vs\",{\"2\":{\"0\":1,\"1\":1,\"2\":1,\"3\":1}}],[\"volumes\",{\"2\":{\"1\":1,\"2\":1,\"3\":1,\"4\":1,\"5\":1}}],[\"volume\",{\"2\":{\"1\":4,\"2\":4,\"3\":8,\"4\":1,\"5\":1}}],[\"v\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"verbatim\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"verification\",{\"2\":{\"6\":2}}],[\"verified\",{\"2\":{\"1\":6,\"2\":7,\"3\":9}}],[\"verify\",{\"2\":{\"1\":1,\"6\":3}}],[\"version`\",{\"2\":{\"0\":1,\"4\":1,\"5\":1}}],[\"version\",{\"2\":{\"3\":1,\"6\":1}}],[\"vet`\",{\"2\":{\"3\":1}}],[\"468\",{\"2\":{\"6\":2}}],[\"49\",{\"2\":{\"6\":2}}],[\"443\",{\"2\":{\"6\":2}}],[\"444`\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"444\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"453\",{\"2\":{\"6\":4}}],[\"43\",{\"2\":{\"6\":2}}],[\"4\",{\"2\":{\"0\":2,\"1\":6,\"2\":6,\"3\":11,\"4\":2,\"5\":2,\"6\":1}}],[\"40\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"401\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"403\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"413`\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"412\",{\"2\":{\"1\":2,\"2\":2,\"3\":2}}],[\"410\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"41`\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"426`\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"422`\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"48`\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"48\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"55\",{\"2\":{\"6\":2}}],[\"557\",{\"2\":{\"1\":3,\"2\":3,\"3\":3}}],[\"57\",{\"2\":{\"6\":2}}],[\"5\",{\"2\":{\"0\":1,\"1\":5,\"2\":5,\"3\":6,\"4\":1,\"5\":1,\"6\":1}}],[\"561\",{\"2\":{\"6\":2}}],[\"56`\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"56\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"500\",{\"2\":{\"3\":2}}],[\"→\",{\"2\":{\"0\":13,\"1\":6,\"2\":6,\"3\":6,\"4\":13,\"5\":13}}],[\"utility\",{\"2\":{\"7\":1}}],[\"utf\",{\"2\":{\"0\":1,\"4\":1,\"5\":1}}],[\"ux\",{\"2\":{\"6\":2}}],[\"ui\",{\"2\":{\"0\":1,\"1\":2,\"2\":2,\"3\":4,\"4\":1,\"5\":1,\"6\":2,\"7\":1}}],[\"url\",{\"2\":{\"0\":1,\"1\":7,\"2\":7,\"3\":8,\"4\":3,\"5\":3,\"6\":5}}],[\"urls\",{\"2\":{\"1\":3,\"2\":3,\"3\":4}}],[\"unpacked\",{\"2\":{\"7\":1}}],[\"unhandled\",{\"2\":{\"6\":1}}],[\"unwritten\",{\"2\":{\"0\":1,\"1\":1,\"2\":1,\"3\":1,\"4\":1,\"5\":1,\"6\":1}}],[\"undici\",{\"2\":{\"0\":2,\"4\":2,\"5\":2,\"6\":1}}],[\"under\",{\"2\":{\"0\":3,\"1\":10,\"2\":10,\"3\":10,\"4\":2,\"5\":2,\"6\":1}}],[\"undefined\",{\"2\":{\"1\":1,\"2\":1,\"3\":1,\"6\":1}}],[\"unfiltered\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"unfinished\",{\"2\":{\"1\":3,\"2\":3,\"3\":3}}],[\"unconditionally\",{\"2\":{\"1\":2,\"2\":2,\"3\":2}}],[\"unused\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"until\",{\"2\":{\"0\":2,\"1\":2,\"2\":2,\"3\":2,\"4\":2,\"5\":2,\"6\":3}}],[\"untouched\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"untrusted\",{\"2\":{\"1\":1,\"2\":1,\"3\":2,\"4\":1,\"5\":1,\"6\":1,\"7\":1}}],[\"unit\",{\"2\":{\"6\":1}}],[\"unique\",{\"2\":{\"0\":2,\"1\":1,\"2\":1,\"3\":2,\"4\":2,\"5\":2,\"6\":1}}],[\"uninstall\",{\"2\":{\"1\":2,\"2\":2,\"3\":2}}],[\"uninstaller\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"unverified\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"unreachable\",{\"2\":{\"1\":2,\"2\":2,\"3\":2}}],[\"unrotated\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"unbounded\",{\"2\":{\"1\":2,\"2\":2,\"3\":2}}],[\"unnoticed\",{\"2\":{\"3\":1}}],[\"up\",{\"2\":{\"0\":2,\"1\":6,\"2\":6,\"3\":7,\"4\":2,\"5\":2}}],[\"update\",{\"2\":{\"0\":1,\"4\":1,\"5\":1,\"6\":2,\"7\":1}}],[\"using\",{\"2\":{\"6\":1}}],[\"user\",{\"2\":{\"0\":1,\"1\":8,\"2\":8,\"3\":9,\"4\":2,\"5\":2,\"6\":3}}],[\"userdata\",{\"2\":{\"0\":1,\"1\":1,\"2\":1,\"3\":1}}],[\"users\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"use\",{\"2\":{\"0\":2,\"1\":2,\"2\":2,\"3\":2,\"4\":2,\"5\":2,\"6\":5,\"7\":3}}],[\"uses\",{\"2\":{\"0\":2,\"1\":2,\"2\":2,\"3\":3,\"4\":2,\"5\":2,\"6\":2,\"7\":1}}],[\"used\",{\"2\":{\"3\":2,\"4\":3,\"5\":3,\"6\":1}}],[\"usually\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"|\",{\"2\":{\"0\":24,\"1\":79,\"2\":79,\"3\":160,\"4\":24,\"5\":24}}],[\"||\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"kind\",{\"2\":{\"0\":1,\"4\":1,\"5\":1}}],[\"killing\",{\"2\":{\"0\":1,\"4\":1,\"5\":1}}],[\"kills\",{\"2\":{\"0\":1,\"4\":1,\"5\":1}}],[\"kill\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"keygen\",{\"2\":{\"0\":1,\"4\":1,\"5\":1}}],[\"key\",{\"2\":{\"0\":3,\"4\":3,\"5\":3,\"7\":1}}],[\"keys\",{\"2\":{\"0\":1,\"4\":1,\"5\":1}}],[\"kebab\",{\"2\":{\"0\":1,\"4\":1,\"5\":1,\"7\":1}}],[\"keep\",{\"2\":{\"0\":1,\"1\":2,\"2\":2,\"3\":2,\"4\":1,\"5\":1,\"6\":2,\"7\":2}}],[\"keeps\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"keeping\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"javascript\",{\"2\":{\"7\":2}}],[\"json\",{\"2\":{\"0\":4,\"1\":3,\"2\":3,\"3\":3,\"4\":4,\"5\":4,\"6\":1}}],[\"json`\",{\"2\":{\"0\":3,\"1\":4,\"2\":4,\"3\":6,\"4\":3,\"5\":3}}],[\"js\",{\"2\":{\"0\":1,\"1\":5,\"2\":5,\"3\":5,\"4\":1,\"5\":1}}],[\"js`\",{\"2\":{\"1\":5,\"2\":5,\"3\":6}}],[\"journal\",{\"2\":{\"0\":1,\"1\":4,\"2\":4,\"3\":4,\"4\":1,\"5\":1,\"6\":17,\"7\":1}}],[\"journals\",{\"2\":{\"1\":2,\"2\":2,\"3\":2,\"4\":1,\"5\":1,\"6\":4}}],[\"join\",{\"2\":{\"1\":3,\"2\":3,\"3\":3}}],[\"just\",{\"2\":{\"0\":1,\"1\":1,\"2\":1,\"3\":2,\"4\":1,\"5\":1}}],[\"judged\",{\"2\":{\"3\":1}}],[\"queued\",{\"2\":{\"6\":3}}],[\"queues\",{\"2\":{\"0\":1,\"1\":2,\"2\":2,\"3\":2,\"4\":1,\"5\":1,\"6\":2}}],[\"queue\",{\"2\":{\"0\":1,\"1\":12,\"2\":12,\"3\":14,\"4\":1,\"5\":1,\"6\":9}}],[\"quota\",{\"2\":{\"0\":1,\"1\":2,\"2\":2,\"3\":4,\"4\":1,\"5\":1}}],[\"quotes\",{\"2\":{\"0\":1,\"4\":1,\"5\":1,\"7\":1}}],[\"quarantine\",{\"2\":{\"6\":3}}],[\"quarantined\",{\"2\":{\"6\":1}}],[\"quarantines\",{\"2\":{\"1\":1,\"2\":1,\"3\":2}}],[\"quarantine`\",{\"2\":{\"3\":1}}],[\"quit\",{\"2\":{\"3\":1}}],[\"yml`\",{\"2\":{\"0\":2,\"1\":3,\"2\":3,\"3\":5,\"4\":1,\"5\":1}}],[\"yaml\",{\"2\":{\"0\":1,\"1\":1,\"2\":1,\"3\":1}}],[\"youtube\",{\"2\":{\"1\":4,\"2\":4,\"3\":6}}],[\"05\",{\"2\":{\"6\":2}}],[\"09\",{\"2\":{\"1\":1,\"2\":1,\"3\":1,\"6\":2}}],[\"04\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"0\",{\"2\":{\"1\":4,\"2\":5,\"3\":6,\"6\":5}}],[\"0`\",{\"2\":{\"1\":1}}],[\"=\",{\"2\":{\"1\":9,\"2\":9,\"3\":9,\"6\":3}}],[\"===\",{\"2\":{\"1\":1,\"2\":1,\"3\":1,\"6\":1}}],[\"==\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"✅\",{\"2\":{\"1\":12,\"2\":12,\"3\":12}}],[\"❌\",{\"2\":{\"1\":4,\"2\":4,\"3\":4}}],[\"628`\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"628\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"661`\",{\"2\":{\"1\":2,\"2\":2,\"3\":2}}],[\"635`\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"60\",{\"2\":{\"1\":4,\"2\":4,\"3\":4}}],[\"6\",{\"2\":{\"1\":1,\"2\":1,\"3\":3,\"6\":1}}],[\"64\",{\"2\":{\"1\":1,\"2\":1,\"3\":2}}],[\"6`\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"6×\",{\"2\":{\"3\":1}}],[\"7f00\",{\"2\":{\"6\":1}}],[\"741\",{\"2\":{\"6\":2}}],[\"747\",{\"2\":{\"6\":2}}],[\"742`\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"742\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"76\",{\"2\":{\"6\":2}}],[\"7638`\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"76`\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"772`\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"772\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"7\",{\"2\":{\"1\":1,\"2\":1,\"3\":2,\"6\":1}}],[\"75`\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"96\",{\"2\":{\"6\":2}}],[\"9\",{\"2\":{\"1\":1,\"2\":1,\"3\":2}}],[\"90\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"​\",{\"2\":{\"1\":2,\"2\":2,\"3\":2}}],[\"zustand\",{\"2\":{\"0\":2,\"4\":2,\"5\":2,\"7\":1}}],[\"zeros\",{\"2\":{\"6\":1}}],[\"zero\",{\"2\":{\"1\":3,\"2\":1,\"3\":1,\"6\":2}}],[\"$\",{\"2\":{\"1\":1}}],[\"~90\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"~170\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"~40\",{\"2\":{\"1\":1,\"2\":1,\"3\":1}}],[\"~3\",{\"2\":{\"3\":1}}]],\"serializationVersion\":2}"
+}

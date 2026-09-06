@@ -5,63 +5,15 @@
   "main": "./out/main/index.js",
   "author": "Nihil",
   "license": "MIT",
-  "build": {
-    "appId": "com.nihil.draco",
-    "productName": "Draco",
-    "asar": true,
-    "files": [
-      "out/**/*",
-      "package.json"
-    ],
-    "extraResources": [
-      {
-        "from": "resources/icon.ico",
-        "to": "icon.ico"
-      },
-      {
-        "from": "resources/icon.png",
-        "to": "icon.png"
-      },
-      {
-        "from": "extension",
-        "to": "extension",
-        "filter": [
-          "**/*",
-          "!key.pem"
-        ]
-      },
-      {
-        "from": "extension-firefox",
-        "to": "extension-firefox"
-      },
-      {
-        "from": "host/draco-host.exe",
-        "to": "draco-host.exe"
-      }
-    ],
-    "directories": {
-      "output": "dist-v2"
-    },
-    "win": {
-      "target": "nsis",
-      "icon": "resources/icon.ico"
-    },
-    "nsis": {
-      "oneClick": false,
-      "allowToChangeInstallationDirectory": true,
-      "createDesktopShortcut": true,
-      "createStartMenuShortcut": true
-    }
-  },
   "scripts": {
     "dev": "electron-vite dev",
-    "start": "npm run build && electron-vite preview",
-    "build": "npm run typecheck && electron-vite build",
+    "start": "npm run host && npm run build && electron-vite preview",
+    "build": "npm run typecheck && npm run extension:firefox && electron-vite build",
     "typecheck": "tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.web.json",
     "test": "node --experimental-strip-types --test tests/*.test.mjs",
     "extension:firefox": "node tools/build-firefox-extension.mjs",
-    "pack": "npm run extension:firefox && npm run build && electron-builder --dir",
-    "dist": "npm run extension:firefox && npm run build && electron-builder --win",
+    "pack": "npm run host && npm run build && electron-builder --dir",
+    "dist": "npm run host && npm run build && electron-builder --win",
     "host": "powershell -ExecutionPolicy Bypass -File host/build.ps1",
     "keygen": "node tools/gen-extension-key.mjs",
     "icon": "python tools/gen-icon.py",

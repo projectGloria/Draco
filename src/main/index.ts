@@ -16,7 +16,7 @@ import type {
   HandoffRequest,
   TaskStatus
 } from '@shared/types'
-import { ensureDirs } from './bootstrap/paths.ts'
+import { ensureDirs, getPaths } from './bootstrap/paths.ts'
 import { ClipboardWatcher } from './clipboard.ts'
 import { ensureRegistered } from './bridge/integration.ts'
 import { PipeServer } from './bridge/pipe-server.ts'
@@ -59,6 +59,7 @@ import {
   send,
   sendSplash,
   showMainWindow,
+  syncDropzoneWindow,
   updateProgressWindow
 } from './windows.ts'
 
@@ -160,24 +161,15 @@ async function main(): Promise<void> {
   createSplashWindow()
 
   const manager = new DownloadManager({
-    getSettings: () => {
-      const s = getSettings()
-      return {
-        maxConcurrentTasks: s.maxConcurrentTasks,
-        maxConnectionsPerTask: s.maxConnectionsPerTask,
-        minSplitSize: s.minSplitSize,
-        retryLimit: s.retryLimit,
-        timeoutMs: s.timeoutMs,
-        speedLimit: s.speedLimit,
-        proxyUrl: s.proxyUrl,
-        hostConnectionLimits: s.hostConnectionLimits,
-        quotaBytes: s.quotaBytes,
-        quotaWindowMinutes: s.quotaWindowMinutes,
-        antivirusProgram: s.antivirusProgram,
-        antivirusArgs: s.antivirusArgs,
-        antivirusTimeoutSeconds: s.antivirusTimeoutSeconds
-      }
-    },
+    /*
+     * `Settings` is a structural superset of `EngineSettings`, so it is handed
+     * over whole rather than copied field by field. The hand-written copy that
+     * used to live here silently dropped `catMode`, `checkDiskSpace`,
+     * `exponentialBackoff` and `adaptiveConnectionCeiling` - all four optional
+     * on `EngineSettings`, so nothing complained and four settings the Options
+     * dialog offers simply did nothing.
+     */
+    getSettings: () => ({ ...getSettings(), tempDir: getPaths().tempDir }),
     onTasks: (tasks) => {
       persistTasks(tasks)
       // Broadcast rather than sent: each open progress window is watching the
@@ -234,7 +226,13 @@ async function main(): Promise<void> {
         {
           maxConnections: context.maxConnections,
           retryLimit: context.retryLimit,
-          timeoutMs: context.timeoutMs
+          timeoutMs: context.timeoutMs,
+          // Without this the playlist runner kept its pieces beside the
+          // destination while every other runner used the workspace, and the
+          // two disagreed about where `remove` should look.
+          tempDir: context.tempDir,
+          checkDiskSpace: context.checkDiskSpace,
+          exponentialBackoff: context.exponentialBackoff
         },
         {
           limiter: context.limiter,
@@ -377,7 +375,6 @@ function finish(): void {
   ctx.scheduler.start()
   clipboardWatcher?.start()
   const updateSettings = getSettings()
-  const { syncDropzoneWindow } = require('./windows.ts')
   syncDropzoneWindow(updateSettings.showDropzone)
   if (updateSettings.autoCheckUpdates && updateSettings.updateFeedUrl) {
     void checkForUpdates(updateSettings.updateFeedUrl)
@@ -482,7 +479,7 @@ const HOST_REPLY_TTL_MS = 5 * 60_000
 const HOST_REPLY_CACHE_MAX = 512
 
 function hostMessageCanMutate(type: HostMessage['type']): boolean {
-  return type === 'download' || type === 'youtube' || type === 'media'
+  return type === 'download' || type === 'downloadBatch' || type === 'youtube' || type === 'media'
 }
 
 function pruneHostReplyCache(now: number): void {
@@ -560,7 +557,12 @@ async function handleHostMessageOnce(ctx: AppContext, message: HostMessage): Pro
         // life in a web page - so the URL is validated before the browser is
         // told we have taken it. Rejecting here leaves the download with the
         // browser, which is the safe outcome.
-        const url = validateUrl(message.url)
+        //
+        // `allowPrivate: false` because this is the boundary a page controls:
+        // it must not be able to aim the app at localhost or the router with
+        // the cookies the extension attaches for that address. URLs the user
+        // types themselves keep the default and may still reach an intranet.
+        const url = validateUrl(message.url, { allowPrivate: false })
 
         /*
          * IDM's behaviour: a click in the browser opens a window asking where
@@ -601,6 +603,38 @@ async function handleHostMessageOnce(ctx: AppContext, message: HostMessage): Pro
       } catch (err) {
         return { ok: false, taken: false, error: err instanceof Error ? err.message : String(err) }
       }
+    }
+
+    case 'downloadBatch': {
+      const settings = getSettings()
+      if (!settings.takeoverEnabled) return { ok: true, queued: 0 }
+
+      // A bulk action never asks. That is the whole reason it is a bulk action,
+      // and it is why these skip the confirm window and the progress windows
+      // that a single click would open.
+      let queued = 0
+      for (const item of message.items) {
+        try {
+          const url = validateUrl(item.url, { allowPrivate: false })
+          handoffToTask(ctx, {
+            url,
+            filename: item.filename,
+            referer: message.referer,
+            cookie: item.cookie,
+            userAgent: message.userAgent,
+            bulk: true
+          })
+          queued++
+        } catch (err) {
+          // One bad link in a page's worth of them is not a reason to drop the
+          // rest; the count tells the extension how many actually landed.
+          log.warn(`skipped a bulk link: ${err instanceof Error ? err.message : String(err)}`)
+        }
+      }
+
+      log.info(`took over ${queued} of ${message.items.length} bulk link(s)`)
+      if (queued > 0) showMainWindow()
+      return { ok: true, queued }
     }
 
     case 'youtube': {
@@ -708,6 +742,15 @@ async function handleHostMessageOnce(ctx: AppContext, message: HostMessage): Pro
 
     case 'media': {
       try {
+        // Same untrusted boundary as `download`: the media URL was observed in
+        // a page, and resolving it makes the app fetch it.
+        validateUrl(message.mediaUrl, { allowPrivate: false })
+        if (message.audioUrl) {
+          validateUrl(message.audioUrl, { allowPrivate: false })
+        }
+        for (const relatedUrl of message.relatedMediaUrls ?? []) {
+          validateUrl(relatedUrl, { allowPrivate: false })
+        }
         const candidate = recordMedia(ctx, message)
 
         // A media message only ever arrives because someone pressed the button

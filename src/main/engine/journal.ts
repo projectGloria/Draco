@@ -1,5 +1,6 @@
-import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
-import { dirname } from 'node:path'
+import { randomUUID } from 'node:crypto'
+import { mkdir, readdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
+import { basename, dirname, join } from 'node:path'
 import type { ProbeResult, Segment } from '../../shared/types.ts'
 
 /**
@@ -30,9 +31,21 @@ export interface JournalData {
 
 export async function writeJournal(path: string, data: JournalData): Promise<void> {
   await mkdir(dirname(path), { recursive: true })
-  const tmp = path + '.tmp'
-  await writeFile(tmp, JSON.stringify(data), 'utf8')
-  await rename(tmp, path)
+  // A unique temp name, for the reason `store.ts` uses one: two writers can
+  // legitimately be flushing the same journal - the 250 ms ticker racing a
+  // pause or a shutdown that forces one - and a shared `<file>.tmp` lets one
+  // rename or remove the other's file, turning a valid save into ENOENT and
+  // costing exactly the resume information the journal exists to hold.
+  const tmp = `${path}.${randomUUID()}.tmp`
+  try {
+    await writeFile(tmp, JSON.stringify(data), 'utf8')
+    await rename(tmp, path)
+  } catch (err) {
+    // On success the rename consumed the temp file; only clean up after a
+    // failure that left one behind.
+    await rm(tmp, { force: true }).catch(() => {})
+    throw err
+  }
 }
 
 export async function readJournal(path: string): Promise<JournalData | null> {
@@ -47,7 +60,15 @@ export async function readJournal(path: string): Promise<JournalData | null> {
 
 export async function removeJournal(path: string): Promise<void> {
   await rm(path, { force: true })
-  await rm(path + '.tmp', { force: true })
+  // Temp names are unique now, so a crash mid-write can leave one behind under
+  // a name nobody knows. Sweep the whole family rather than a single guess.
+  const prefix = basename(path) + '.'
+  const entries = await readdir(dirname(path)).catch(() => [] as string[])
+  for (const name of entries) {
+    if (name.startsWith(prefix) && name.endsWith('.tmp')) {
+      await rm(join(dirname(path), name), { force: true }).catch(() => {})
+    }
+  }
 }
 
 /**

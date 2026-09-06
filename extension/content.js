@@ -77,7 +77,6 @@ function standDown() {
   clearInterval(stateTimer)
   pageObserver?.disconnect()
   clearOverlays()
-  removePanel()
 }
 
 /* ------------------------------------------------------------------ */
@@ -372,7 +371,6 @@ function createOverlay(video) {
     event.stopPropagation()
     dismissedPageKey = pageKey
     clearOverlays()
-    removePanel()
   })
 
   /*
@@ -525,7 +523,6 @@ function paint(entry) {
 function retire(entry) {
   takenOver = true
   handled.add(entry.video)
-  removePanel()
 
   clearTimeout(entry.resetTimer)
   entry.resetTimer = setTimeout(() => {
@@ -612,6 +609,8 @@ async function grab(entry) {
     reply = await chrome.runtime.sendMessage({
       type: 'draco:grab-best',
       videoSrc: /^https?:/i.test(source) ? source : '',
+      videoWidth: Number(entry.video.videoWidth) || null,
+      videoHeight: Number(entry.video.videoHeight) || null,
       subtitles,
       adaptive: source.startsWith('blob:') || ADAPTIVE_SITES.test(location.hostname)
     })
@@ -673,9 +672,10 @@ function layout() {
     }
 
     const rect = video.getBoundingClientRect()
+    const minimumHeight = video instanceof HTMLAudioElement ? 30 : MIN_VIDEO_H
     const hidden =
       rect.width < MIN_VIDEO_W ||
-      rect.height < MIN_VIDEO_H ||
+      rect.height < minimumHeight ||
       rect.bottom <= 0 ||
       rect.top >= innerHeight ||
       rect.right <= 0 ||
@@ -745,6 +745,7 @@ function checkNavigation() {
   primingVideoId = null
   primeRetryDelay = 800
   dismissedPageKey = null
+  lastDomInventory = ''
 
   // The overlays go with the old page. Rebuilding them is what returns a button
   // to a reused video element, and `destroy` also cancels the retire timer of
@@ -768,16 +769,37 @@ function scan() {
     return
   }
 
-  const videos = document.querySelectorAll('video')
-  for (const video of videos) {
-    if (!overlays.has(video) && !handled.has(video)) createOverlay(video)
+  const mediaElements = document.querySelectorAll('video, audio')
+  for (const media of mediaElements) {
+    if (!overlays.has(media) && !handled.has(media)) createOverlay(media)
   }
+  inventoryDomMedia()
   // Priming only needs the video id out of the URL, not a mounted <video>
   // element, so it starts the moment a watch page shows up in a scan - which
   // on an SPA nav is well before the player itself remounts. Waiting on the
   // element was giving away the head start this exists to buy.
   primeYouTubeIfNeeded()
   schedule()
+}
+
+let lastDomInventory = ''
+function inventoryDomMedia() {
+  const items = []
+  for (const element of document.querySelectorAll('video, audio, source')) {
+    const raw = element.currentSrc || element.src || element.getAttribute('src') || ''
+    if (!raw) continue
+    let url
+    try { url = new URL(raw, location.href).href } catch { continue }
+    if (!/^https?:/i.test(url)) continue
+    const parent = element.parentElement
+    const audio = element instanceof HTMLAudioElement || parent instanceof HTMLAudioElement
+    items.push({ url, mediaType: audio ? 'audio' : 'video' })
+  }
+  const unique = [...new Map(items.map((item) => [item.url, item])).values()].slice(0, 50)
+  const signature = unique.map((item) => `${item.mediaType}:${item.url}`).join('\n')
+  if (!signature || signature === lastDomInventory) return
+  lastDomInventory = signature
+  void sendToExtension({ type: 'draco:dom-media', items: unique })
 }
 
 function currentYouTubeVideoId() {
@@ -829,99 +851,9 @@ function primeYouTubeIfNeeded() {
     })
 }
 
-/* ------------------------------------------------------------------ */
-/* 3. The corner panel, for media with no video element                */
-/* ------------------------------------------------------------------ */
-
-let panelHost = null
-let panelShadow = null
-
-function ensurePanel() {
-  if (panelHost) return
-
-  panelHost = document.createElement('div')
-  panelHost.style.cssText =
-    'position:fixed;right:18px;bottom:18px;z-index:2147483647;margin:0;padding:0;border:0'
-
-  panelShadow = panelHost.attachShadow({ mode: 'closed' })
-  panelShadow.innerHTML = `
-    <style>
-      :host { all: initial; }
-      .card {
-        font: 500 13px/1.35 system-ui, -apple-system, "Segoe UI", sans-serif;
-        display: flex; align-items: center; gap: 10px;
-        padding: 10px 12px; border-radius: 10px;
-        background: #12151d; color: #e6e9f0;
-        border: 1px solid #2a3040;
-        box-shadow: 0 10px 30px rgba(0,0,0,.45);
-        cursor: pointer; user-select: none;
-      }
-      .card:hover { border-color: #38bdf8; }
-      .dot {
-        width: 20px; height: 20px; border-radius: 6px;
-        background: #38bdf8; color: #06121a;
-        display: grid; place-items: center; font-weight: 700; font-size: 11px;
-      }
-      .close { margin-left: 4px; opacity: .5; font-size: 15px; line-height: 1; padding: 0 2px; }
-      .close:hover { opacity: 1; }
-    </style>
-    <div class="card">
-      <span class="dot">D</span>
-      <span class="label">Media detected</span>
-      <span class="close" title="Hide">&times;</span>
-    </div>
-  `
-
-  panelShadow.querySelector('.card').addEventListener('click', async (event) => {
-    if (event.target.classList.contains('close')) {
-      event.stopPropagation()
-      removePanel()
-      return
-    }
-
-    const reply = await sendToExtension({ type: 'draco:grab-best', videoSrc: '', adaptive: false })
-
-    if (reply?.ok) takenOver = true
-    panelShadow.querySelector('.label').textContent = reply?.ok
-      ? 'Opened in Draco'
-      : 'Nothing Draco can grab'
-    setTimeout(removePanel, 2500)
-  })
-
-  document.documentElement.appendChild(panelHost)
-}
-
-function removePanel() {
-  panelHost?.remove()
-  panelHost = null
-  panelShadow = null
-}
-
 function updatePanel() {
-  // Only in the top frame, and only when there is no video to hang a button on
-  // - otherwise the page gets a button *and* a panel saying the same thing.
-  if (!isTopFrame) return
-  if (!dracoState.active || dismissedPageKey === pageKey) {
-    removePanel()
-    return
-  }
-  // The page has already been handed over; the retired button must not come
-  // back as a panel saying the same thing.
-  if (takenOver) return
-  // And a page that is not for watching does not get the panel either, or a
-  // YouTube homepage would answer a removed button with a corner card.
-  if (!pageWantsButtons()) {
-    removePanel()
-    return
-  }
-
-  if (mediaCount > 0 && overlays.size === 0) {
-    ensurePanel()
-    panelShadow.querySelector('.label').textContent =
-      mediaCount === 1 ? 'Download this media' : `${mediaCount} media streams`
-  } else {
-    removePanel()
-  }
+  // Intentionally empty. Detected media is reflected on the player button and
+  // in the extension popup; Draco no longer covers pages with a corner card.
 }
 
 /* ------------------------------------------------------------------ */

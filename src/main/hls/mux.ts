@@ -19,12 +19,19 @@ export interface MuxOptions {
   ffmpegPath: string
   inputPath: string
   audioInputPath?: string
+  audioInputs?: Array<{
+    path: string
+    language?: string | null
+    title?: string | null
+    isDefault?: boolean
+  }>
   outputPath: string
   signal: AbortSignal
 }
 
 export async function mux(options: MuxOptions): Promise<void> {
   const { ffmpegPath, inputPath, audioInputPath, outputPath, signal } = options
+  const audioInputs = options.audioInputs ?? (audioInputPath ? [{ path: audioInputPath }] : [])
 
   const args = [
     '-y',
@@ -39,13 +46,24 @@ export async function mux(options: MuxOptions): Promise<void> {
     inputPath
   ]
 
-  if (audioInputPath) {
-    args.push('-i', audioInputPath, '-map', '0:v', '-map', '1:a')
+  if (audioInputs.length > 0) {
+    for (const input of audioInputs) args.push('-i', input.path)
+    args.push('-map', '0:v')
+    for (let index = 0; index < audioInputs.length; index++) {
+      args.push('-map', `${index + 1}:a`)
+    }
   } else {
     args.push('-map', '0')
   }
 
   args.push('-c', 'copy')
+
+  for (let index = 0; index < audioInputs.length; index++) {
+    const input = audioInputs[index]
+    if (input.language) args.push(`-metadata:s:a:${index}`, `language=${input.language}`)
+    if (input.title) args.push(`-metadata:s:a:${index}`, `title=${input.title}`)
+    args.push(`-disposition:a:${index}`, input.isDefault || (index === 0 && !audioInputs.some((item) => item.isDefault)) ? 'default' : '0')
+  }
 
   if (outputPath.toLowerCase().endsWith('.mp4')) {
     args.push('-movflags', '+faststart')
@@ -53,7 +71,7 @@ export async function mux(options: MuxOptions): Promise<void> {
 
   args.push(outputPath)
 
-  await ensureSpaceFor([inputPath, ...(audioInputPath ? [audioInputPath] : [])], outputPath)
+  await ensureSpaceFor([inputPath, ...audioInputs.map((input) => input.path)], outputPath)
 
   await runFfmpeg(ffmpegPath, args, signal, outputPath)
   log.info(`muxed ${outputPath}`)

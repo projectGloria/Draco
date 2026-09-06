@@ -5,7 +5,7 @@ import { QuotaExceededError } from '../engine/limiter.ts'
 import { TaskRunner, quotaDetail } from '../engine/task.ts'
 import type { Runner } from '../engine/runner.ts'
 import type { RunnerContext } from '../engine/manager.ts'
-import { moveFile, uniquePath } from '../engine/naming.ts'
+import { discardReservedPath, moveFile, uniquePath } from '../engine/naming.ts'
 import { AbortedError } from '../engine/worker.ts'
 import { ensureFfmpeg } from './ffmpeg.ts'
 import { mux } from './mux.ts'
@@ -24,6 +24,8 @@ export class DashRunner implements Runner {
   private muxing = false
   /** The temp file the mux is writing, so the error path deletes the real one. */
   private muxTemp: string | null = null
+  /** The final name `uniquePath` reserved, given back if the merge never lands. */
+  private reservedTarget: string | null = null
   /** Set when a child stopped on the transfer quota rather than on a failure. */
   private quotaError: QuotaExceededError | null = null
   running = false
@@ -35,6 +37,11 @@ export class DashRunner implements Runner {
     const videoTask: DownloadTask = JSON.parse(JSON.stringify(task))
     videoTask.id = task.id + '-v'
     videoTask.filename = task.filename + '.v.mp4'
+    // The halves' names are this runner's contract with itself: `adoptFinishedHalf`
+    // and the mux both address them by name. Unlocked, `TaskRunner` would replace
+    // the name with whatever Content-Disposition said - `videoplayback.mp4` on a
+    // Google CDN - and the merge would look for a file that no longer exists.
+    videoTask.filenameLocked = true
     videoTask.size = null
     videoTask.received = 0
     videoTask.segments = []
@@ -44,6 +51,7 @@ export class DashRunner implements Runner {
     audioTask.id = task.id + '-a'
     audioTask.url = task.audioUrl!
     audioTask.filename = task.filename + '.a.m4a'
+    audioTask.filenameLocked = true
     audioTask.size = null
     audioTask.received = 0
     audioTask.segments = []
@@ -73,7 +81,13 @@ export class DashRunner implements Runner {
       maxConnections: Math.max(1, Math.floor(context.maxConnections / 2)),
       minSplitSize: 1024 * 1024,
       retryLimit: context.retryLimit,
-      timeoutMs: context.timeoutMs
+      timeoutMs: context.timeoutMs,
+      // The halves are ordinary downloads and their partials belong in the same
+      // workspace every other download uses, so `remove` and the restore-time
+      // reconciliation find them where they expect to.
+      tempDir: context.tempDir,
+      checkDiskSpace: context.checkDiskSpace,
+      exponentialBackoff: context.exponentialBackoff
     }
 
     this.videoRunner = new TaskRunner(videoTask, config, childContext)
@@ -134,6 +148,7 @@ export class DashRunner implements Runner {
       const videoPath = join(this.task.dir, this.videoRunner.task.filename)
       const audioPath = join(this.task.dir, this.audioRunner.task.filename)
       const targetPath = await uniquePath(this.task.dir, this.task.filename)
+      this.reservedTarget = targetPath
       const muxTemp = muxTempPath(targetPath)
       this.muxTemp = muxTemp
       await rm(muxTemp, { force: true }).catch(() => {})
@@ -169,6 +184,10 @@ export class DashRunner implements Runner {
       // taking up exactly the space the next attempt needs.
       const temp = this.muxTemp ?? muxTempPath(join(this.task.dir, this.task.filename))
       await rm(temp, { force: true }).catch(() => {})
+      // Same reasoning for the name itself: a merge that never landed must not
+      // leave an empty file wearing the download's final name.
+      if (this.reservedTarget) await discardReservedPath(this.reservedTarget)
+      this.reservedTarget = null
       if (err instanceof QuotaExceededError) {
         this.task.status = 'paused'
         this.task.error = null

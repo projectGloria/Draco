@@ -97,16 +97,25 @@ export default function App(): React.ReactElement {
   const rows = useMemo(() => {
     const byId = new Map(tasks.map((task) => [task.id, task]))
     const ordered = orderedIds.map((id) => byId.get(id)).filter((task): task is NonNullable<typeof task> => Boolean(task))
+
+    const groups = new Map<string, typeof ordered>()
+    for (const task of ordered) {
+      if (!task.groupId) continue
+      let list = groups.get(task.groupId)
+      if (!list) groups.set(task.groupId, (list = []))
+      list.push(task)
+    }
+
     const emittedGroups = new Set<string>()
     const grouped: typeof ordered = []
     for (const task of ordered) {
       if (!task.groupId) {
         grouped.push(task)
-        continue
+      } else if (!emittedGroups.has(task.groupId)) {
+        emittedGroups.add(task.groupId)
+        const members = groups.get(task.groupId)
+        if (members) grouped.push(...members)
       }
-      if (emittedGroups.has(task.groupId)) continue
-      emittedGroups.add(task.groupId)
-      grouped.push(...ordered.filter((candidate) => candidate.groupId === task.groupId))
     }
     return grouped
   }, [tasks, orderedIds])

@@ -3,8 +3,9 @@ import { basename, extname, join } from 'node:path'
 import { rm, stat } from 'node:fs/promises'
 import type { DownloadTask } from '../../shared/types.ts'
 import type { RunnerContext } from '../engine/manager.ts'
-import { uniquePath, moveFile } from '../engine/naming.ts'
+import { discardReservedPath, uniquePath, moveFile } from '../engine/naming.ts'
 import type { Runner } from '../engine/runner.ts'
+import { workspaceDir } from '../engine/workspace.ts'
 import { ensureFfmpeg } from '../hls/ffmpeg.ts'
 import { ffmpegHeaders } from './headers.ts'
 import { resolveMpd } from './manifest.ts'
@@ -22,6 +23,8 @@ export class MpdRunner implements Runner {
   private inFlight: Promise<void> | null = null
   private restarted = false
   private outputPath: string | null = null
+  /** The final name `uniquePath` reserved, given back if the pull never lands. */
+  private reservedTarget: string | null = null
   private samples: Array<{ t: number; received: number }> = []
   private durationSeconds: number | null = null
   private mediaSeconds = 0
@@ -49,6 +52,8 @@ export class MpdRunner implements Runner {
         this.task.eta = null
         this.context.onFinished(this.task, null)
       } else {
+        if (this.reservedTarget) await discardReservedPath(this.reservedTarget)
+        this.reservedTarget = null
         const reason = error instanceof Error ? error : new Error(String(error))
         this.task.status = 'error'
         this.task.error = reason.message
@@ -69,10 +74,19 @@ export class MpdRunner implements Runner {
     this.killChild()
     await this.inFlight?.catch(() => {})
     if (this.outputPath) await rm(this.outputPath, { force: true }).catch(() => {})
+    if (this.reservedTarget) await discardReservedPath(this.reservedTarget)
+    this.reservedTarget = null
     this.task.status = 'paused'
     this.task.detail = null
     this.task.speed = 0
     this.task.eta = null
+    // ffmpeg cannot resume a DASH pull, so the output was just deleted and the
+    // next start begins again from nothing. Leaving the byte counter where it
+    // stood showed progress that no longer exists anywhere on disk.
+    this.task.received = 0
+    this.task.segments = []
+    this.samples = []
+    this.mediaSeconds = 0
     this.context.onUpdate(this.task)
   }
 
@@ -125,10 +139,9 @@ export class MpdRunner implements Runner {
     })
     if (this.controller.signal.aborted) throw new Error('Cancelled')
 
-    const targetPath = await uniquePath(this.task.dir, this.task.filename)
-    const extension = extname(targetPath) || '.mp4'
-    const tempDir = this.context.tempDir || this.task.dir
-    this.outputPath = join(tempDir, `${basename(targetPath, extension)}.draco-dash-temp${extension}`)
+    const extension = extname(this.task.filename) || '.mp4'
+    const tempDir = workspaceDir(this.task.dir, this.context.tempDir)
+    this.outputPath = join(tempDir, `${basename(this.task.filename, extension)}.draco-dash-temp${extension}`)
     await rm(this.outputPath, { force: true }).catch(() => {})
 
     this.task.status = 'downloading'
@@ -139,7 +152,18 @@ export class MpdRunner implements Runner {
 
     await this.runFfmpeg(ffmpegPath, this.task.finalUrl, this.outputPath)
     if (this.controller.signal.aborted) throw new Error('Cancelled')
-    await moveFile(this.outputPath, targetPath)
+
+    const targetPath = await uniquePath(this.task.dir, this.task.filename)
+    this.reservedTarget = targetPath
+    try {
+      await moveFile(this.outputPath, targetPath)
+      this.reservedTarget = null
+    } catch (err) {
+      await discardReservedPath(targetPath)
+      this.reservedTarget = null
+      throw err
+    }
+
     const info = await stat(targetPath)
     this.task.filename = basename(targetPath)
     this.task.size = info.size

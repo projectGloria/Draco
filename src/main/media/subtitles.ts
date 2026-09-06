@@ -3,7 +3,7 @@ import { rename, rm, writeFile } from 'node:fs/promises'
 import type { DownloadTask, SubtitleTrack } from '../../shared/types.ts'
 import { getDispatcher } from '../engine/http.ts'
 import type { RateLimiter } from '../engine/limiter.ts'
-import { sanitizeFilename, uniquePath } from '../engine/naming.ts'
+import { discardReservedPath, sanitizeFilename, uniquePath } from '../engine/naming.ts'
 import { buildHeaders } from '../engine/probe.ts'
 
 const MAX_SUBTITLE_BYTES = 20 * 1024 * 1024
@@ -17,16 +17,19 @@ export interface SubtitleDownloadResult {
 export async function downloadSubtitles(
   task: DownloadTask,
   limiter: RateLimiter,
-  timeoutMs: number
+  timeoutMs: number,
+  signal?: AbortSignal
 ): Promise<SubtitleDownloadResult> {
   const saved: string[] = []
   const warnings: string[] = []
 
   for (const track of task.subtitles ?? []) {
+    if (signal?.aborted) break
     try {
       const response = await fetch(track.url, {
         headers: buildHeaders(task.headers),
         redirect: 'follow',
+        signal,
         dispatcher: getDispatcher(timeoutMs)
       } as RequestInit)
       if (!response.ok || !response.body) throw new Error(`HTTP ${response.status}`)
@@ -40,19 +43,27 @@ export async function downloadSubtitles(
         const chunk = Buffer.from(raw)
         total += chunk.length
         if (total > MAX_SUBTITLE_BYTES) throw new Error('caption file is larger than 20 MB')
-        await limiter.consume(chunk.length)
+        // Passed through, so a low speed limit cannot leave this stuck on
+        // "Saving subtitles" with no way to interrupt it.
+        await limiter.consume(chunk.length, signal)
         chunks.push(chunk)
       }
 
       const target = await uniquePath(task.dir, subtitleFilename(task.filename, track))
-      const temporary = `${target}.dracodl`
-      await writeFile(temporary, Buffer.concat(chunks))
-      await rename(temporary, target).catch(async (error) => {
-        await rm(temporary, { force: true }).catch(() => {})
-        throw error
-      })
-      saved.push(target)
+      try {
+        const temporary = `${target}.dracodl`
+        await writeFile(temporary, Buffer.concat(chunks))
+        await rename(temporary, target).catch(async (error) => {
+          await rm(temporary, { force: true }).catch(() => {})
+          throw error
+        })
+        saved.push(target)
+      } catch (err) {
+        await discardReservedPath(target)
+        throw err
+      }
     } catch (error) {
+      if (signal?.aborted) break
       warnings.push(`${track.label || track.language || 'Subtitle'}: ${error instanceof Error ? error.message : String(error)}`)
     }
   }

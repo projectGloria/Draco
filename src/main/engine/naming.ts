@@ -1,4 +1,4 @@
-import { access, constants } from 'node:fs/promises'
+import { open, rm, stat } from 'node:fs/promises'
 import { extname, join, basename } from 'node:path'
 
 /**
@@ -141,14 +141,45 @@ export async function uniquePath(dir: string, filename: string): Promise<string>
   for (let i = 0; i < 1000; i++) {
     const candidate = join(dir, i === 0 ? filename : `${stem} (${i})${ext}`)
     try {
-      await access(candidate, constants.F_OK)
-    } catch {
+      // `wx` creates the file or fails - one atomic step, so the name is taken
+      // the moment it is chosen. Checking with access() and then returning left
+      // a window in which two downloads finishing together were both handed the
+      // same free name, and the second overwrote the first.
+      //
+      // The empty placeholder is harmless: every caller either renames over it
+      // or hands it to ffmpeg with -y.
+      const handle = await open(candidate, 'wx')
+      await handle.close()
+      return candidate
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException)?.code
+      if (code === 'EEXIST') continue
+      // A directory we cannot create in is not a naming problem; fall back to
+      // the non-reserving answer and let the real write report the reason.
       return candidate
     }
   }
 
   // Pathological case: a thousand collisions. A timestamp always terminates.
   return join(dir, `${stem} (${Date.now()})${ext}`)
+}
+
+/**
+ * Gives back a name `uniquePath` reserved but that nothing was written to.
+ *
+ * The reservation is an empty file, so a caller that reserves a name and then
+ * fails - a mux that could not run, a move that was refused - would otherwise
+ * leave a 0-byte file beside the real download and take the good name with it.
+ * Only ever removes a file that is still empty, so it can never delete a
+ * finished download.
+ */
+export async function discardReservedPath(path: string): Promise<void> {
+  try {
+    const info = await stat(path)
+    if (info.isFile() && info.size === 0) await rm(path, { force: true })
+  } catch {
+    // Never there, already gone, or not ours to remove. Nothing to do.
+  }
 }
 
 /**

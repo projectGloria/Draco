@@ -124,7 +124,7 @@ export default function SaveAsDialog({
       setYoutube(null)
       setSelectedMediaIndices(new Set())
       window.api
-        .resolveMediaPage(url)
+        .resolveMediaPage(url, headers)
         .then((result) => {
           if (cancelled) return
           setYoutube(result)
@@ -149,7 +149,7 @@ export default function SaveAsDialog({
         if (isHtmlPage(result.mimeType)) {
           setDetectedMedia(true)
           setProbe(null)
-          const media = await window.api.resolveMediaPage(url)
+          const media = await window.api.resolveMediaPage(url, headers)
           if (cancelled) return
           setYoutube(media)
           setSelectedMediaIndices(new Set(media.variants.map((_variant, index) => index)))
@@ -167,7 +167,7 @@ export default function SaveAsDialog({
         // signal to inspect page media before showing an error to the user.
         if (couldBeHtmlPage(url)) {
           try {
-            const media = await window.api.resolveMediaPage(url)
+            const media = await window.api.resolveMediaPage(url, headers)
             if (cancelled) return
             setDetectedMedia(true)
             setProbe(null)
@@ -207,6 +207,7 @@ export default function SaveAsDialog({
           groupName: grouped ? groupName : undefined,
           groupFolder: grouped ? groupName : undefined,
           audioUrl: variant.audioUrl ?? null,
+          audioTracks: variant.audioTracks,
           youtube: variant.youtube
             ? {
                 pageUrl: url,
@@ -242,6 +243,7 @@ export default function SaveAsDialog({
       url: youtubeVariant?.url || url,
       sourceUrl: mediaMode ? url : undefined,
       audioUrl: youtubeVariant?.audioUrl ?? null,
+      audioTracks: youtubeVariant?.audioTracks,
       youtube: youtubeVariant?.youtube
         ? {
             pageUrl: url,
@@ -332,7 +334,7 @@ export default function SaveAsDialog({
                 {youtube.variants.map((variant, index) => (
                   <option key={`${variant.youtube?.videoFormatId ?? index}-${variant.youtube?.audioFormatId ?? ''}`} value={index}>
                     {variant.label} · {youtubeContainer(variant).toUpperCase()}
-                    {variant.estimatedSize ? ` · ${formatBytes(variant.estimatedSize)}` : ''}
+                    {variant.estimatedSize ? ` · ≈ ${formatBytes(variant.estimatedSize)}` : ''}
                   </option>
                 ))}
               </select>
@@ -798,11 +800,14 @@ function ServerInfo({
   knownSize: number | null
 }): React.ReactElement {
   if (error) {
+    const sessionRequired = /\b(?:401|403|forbidden|unauthorized|browser session|captcha|cloudflare)\b/i.test(error)
     return (
       <div className="rounded-lg px-3 py-2.5 text-[11.5px] leading-relaxed border border-[rgba(251,191,36,0.25)] bg-[rgba(251,191,36,0.08)] text-warn">
         Could not read the file details: {error}
         <div className="text-faint mt-1">
-          You can still start the download — the engine will try again on its own.
+          {sessionRequired
+            ? 'This address requires the active browser session. Start playback in your browser, then use Draco’s video Download button so it can capture the stream URL and session headers.'
+            : 'You can still start the download — the engine will try again on its own.'}
         </div>
       </div>
     )

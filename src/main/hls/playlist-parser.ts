@@ -1,4 +1,4 @@
-import type { MediaVariant } from '../../shared/types.ts'
+import type { MediaAudioTrack, MediaVariant } from '../../shared/types.ts'
 
 export interface HlsSegment {
   url: string
@@ -44,18 +44,21 @@ export function parseMaster(text: string, baseUrl: string): MediaVariant[] {
   const lines = text.split(/\r?\n/)
   const variants: MediaVariant[] = []
   
-  // A group can have multiple audio tracks (languages). We just need the first
-  // one marked DEFAULT, or any if none are.
-  const audioGroups = new Map<string, string>()
+  const audioGroups = new Map<string, MediaAudioTrack[]>()
 
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i].trim()
     if (line.startsWith('#EXT-X-MEDIA:TYPE=AUDIO')) {
       const attrs = parseAttributes(line)
       if (attrs['GROUP-ID'] && attrs.URI) {
-        if (!audioGroups.has(attrs['GROUP-ID']) || attrs.DEFAULT === 'YES') {
-          audioGroups.set(attrs['GROUP-ID'], resolve(attrs.URI, baseUrl))
-        }
+        const group = audioGroups.get(attrs['GROUP-ID']) ?? []
+        group.push({
+          url: resolve(attrs.URI, baseUrl),
+          label: attrs.NAME || attrs.LANGUAGE || `Audio ${group.length + 1}`,
+          language: attrs.LANGUAGE || null,
+          isDefault: attrs.DEFAULT === 'YES'
+        })
+        audioGroups.set(attrs['GROUP-ID'], group)
       }
     }
   }
@@ -72,19 +75,21 @@ export function parseMaster(text: string, baseUrl: string): MediaVariant[] {
     const height = /\d+x(\d+)/i.exec(resolution)?.[1]
     const bandwidth = Number(attrs['AVERAGE-BANDWIDTH'] ?? attrs.BANDWIDTH) || null
     
-    let audioUrl = null
-    if (attrs.AUDIO && audioGroups.has(attrs.AUDIO)) {
-      audioUrl = audioGroups.get(attrs.AUDIO) ?? null
-    }
+    const audioTracks = attrs.AUDIO ? audioGroups.get(attrs.AUDIO) ?? [] : []
+    const defaultAudio = audioTracks.find((track) => track.isDefault) ?? audioTracks[0]
 
     variants.push({
       url: resolve(uri, baseUrl),
-      audioUrl,
+      audioUrl: defaultAudio?.url ?? null,
+      audioTracks: audioTracks.map((track) => ({ ...track })),
       label: height ? `${height}p` : bandwidth ? `${Math.round(bandwidth / 1000)} kbps` : 'stream',
       height: height ? Number(height) : null,
       bandwidth,
       codecs: attrs.CODECS ?? null,
-      estimatedSize: null
+      estimatedSize: null,
+      // MKV is the most reliable common container for several independently
+      // labelled audio streams; the handoff filename follows this value.
+      container: audioTracks.length > 1 ? 'mkv' : null
     })
   }
 
@@ -204,4 +209,3 @@ export function parseMediaPlaylist(text: string, baseUrl: string): MediaPlaylist
     isLive: !text.includes('#EXT-X-ENDLIST')
   }
 }
-

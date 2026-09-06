@@ -1,12 +1,11 @@
-import { readdir, rm, stat } from 'node:fs/promises'
+import { readdir, rename, rm, stat } from 'node:fs/promises'
 import { join } from 'node:path'
 import type { DownloadTask, TaskProgress } from '../../shared/types.ts'
 import { QuotaExceededError, RateLimiter, type QuotaState } from './limiter.ts'
 import { mapConcurrent } from './concurrency.ts'
-import { getPaths } from '../bootstrap/paths.ts'
 import { connectionsForUrl, type HostConnectionLimit } from './network-rules.ts'
 import { setProxyUrl } from './http.ts'
-import { readJournal, removeJournal } from './journal.ts'
+import { readJournal } from './journal.ts'
 import type { Runner } from './runner.ts'
 import { TaskRunner } from './task.ts'
 import { logger } from '../log.ts'
@@ -14,6 +13,12 @@ import { downloadSubtitles } from '../media/subtitles.ts'
 import { scanFile } from '../security/scanner.ts'
 import { normalizeDownloadDirectory } from '../destination-path.ts'
 import { TorrentRunner } from './torrent.ts'
+import {
+  intermediatePathsFor,
+  isDracoIntermediate,
+  partPathFor,
+  workspaceDir
+} from './workspace.ts'
 
 const log = logger('manager')
 const RECOVERY_CONCURRENCY = 8
@@ -27,6 +32,13 @@ const RECOVERY_CONCURRENCY = 8
  */
 
 export interface EngineSettings {
+  /**
+   * Where intermediates go, when the volume allows it - see `workspace.ts`.
+   * Supplied by the caller rather than read from Electron's paths here, because
+   * `tools/dl.ts` and the engine tests drive this same manager under bare Node
+   * and an `electron` import anywhere in this module's graph stops them dead.
+   */
+  tempDir?: string
   catMode?: boolean
   maxConcurrentTasks: number
   checkDiskSpace?: boolean
@@ -54,7 +66,8 @@ export interface RunnerContext {
   retryLimit: number
   timeoutMs: number
   proxyUrl: string | null
-  tempDir: string
+  /** Undefined means "no shared workspace"; intermediates stay beside the file. */
+  tempDir?: string
   checkDiskSpace?: boolean
   exponentialBackoff?: boolean
   onUpdate(task: DownloadTask): void
@@ -107,6 +120,9 @@ export class DownloadManager {
   private quotaHeld = new Set<string>()
   private quotaTimer: NodeJS.Timeout | null = null
   private catTimer: NodeJS.Timeout | null = null
+  /** The one-shot timers that end each cat-mode burst, so `dispose` can too. */
+  private catStopTimers = new Set<NodeJS.Timeout>()
+  private subtitleControllers = new Map<string, AbortController>()
 
   private options: ManagerOptions
 
@@ -124,6 +140,8 @@ export class DownloadManager {
 
   /** Adopts tasks restored from disk. Anything caught mid-flight comes back paused. */
   async load(tasks: DownloadTask[]): Promise<void> {
+    const tempDir = this.options.getSettings().tempDir
+
     await mapConcurrent(tasks, RECOVERY_CONCURRENCY, async (task) => {
       task.dir = normalizeDownloadDirectory(task.dir)
       if (task.status === 'downloading' || task.status === 'probing' || task.status === 'queued') {
@@ -136,7 +154,7 @@ export class DownloadManager {
       // was already written as paused can still have a journal ahead of what
       // tasks.json recorded, because the kill that stranded it may have come
       // several restarts ago.
-      if (task.status !== 'done') await reconcileWithJournal(task)
+      if (task.status !== 'done') await reconcileWithJournal(task, tempDir)
     })
 
     // Reconciliation is parallel, but insertion remains deterministic so the
@@ -145,6 +163,11 @@ export class DownloadManager {
       this.tasks.set(task.id, task)
     }
     this.emitTasks()
+
+    // Nothing is waiting on this and a slow volume should not hold up the list.
+    void sweepOrphanedIntermediates(tempDir, tasks).catch((err) => {
+      log.warn(`temp sweep failed: ${String(err)}`)
+    })
   }
 
   dispose(): void {
@@ -153,6 +176,12 @@ export class DownloadManager {
     this.ticker = null
     if (this.quotaTimer) clearTimeout(this.quotaTimer)
     this.quotaTimer = null
+    if (this.catTimer) clearInterval(this.catTimer)
+    this.catTimer = null
+    for (const timer of this.catStopTimers) clearTimeout(timer)
+    this.catStopTimers.clear()
+    for (const controller of this.subtitleControllers.values()) controller.abort()
+    this.subtitleControllers.clear()
   }
 
   /** Pauses everything and waits for the journals to land. Used on quit. */
@@ -240,6 +269,11 @@ export class DownloadManager {
       this.quotaHeld.delete(id)
       if (byUser) task.manualPause = true
 
+      const subController = this.subtitleControllers.get(id)
+      if (subController) {
+        subController.abort()
+      }
+
       const runner = this.runners.get(id)
       if (runner) {
         waits.push(runner.pause())
@@ -259,38 +293,22 @@ export class DownloadManager {
 
   async remove(ids: string[], deleteFiles: boolean): Promise<void> {
     await this.pause(ids)
+    const tempDir = this.options.getSettings().tempDir
 
     for (const id of ids) {
       const task = this.tasks.get(id)
       if (!task) continue
 
-      const part = join(task.dir, task.filename + '.dracodl')
-      // The partial file, its journal and any downloaded playlist pieces are
-      // ours; they always go.
-      await rm(part, { force: true }).catch(() => {})
-      await removeJournal(part + '.json').catch(() => {})
-      
-      if (task.audioUrl) {
-        // The muxed halves are Draco's own intermediates. They outlive a failed
-        // merge on purpose - the retry adopts them - so removing the task is the
-        // point they stop being anybody's, files and partials alike.
-        await rm(join(task.dir, task.filename + '.v.mp4'), { force: true }).catch(() => {})
-        await rm(join(task.dir, task.filename + '.a.m4a'), { force: true }).catch(() => {})
-        await rm(join(task.dir, task.filename + '.v.mp4.dracodl'), { force: true }).catch(() => {})
-        await removeJournal(join(task.dir, task.filename + '.v.mp4.dracodl.json')).catch(() => {})
-        await rm(join(task.dir, task.filename + '.a.m4a.dracodl'), { force: true }).catch(() => {})
-        await removeJournal(join(task.dir, task.filename + '.a.m4a.dracodl.json')).catch(() => {})
-      }
+      // Every intermediate this task can own, in the workspace *and* beside the
+      // destination. Enumerated in one place so this can never again delete
+      // from a directory the runner was not writing to - which used to strand
+      // multi-gigabyte part files in the temp directory forever.
+      const { files, dirs } = intermediatePathsFor(task, tempDir)
+      for (const file of files) await rm(file, { force: true }).catch(() => {})
+      for (const dir of dirs) await rm(dir, { recursive: true, force: true }).catch(() => {})
 
-      await rm(join(task.dir, task.filename + '.dracoparts'), {
-        recursive: true,
-        force: true
-      }).catch(() => {})
-      // The playlist runner's joined halves, left behind when a merge failed.
-      await rm(join(task.dir, task.filename + '.dracodl.audio'), { force: true }).catch(() => {})
-
-      if (deleteFiles && task.status === 'done') {
-        await rm(join(task.dir, task.filename), { force: true }).catch(() => {})
+      if (deleteFiles && (task.status === 'done' || task.kind === 'torrent')) {
+        await rm(join(task.dir, task.filename), { recursive: true, force: true }).catch(() => {})
       }
 
       this.tasks.delete(id)
@@ -358,7 +376,7 @@ export class DownloadManager {
       retryLimit: settings.retryLimit,
       timeoutMs: settings.timeoutMs,
       proxyUrl: settings.proxyUrl,
-      tempDir: getPaths().tempDir,
+      tempDir: settings.tempDir,
       checkDiskSpace: settings.checkDiskSpace,
       exponentialBackoff: settings.exponentialBackoff,
       onUpdate: () => this.emitTasks(),
@@ -410,7 +428,7 @@ export class DownloadManager {
           minSplitSize: settings.minSplitSize,
           retryLimit: settings.retryLimit,
           timeoutMs: settings.timeoutMs,
-          tempDir: getPaths().tempDir,
+          tempDir: settings.tempDir,
           checkDiskSpace: settings.checkDiskSpace,
           exponentialBackoff: settings.exponentialBackoff
         },
@@ -418,7 +436,12 @@ export class DownloadManager {
           limiter: context.limiter,
           onUpdate: context.onUpdate,
           onFinished: context.onFinished,
-          onProbed: context.onProbed
+          onProbed: context.onProbed,
+          // A YouTube task with no separate audio stream - a progressive format
+          // or an audio-only pick - lands here rather than on the DASH runner.
+          // Without this it could neither resolve a restored watch page nor
+          // refresh a signed URL that expired mid-transfer, and simply failed.
+          refreshYouTube: context.refreshYouTube
         }
       )
     }
@@ -448,11 +471,26 @@ export class DownloadManager {
     if (!error && task.status === 'done' && task.subtitles && task.subtitles.length > 0) {
       task.detail = 'Saving subtitles…'
       this.emitTasks()
-      const result = await downloadSubtitles(task, this.limiter, this.options.getSettings().timeoutMs)
-      task.detail = result.warnings.length > 0
-        ? `Video complete; ${result.warnings.length} subtitle track(s) failed`
-        : null
-      if (result.warnings.length > 0) log.warn(result.warnings.join('; '))
+      const controller = new AbortController()
+      this.subtitleControllers.set(task.id, controller)
+      try {
+        const result = await downloadSubtitles(
+          task,
+          this.limiter,
+          this.options.getSettings().timeoutMs,
+          controller.signal
+        )
+        if (controller.signal.aborted) {
+          task.detail = null
+        } else {
+          task.detail = result.warnings.length > 0
+            ? `Video complete; ${result.warnings.length} subtitle track(s) failed`
+            : null
+          if (result.warnings.length > 0) log.warn(result.warnings.join('; '))
+        }
+      } finally {
+        this.subtitleControllers.delete(task.id)
+      }
     }
 
     const settings = this.options.getSettings()
@@ -468,8 +506,23 @@ export class DownloadManager {
         )
         task.detail = null
       } catch (scanError) {
-        task.detail = `Download complete; security scan failed: ${scanError instanceof Error ? scanError.message : String(scanError)}`
-        log.warn(task.detail)
+        // A non-zero exit is how a scanner reports a detection, so leaving the
+        // file at its final name under a green "Complete" row was the one
+        // outcome this feature exists to prevent. Quarantine by renaming - the
+        // bytes are kept, because a false positive must not destroy a download,
+        // but nothing will open them by accident.
+        const reason = scanError instanceof Error ? scanError.message : String(scanError)
+        const quarantined = join(task.dir, task.filename + '.quarantine')
+        const moved = await rename(join(task.dir, task.filename), quarantined)
+          .then(() => true)
+          .catch(() => false)
+
+        task.status = 'error'
+        task.error = moved
+          ? `Security scan failed: ${reason}. The file was quarantined as ${task.filename}.quarantine`
+          : `Security scan failed: ${reason}`
+        task.detail = null
+        log.warn(`${task.filename}: ${task.error}`)
       }
     }
 
@@ -488,6 +541,11 @@ export class DownloadManager {
     if (error) {
       log.error(`Task ${task.id} (${task.filename}) failed`, error)
     } else if (task.status === 'done') {
+      // The captured credentials have done their job. They are the browser's
+      // live session cookies for the origin, `tasks.json` is plain text on
+      // disk, and a finished row can sit in the list for months - so a
+      // completed download must not go on carrying them.
+      forgetCredentials(task)
       log.info(`Task ${task.id} (${task.filename}) finished successfully`)
     } else {
       log.info(`Task ${task.id} (${task.filename}) stopped. Status: ${task.status}`)
@@ -570,24 +628,24 @@ export class DownloadManager {
 
     this.catTimer = setInterval(() => {
       if (this.disposed) return
-      
+
+      const settings = this.options.getSettings()
+      // A keep-alive burst is still a running download: it holds a connection,
+      // spends the transfer budget and occupies a slot. Starting one on top of
+      // a full complement would quietly exceed the limit the user set.
+      if (this.activeCount >= settings.maxConcurrentTasks) return
+
       const queuedTasks = [...this.tasks.values()].filter((t) => t.status === 'queued' && !this.runners.has(t.id))
       if (queuedTasks.length === 0) return
 
       // Round-robin: always pick the one that hasn't been pinged in the longest time.
       queuedTasks.sort((a, b) => (a.lastCatPingAt ?? 0) - (b.lastCatPingAt ?? 0))
       const task = queuedTasks[0]
-      task.lastCatPingAt = Date.now()
-      task.isCatMode = true
-      task.status = 'downloading'
-      this.emitTasks()
 
-      log.info(`Cat mode started for queued task ${task.id} (${task.filename})`)
-      
-      const settings = this.options.getSettings()
-      
-      // Cat mode limit: ~100 KB/s
-      const catLimiter = new RateLimiter(102400)
+      // Capped at ~100 KB/s of its own, but charged against the app-wide quota
+      // through the shared limiter. A budget a background trickle can spend
+      // without ever being counted is not a budget.
+      const catLimiter = new RateLimiter(102400, this.limiter)
 
       const context: RunnerContext = {
         limiter: catLimiter,
@@ -595,7 +653,7 @@ export class DownloadManager {
         retryLimit: settings.retryLimit,
         timeoutMs: settings.timeoutMs,
         proxyUrl: settings.proxyUrl,
-        tempDir: getPaths().tempDir,
+        tempDir: settings.tempDir,
         onUpdate: () => this.emitTasks(),
         onFinished: (finished, error) => {
           const r = this.runners.get(task.id)
@@ -605,9 +663,16 @@ export class DownloadManager {
         refreshYouTube: this.options.refreshYouTube
       }
 
+      // Built before the task is marked running. Bailing out after the status
+      // change left a task reading "downloading" with no runner behind it and
+      // nothing that would ever move it again.
       let runner: Runner
       if (task.kind === 'hls') {
         const build = this.options.createHlsRunner
+        if (!build) return
+        runner = build(task, context)
+      } else if (task.kind === 'dash') {
+        const build = this.options.createMpdRunner
         if (!build) return
         runner = build(task, context)
       } else if (task.audioUrl) {
@@ -624,7 +689,7 @@ export class DownloadManager {
             minSplitSize: settings.minSplitSize,
             retryLimit: settings.retryLimit,
             timeoutMs: settings.timeoutMs,
-            tempDir: getPaths().tempDir,
+            tempDir: settings.tempDir,
             checkDiskSpace: settings.checkDiskSpace,
             exponentialBackoff: settings.exponentialBackoff
           },
@@ -638,12 +703,19 @@ export class DownloadManager {
         )
       }
 
+      task.lastCatPingAt = Date.now()
+      task.isCatMode = true
+      task.status = 'downloading'
+      this.emitTasks()
+      log.info(`Cat mode started for queued task ${task.id} (${task.filename})`)
+
       this.runners.set(task.id, runner)
       void runner.start()
 
       // Stop it after 5 to 10 seconds
       const durationMs = 5000 + Math.random() * 5000
-      setTimeout(() => {
+      const stopTimer = setTimeout(() => {
+        this.catStopTimers.delete(stopTimer)
         if (this.runners.get(task.id) === runner) {
           log.info(`Cat mode ended for task ${task.id} (${task.filename})`)
           void this.pause([task.id]).then(() => {
@@ -657,7 +729,8 @@ export class DownloadManager {
           })
         }
       }, durationMs)
-
+      stopTimer.unref?.()
+      this.catStopTimers.add(stopTimer)
     }, 30_000)
   }
 
@@ -710,7 +783,7 @@ export class DownloadManager {
     this.ticker.unref?.()
   }
 
-  private emitTasks(): void {
+  emitTasks(): void {
     this.options.onTasks(this.list())
   }
 }
@@ -725,16 +798,16 @@ export class DownloadManager {
  * a download at 0.2% that is really at 20%, and only tells the truth once the
  * user presses Resume - which reads as data lost.
  */
-async function reconcileWithJournal(task: DownloadTask): Promise<void> {
+async function reconcileWithJournal(task: DownloadTask, tempDir?: string): Promise<void> {
   if (task.kind === 'hls') {
-    await reconcileHlsPieces(task)
+    await reconcileHlsPieces(task, tempDir)
     return
   }
 
   if (task.audioUrl) {
-    const vJournal = await readJournal(join(task.dir, task.filename + '.v.mp4.dracodl.json'))
-    const aJournal = await readJournal(join(task.dir, task.filename + '.a.m4a.dracodl.json'))
-    
+    const vJournal = await readJournal(partPathFor(task.dir, task.filename + '.v.mp4', tempDir) + '.json')
+    const aJournal = await readJournal(partPathFor(task.dir, task.filename + '.a.m4a', tempDir) + '.json')
+
     task.received = 0
     task.segments = []
 
@@ -769,7 +842,7 @@ async function reconcileWithJournal(task: DownloadTask): Promise<void> {
     return
   }
 
-  const journal = await readJournal(join(task.dir, task.filename + '.dracodl.json'))
+  const journal = await readJournal(partPathFor(task.dir, task.filename, tempDir) + '.json')
   if (!journal || journal.segments.length === 0) return
 
   // Only the byte bookkeeping is adopted. Whether the journal may actually be
@@ -785,8 +858,8 @@ async function reconcileWithJournal(task: DownloadTask): Promise<void> {
  * record. Adding them up is how a restored stream reports the progress it
  * really has.
  */
-async function reconcileHlsPieces(task: DownloadTask): Promise<void> {
-  const dir = join(task.dir, task.filename + '.dracoparts')
+async function reconcileHlsPieces(task: DownloadTask, tempDir?: string): Promise<void> {
+  const dir = join(workspaceDir(task.dir, tempDir), task.filename + '.dracoparts')
 
   let entries: string[]
   try {
@@ -804,4 +877,69 @@ async function reconcileHlsPieces(task: DownloadTask): Promise<void> {
 
   if (bytes > 0) task.received = bytes
   task.segments = []
+}
+
+/**
+ * Deletes intermediates in the shared temp directory that no live task claims.
+ *
+ * Necessary because they could be stranded: a build that wrote part files to
+ * the temp directory while deleting them from the destination left every
+ * removed download's `.dracodl` behind, and nothing has ever swept them. Left
+ * alone that is unbounded, and the individual files are large.
+ *
+ * Deliberately narrow. It only ever looks in the app's own temp directory,
+ * only at names carrying one of Draco's own suffixes, and only at ones no task
+ * in the restored list points at - so a partial belonging to a paused download
+ * is never in scope, and neither is anything the user put there.
+ */
+async function sweepOrphanedIntermediates(
+  tempDir: string | undefined,
+  tasks: DownloadTask[]
+): Promise<void> {
+  if (!tempDir) return
+
+  let entries: string[]
+  try {
+    entries = await readdir(tempDir)
+  } catch {
+    return
+  }
+
+  const claimed = new Set<string>()
+  for (const task of tasks) {
+    const { files, dirs } = intermediatePathsFor(task, tempDir)
+    for (const path of [...files, ...dirs]) claimed.add(path.toLowerCase())
+  }
+
+  let removed = 0
+  for (const name of entries) {
+    if (!isDracoIntermediate(name)) continue
+    const path = join(tempDir, name)
+    if (claimed.has(path.toLowerCase())) continue
+    await rm(path, { recursive: true, force: true }).catch(() => {})
+    removed++
+  }
+
+  if (removed > 0) log.info(`swept ${removed} orphaned intermediate(s) from ${tempDir}`)
+}
+
+/**
+ * Drops the credentials a task captured from the browser.
+ *
+ * Called once a download is finished, which is the point they stop being
+ * needed: a redownload re-probes and any resume would have happened long
+ * before. The referer and user-agent stay - they are not secrets and some
+ * origins still need them to serve the file at all.
+ */
+function forgetCredentials(task: DownloadTask): void {
+  if (!task.headers) return
+  delete task.headers.cookie
+  delete task.headers.authorization
+  if (task.headers.extra) {
+    for (const key of Object.keys(task.headers.extra)) {
+      if (/^(cookie|authorization|proxy-authorization|x-api-key)$/i.test(key)) {
+        delete task.headers.extra[key]
+      }
+    }
+  }
 }

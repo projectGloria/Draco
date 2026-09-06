@@ -31,14 +31,9 @@ export class NotResumableError extends Error {
   }
 }
 
-/**
- * The server is up but refusing this many parallel connections.
- *
- * Distinct from a generic failure on purpose: plenty of hosts happily serve two
- * connections and answer the third with 429. Failing the download over that
- * would be wrong - the right answer is to use fewer connections, which is what
- * the task runner does when it sees this.
- */
+/** Any status the transfer cannot proceed from, carried so callers can branch
+ * on the code - 401/403/410 mean a signed URL expired, not that the file is
+ * gone. */
 export class HttpStatusError extends Error {
   readonly statusCode: number
 
@@ -49,6 +44,14 @@ export class HttpStatusError extends Error {
   }
 }
 
+/**
+ * The server is up but refusing this many parallel connections.
+ *
+ * Distinct from a generic failure on purpose: plenty of hosts happily serve two
+ * connections and answer the third with 429. Failing the download over that
+ * would be wrong - the right answer is to use fewer connections, which is what
+ * the task runner does when it sees this.
+ */
 export class ServerBusyError extends Error {
   readonly statusCode: number
   readonly retryAfterMs: number | null

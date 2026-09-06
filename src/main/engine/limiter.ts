@@ -39,8 +39,18 @@ export class RateLimiter {
   private quotaWindowMs = 60 * 60_000
   private quotaUsed = 0
   private quotaStartedAt = Date.now()
+  /**
+   * A limiter whose quota is charged alongside this one's.
+   *
+   * Cat mode needs its own rate cap - a background trickle, not the user's full
+   * speed - but the transfer budget belongs to the app, not to one limiter. A
+   * private limiter with no quota of its own would spend the budget without
+   * ever counting against it.
+   */
+  private readonly quotaParent: RateLimiter | null
 
-  constructor(bytesPerSecond: number | null = null) {
+  constructor(bytesPerSecond: number | null = null, quotaParent: RateLimiter | null = null) {
+    this.quotaParent = quotaParent
     this.setLimit(bytesPerSecond)
   }
 
@@ -118,12 +128,20 @@ export class RateLimiter {
       }
     }
 
-    if (this.quotaBytes !== Infinity) {
-      this.refillQuota()
-      this.quotaUsed += bytes
-      if (this.quotaUsed > this.quotaBytes) {
-        throw new QuotaExceededError(this.quotaStartedAt + this.quotaWindowMs)
-      }
+    // The parent is charged first and unconditionally: its budget is the shared
+    // one, and a child that stopped short of its own limit must still not be
+    // able to spend past the app's.
+    this.quotaParent?.chargeQuota(bytes)
+    this.chargeQuota(bytes)
+  }
+
+  /** Spends `bytes` of this limiter's budget, throwing once it is gone. */
+  private chargeQuota(bytes: number): void {
+    if (this.quotaBytes === Infinity) return
+    this.refillQuota()
+    this.quotaUsed += bytes
+    if (this.quotaUsed > this.quotaBytes) {
+      throw new QuotaExceededError(this.quotaStartedAt + this.quotaWindowMs)
     }
   }
 
