@@ -177,6 +177,18 @@ export interface DownloadTask {
   kind: TaskKind
   /** Total bytes, or null when the server would not say. */
   size: number | null
+  /**
+   * What the page that offered this file said it weighs, before the probe has
+   * confirmed anything.
+   *
+   * Purely for display, and never used by the engine: preallocation, ranges and
+   * resume all read `size`, which stays null until the server itself answers.
+   * A batch of forty-nine files would otherwise report a total that climbs as
+   * each member is probed, and a percentage computed against it that swings
+   * wildly - the album that says 388 MB up front reads 41 MB and "30%" a second
+   * after it starts.
+   */
+  expectedSize?: number
   received: number
   status: TaskStatus
   /** True once a 206 has actually been seen - not merely Accept-Ranges. */
@@ -245,6 +257,8 @@ export interface NewDownload {
   selectedFiles?: string[]
   torrentFiles?: TorrentFile[]
   kind?: TaskKind
+  /** Size the source advertised, shown until the probe confirms the real one. */
+  expectedSize?: number | null
   /** When false the task is created paused instead of starting immediately. */
   autoStart?: boolean
   /** Creates the task without opening the separate floating progress window. */
@@ -334,6 +348,14 @@ export interface Queue {
   /** 0 = Sunday. Only meaningful for periodic queues. */
   days: number[]
   maxConcurrent: number
+  /**
+   * This queue's own speed cap in bytes/sec, or null.
+   *
+   * Shared by every task in the queue, and spent through the app-wide limiter -
+   * so it can only ever be narrower than the global limit, never a way around
+   * one.
+   */
+  speedLimit: number | null
   /** Additional attempts after the engine has exhausted its own request retries. */
   retryLimit: number
   retryDelaySeconds: number
@@ -353,6 +375,66 @@ export interface PendingAction {
   queueId: string
   /** Epoch ms at which it fires. */
   firesAt: number
+}
+
+/* ------------------------------------------------------------------ */
+/* Duplicates                                                          */
+/* ------------------------------------------------------------------ */
+
+/** An existing download that a new one would repeat. */
+export interface DuplicateMatch {
+  taskId: string
+  /** Matched on the address, or on the file it would land on. */
+  reason: 'url' | 'destination'
+  status: TaskStatus
+  filename: string
+  dir: string
+  completedAt: number | null
+}
+
+/* ------------------------------------------------------------------ */
+/* Playlists                                                           */
+/* ------------------------------------------------------------------ */
+
+/** One video in a listing, before anything about it has been resolved. */
+export interface PlaylistEntryInfo {
+  url: string
+  title: string
+  /** Seconds, when the flat listing knew - a live item often has none. */
+  duration: number | null
+}
+
+export interface PlaylistListing {
+  title: string
+  entries: PlaylistEntryInfo[]
+  /** The source had more entries than Draco will take in one go. */
+  truncated: boolean
+  /**
+   * The single video the same link could have meant, when it named one.
+   * Offered rather than guessed at: a watch URL carrying `list=` is both.
+   */
+  singleVideoUrl: string | null
+}
+
+/* ------------------------------------------------------------------ */
+/* Site credentials                                                    */
+/* ------------------------------------------------------------------ */
+
+/**
+ * A saved site password, as the renderer is allowed to see it.
+ *
+ * The password itself is deliberately absent from this shape: it is sealed by
+ * `safeStorage` in main and decrypted only for the request that needs it, so
+ * there is no channel over which it could reach a window.
+ */
+export interface SiteCredential {
+  id: string
+  /** Lowercased hostname the entry is matched against. */
+  host: string
+  /** The protected area the server named, or '' for anything on the host. */
+  realm: string
+  username: string
+  createdAt: number
 }
 
 /* ------------------------------------------------------------------ */
@@ -406,8 +488,42 @@ export interface Settings {
   minSplitSize: number
   /** Global cap in bytes/sec, or null for unlimited. */
   speedLimit: number | null
+  /**
+   * Keep a finished torrent connected to its swarm.
+   *
+   * On by default. A client that leaves the moment its own download finishes
+   * is one every peer in that swarm just subsidised, and it is what gets an
+   * account banned from a private tracker.
+   */
+  seedTorrents: boolean
+  /** Stop seeding once uploaded/downloaded reaches this, or null to ignore ratio. */
+  seedRatioLimit: number | null
+  /** Stop seeding after this many minutes, or null to ignore the clock. */
+  seedTimeMinutes: number | null
+  /**
+   * Upload cap in bytes/sec, or null for unlimited. Deliberately separate from
+   * `speedLimit`: making giving back cost the same budget as getting is how a
+   * seeding setting ends up switched off.
+   */
+  uploadLimit: number | null
+  /**
+   * A cap that replaces `speedLimit` between two times of day, or null.
+   *
+   * The reason to throttle at all is usually "while I am using this computer",
+   * and a setting that has to be flipped twice a day is one that stops being
+   * flipped.
+   */
+  scheduledLimit: { startTime: string; stopTime: string; bytesPerSecond: number } | null
   /** HTTP(S) proxy URL. Authentication may be embedded in the URL. */
   proxyUrl: string | null
+  /**
+   * Browser whose cookies yt-dlp may borrow when resolving a page, or 'none'.
+   *
+   * This is what makes a members-only, age-gated or otherwise signed-in video
+   * resolvable at all: the extension can only capture cookies at the moment of
+   * a click, and a page Draco is asked to inspect has no such moment.
+   */
+  cookiesFromBrowser: 'none' | 'chrome' | 'edge' | 'brave' | 'firefox' | 'chromium' | 'opera' | 'vivaldi'
   /** Per-origin connection exceptions, matched by hostname and subdomains. */
   hostConnectionLimits: Array<{ host: string; connections: number }>
   /** Rolling transfer allowance, or null for no quota. */
@@ -445,6 +561,11 @@ export interface Settings {
   takeoverExcludeHosts: string[]
   /** Watch the clipboard for URLs while running. */
   watchClipboard: boolean
+  /**
+   * Register Draco as the Windows handler for `.torrent` files and magnet
+   * links, so double-clicking one opens it here.
+   */
+  associateTorrents: boolean
   /**
    * Open a progress window of its own for each download the user starts, the
    * way IDM does. Off leaves the main list as the only place a download shows.
@@ -527,6 +648,14 @@ export interface MediaVariant {
   container?: string | null
   /** Stable YouTube format identity, used to refresh expiring signed media URLs. */
   youtube?: { videoFormatId: string; audioFormatId?: string | null; role?: 'video' | 'audio' }
+  /**
+   * Whether the multi-file picker ticks this row when it opens. Left unset by
+   * resolvers that offer alternatives rather than duplicates, in which case
+   * everything found is selected as before; a resolver that returns the same
+   * track once per published format sets it so accepting the default downloads
+   * each track once rather than once per format.
+   */
+  defaultSelected?: boolean
 }
 
 /** Status of the background yt-dlp lookup that resolves a YouTube video's direct links. */
@@ -571,6 +700,8 @@ export interface IntegrationStatus {
   extensionId: string | null
   /** Which browsers have the native-messaging registry key pointing at us. */
   registered: { chrome: boolean; edge: boolean; brave: boolean; opera: boolean; vivaldi: boolean; firefox: boolean }
+  /** Whether Windows currently opens `.torrent` files and magnet links here. */
+  shellHandlers: { torrentFiles: boolean; magnetLinks: boolean }
   /** True while the named-pipe server is accepting host connections. */
   bridgeListening: boolean
   /** Epoch ms of the last message received from the extension, if any. */
@@ -660,6 +791,25 @@ export interface RendererApi {
   addDownloads(inputs: NewDownload[]): Promise<DownloadTask[]>
   probe(url: string, headers?: RequestHeaders): Promise<ProbeResult>
   resolveYouTube(url: string): Promise<YouTubeResolution>
+  /**
+   * What a playlist or channel link stands for, listed without resolving any
+   * of the videos in it - one lookup, however long the listing.
+   */
+  resolvePlaylist(url: string): Promise<PlaylistListing>
+  /**
+   * Adds a listing as downloads. Resolves as soon as the work is accepted:
+   * entries are resolved one at a time in the background, and rows appear as
+   * they go.
+   */
+  addPlaylist(input: {
+    entries: PlaylistEntryInfo[]
+    title: string
+    /** The rung to aim for, or null for the best each video offers. */
+    height: number | null
+    audioOnly: boolean
+    queueId: string | null
+    dir?: string
+  }): Promise<{ accepted: number; groupId: string }>
   resolveMediaPage(url: string, headers?: RequestHeaders): Promise<YouTubeResolution>
   listClipboardItems(): Promise<ClipboardItem[]>
   retryClipboardItem(id: string): Promise<void>
@@ -670,12 +820,56 @@ export interface RendererApi {
   pauseAll(): Promise<void>
   removeTasks(ids: string[], deleteFiles: boolean): Promise<void>
   removeCompleted(): Promise<void>
+  /**
+   * An existing download this one would repeat, or null. Advisory: nothing is
+   * refused on the strength of it.
+   */
+  findDuplicate(input: {
+    url: string
+    pageUrl?: string | null
+    filename?: string
+    dir?: string
+  }): Promise<DuplicateMatch | null>
+  /**
+   * Writes the given downloads - or all of them - to a file the user picks.
+   * `.txt` produces a plain URL list, anything else Draco's own format.
+   * Resolves with how many were written, or 0 if the dialog was cancelled.
+   */
+  exportDownloads(ids: string[] | null): Promise<number>
+  /** Reads either format back, adding rows without starting them. */
+  importDownloads(): Promise<number>
   updateTask(id: string, patch: Partial<DownloadTask>): Promise<DownloadTask | null>
   redownload(id: string): Promise<void>
   /** Both resolve false when the file is gone, having marked the task missing. */
   openFile(id: string): Promise<boolean>
   revealFile(id: string): Promise<boolean>
   openTorrentItem(id: string, path: string): Promise<boolean>
+  /** Stops seeding these tasks; resolves true when any of them was. */
+  stopSeeding(ids: string[]): Promise<boolean>
+  /** The ids currently seeding, so the list can mark them. */
+  listSeeding(): Promise<string[]>
+  /**
+   * Chooses which files inside a torrent are wanted. Resolves false when the
+   * task is not a torrent, or when the selection would be empty - "none" is
+   * what Remove is for.
+   */
+  setTorrentFiles(id: string, paths: string[]): Promise<boolean>
+  /**
+   * The on-disk path of a file dropped onto a window, or '' when Chromium
+   * will not name it. Only the preload can answer this.
+   */
+  pathForDroppedFile(file: File): string
+  /**
+   * Opens dropped `.torrent` files the same way a double-clicked one is
+   * opened. Resolves with how many of the paths were torrents.
+   */
+  openTorrentFiles(paths: string[]): Promise<number>
+  /**
+   * Hands the finished files of these tasks to the OS drag the caller is in,
+   * so they can be dropped on another application. Ids that are unfinished or
+   * whose file is gone are skipped; main resolves every path itself.
+   */
+  startFileDrag(ids: string[]): void
   revealTorrentItem(id: string, path: string): Promise<boolean>
   onTasksChanged(cb: (tasks: DownloadTask[]) => void): () => void
   onProgress(cb: (updates: TaskProgress[]) => void): () => void
@@ -712,6 +906,32 @@ export interface RendererApi {
   chooseDirectory(current?: string): Promise<string | null>
   getIntegration(): Promise<IntegrationStatus>
   registerIntegration(): Promise<IntegrationStatus>
+
+  /* torrents opened from outside the app */
+  /**
+   * Torrents and magnet links this launch was asked to open - by a double
+   * click, a magnet link, or a second launch while Draco was already running.
+   * Draining is what removes them, so a cold start that has no window yet
+   * cannot lose the very thing it was started for.
+   */
+  takePendingOpens(): Promise<string[]>
+  /** Nudge that `takePendingOpens` has something new in it. */
+  onShellOpen(cb: () => void): () => void
+  /** Picks a `.torrent` from disk and returns the magnet URI standing for it. */
+  chooseTorrentFile(): Promise<string | null>
+  /**
+   * Saved site passwords. The password travels *in* on `saveCredential` and
+   * never comes back out: `listCredentials` returns everything but the secret,
+   * which is sealed by the OS and only ever decrypted for a request.
+   */
+  listCredentials(): Promise<SiteCredential[]>
+  saveCredential(input: {
+    host: string
+    realm?: string
+    username: string
+    password: string
+  }): Promise<SiteCredential>
+  removeCredential(id: string): Promise<boolean>
   readClipboard(): Promise<string>
   copyToClipboard(text: string): Promise<void>
   checkForUpdates(): Promise<UpdateInfo>

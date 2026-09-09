@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import type { Category, ToolStatus } from '@shared/types'
+import type { Category, SiteCredential, ToolStatus } from '@shared/types'
 import { formatBytes, formatWhen } from '../lib/format'
 import { useApp } from '../store/app'
 import { reportError, toast } from '../store/toasts'
@@ -341,6 +341,12 @@ function GeneralTab({ onShowTools }: { onShowTools(tools: ToolStatus[]): void })
           label="Watch the clipboard for download links"
         />
         <Toggle
+          checked={settings.associateTorrents}
+          onChange={(next) => void patch({ associateTorrents: next })}
+          label="Open .torrent files and magnet links with Draco"
+          hint="Double-clicking a torrent, or clicking a magnet link, shows it here for you to pick files from. If Windows has already been told to use another app for these, choose Draco once from “Open with” — Windows will not let an app take that back on its own."
+        />
+        <Toggle
           checked={settings.showProgressWindow}
           onChange={(next) => void patch({ showProgressWindow: next })}
           label="Show a progress window for each download"
@@ -357,6 +363,133 @@ function GeneralTab({ onShowTools }: { onShowTools(tools: ToolStatus[]): void })
   )
 }
 
+/**
+ * Passwords for sites that ask for one.
+ *
+ * The password is write-only from here: it goes to main on save and is sealed
+ * by the OS, and nothing ever sends it back - the list shows a host, a realm
+ * and a username, which is everything the user needs to recognise an entry.
+ */
+function SiteCredentials(): React.ReactElement {
+  const [entries, setEntries] = useState<SiteCredential[]>([])
+  const [host, setHost] = useState('')
+  const [realm, setRealm] = useState('')
+  const [username, setUsername] = useState('')
+  const [password, setPassword] = useState('')
+  const [busy, setBusy] = useState(false)
+
+  const refresh = (): void => {
+    void window.api
+      .listCredentials()
+      .then(setEntries)
+      .catch((error) => reportError('Could not read saved sites', error))
+  }
+
+  useEffect(refresh, [])
+
+  const add = async (): Promise<void> => {
+    setBusy(true)
+    try {
+      await window.api.saveCredential({ host, realm, username, password })
+      // Cleared on success, not on failure: a rejected save should leave what
+      // was typed in place to be corrected.
+      setHost('')
+      setRealm('')
+      setUsername('')
+      setPassword('')
+      refresh()
+      toast('success', 'Saved')
+    } catch (error) {
+      reportError('Could not save', error)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="pt-3 border-t border-line">
+      <div className="label mb-1">Site sign-ins</div>
+      <p className="text-[11px] text-faint mb-2.5 leading-relaxed">
+        Used when a server answers with 401. Passwords are encrypted by Windows for your
+        account and never leave this machine.
+      </p>
+
+      {entries.length > 0 && (
+        <div className="mb-3 border border-line rounded-lg overflow-hidden">
+          {entries.map((entry) => (
+            <div
+              key={entry.id}
+              className="grid grid-cols-[minmax(0,1fr)_minmax(0,1fr)_28px] items-center gap-2 px-2.5 py-2 text-[11.5px] border-b border-line last:border-b-0"
+            >
+              <span className="truncate" title={entry.host}>
+                {entry.host}
+                {entry.realm && <span className="text-faint"> · {entry.realm}</span>}
+              </span>
+              <span className="truncate text-muted" title={entry.username}>{entry.username}</span>
+              <button
+                type="button"
+                title="Forget this sign-in"
+                className="justify-self-end text-faint hover:text-err"
+                onClick={() => {
+                  void window.api
+                    .removeCredential(entry.id)
+                    .then(refresh)
+                    .catch((error) => reportError('Could not remove', error))
+                }}
+              >
+                <TrashIcon className="w-3.5 h-3.5" />
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+
+      <div className="grid grid-cols-2 gap-2">
+        <input
+          value={host}
+          onChange={(event) => setHost(event.target.value)}
+          placeholder="files.example.com"
+          spellCheck={false}
+          className="field text-[12.5px]"
+        />
+        <input
+          value={realm}
+          onChange={(event) => setRealm(event.target.value)}
+          placeholder="Realm (optional)"
+          spellCheck={false}
+          className="field text-[12.5px]"
+        />
+        <input
+          value={username}
+          onChange={(event) => setUsername(event.target.value)}
+          placeholder="Username"
+          spellCheck={false}
+          autoComplete="off"
+          className="field text-[12.5px]"
+        />
+        <input
+          value={password}
+          onChange={(event) => setPassword(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key === 'Enter' && host && username && password && !busy) void add()
+          }}
+          placeholder="Password"
+          type="password"
+          autoComplete="new-password"
+          className="field text-[12.5px]"
+        />
+      </div>
+
+      <div className="mt-2 flex justify-end">
+        <GhostButton onClick={() => void add()} disabled={busy || !host || !username || !password}>
+          <PlusIcon className="w-3.5 h-3.5" />
+          Add sign-in
+        </GhostButton>
+      </div>
+    </div>
+  )
+}
+
 function ConnectionTab(): React.ReactElement {
   const settings = useApp((s) => s.settings)
   const patch = useApp((s) => s.patchSettings)
@@ -367,6 +500,15 @@ function ConnectionTab(): React.ReactElement {
   const [ceilingText, setCeilingText] = useState(
     settings.adaptiveConnectionCeiling ? String(settings.adaptiveConnectionCeiling) : ''
   )
+  const [uploadText, setUploadText] = useState(
+    settings.uploadLimit ? String(Math.round(settings.uploadLimit / 1024)) : ''
+  )
+  const [ratioText, setRatioText] = useState(
+    settings.seedRatioLimit !== null ? String(settings.seedRatioLimit) : ''
+  )
+  const [seedMinutesText, setSeedMinutesText] = useState(
+    settings.seedTimeMinutes !== null ? String(settings.seedTimeMinutes) : ''
+  )
   const [proxyText, setProxyText] = useState(settings.proxyUrl ?? '')
   const [quotaText, setQuotaText] = useState(
     settings.quotaBytes ? String(Math.round(settings.quotaBytes / (1024 * 1024))) : ''
@@ -375,7 +517,33 @@ function ConnectionTab(): React.ReactElement {
     settings.hostConnectionLimits.map((rule) => `${rule.host}=${rule.connections}`).join('\n')
   )
 
+  /**
+   * The three parts of a scheduled limit only mean anything together, so they
+   * are edited as one value: an incomplete triple is stored as no schedule at
+   * all rather than a half-applied one.
+   */
+  const patchSchedule = (
+    change: Partial<{ startTime: string; stopTime: string; bytesPerSecond: number }>
+  ): Promise<void> | void => {
+    const current = settings.scheduledLimit ?? { startTime: '', stopTime: '', bytesPerSecond: 0 }
+    const next = { ...current, ...change }
+    const complete =
+      /^\d{1,2}:\d{2}$/.test(next.startTime) &&
+      /^\d{1,2}:\d{2}$/.test(next.stopTime) &&
+      next.bytesPerSecond > 0
+    return patch({ scheduledLimit: complete ? next : null })
+  }
+
   useEffect(() => setProxyText(settings.proxyUrl ?? ''), [settings.proxyUrl])
+  useEffect(() => {
+    setUploadText(settings.uploadLimit ? String(Math.round(settings.uploadLimit / 1024)) : '')
+  }, [settings.uploadLimit])
+  useEffect(() => {
+    setRatioText(settings.seedRatioLimit !== null ? String(settings.seedRatioLimit) : '')
+  }, [settings.seedRatioLimit])
+  useEffect(() => {
+    setSeedMinutesText(settings.seedTimeMinutes !== null ? String(settings.seedTimeMinutes) : '')
+  }, [settings.seedTimeMinutes])
   useEffect(() => {
     setCeilingText(
       settings.adaptiveConnectionCeiling ? String(settings.adaptiveConnectionCeiling) : ''
@@ -472,6 +640,62 @@ function ConnectionTab(): React.ReactElement {
         />
       </Field>
 
+      <div className="pt-1 border-t border-line">
+        <Toggle
+          checked={settings.seedTorrents}
+          onChange={(next) => void patch({ seedTorrents: next })}
+          label="Keep seeding finished torrents"
+          hint="Your download only worked because other people were still seeding. Off disconnects the moment a torrent completes."
+        />
+      </div>
+
+      <Field
+        label="Upload limit (KB/s)"
+        hint="Separate from the speed limit above, so giving back does not cost you download speed. Empty means no limit."
+      >
+        <input
+          value={uploadText}
+          onChange={(event) => setUploadText(event.target.value.replace(/[^\d]/g, ''))}
+          onBlur={() => {
+            const kb = Number(uploadText)
+            void patch({ uploadLimit: kb > 0 ? kb * 1024 : null })
+          }}
+          placeholder="Unlimited"
+          className="field text-[12.5px] tnum"
+          disabled={!settings.seedTorrents}
+        />
+      </Field>
+
+      <div className="grid grid-cols-2 gap-3">
+        <Field label="Stop seeding at ratio" hint="Empty seeds until you stop it.">
+          <input
+            value={ratioText}
+            onChange={(event) => setRatioText(event.target.value.replace(/[^\d.]/g, ''))}
+            onBlur={() => {
+              const ratio = Number(ratioText)
+              void patch({ seedRatioLimit: ratio > 0 ? ratio : null })
+            }}
+            placeholder="No ratio target"
+            className="field text-[12.5px] tnum"
+            disabled={!settings.seedTorrents}
+          />
+        </Field>
+        <Field label="Stop seeding after (minutes)" hint="Whichever target is reached first wins.">
+          <input
+            inputMode="numeric"
+            value={seedMinutesText}
+            onChange={(event) => setSeedMinutesText(event.target.value.replace(/[^\d]/g, ''))}
+            onBlur={() => {
+              const minutes = Number(seedMinutesText)
+              void patch({ seedTimeMinutes: minutes > 0 ? minutes : null })
+            }}
+            placeholder="No time limit"
+            className="field text-[12.5px] tnum"
+            disabled={!settings.seedTorrents}
+          />
+        </Field>
+      </div>
+
       <Field
         label="HTTP/HTTPS proxy"
         hint="Leave empty for a direct connection. Example: http://proxy.example:8080"
@@ -530,6 +754,61 @@ function ConnectionTab(): React.ReactElement {
           className="field text-[12.5px] tnum resize-y"
         />
       </Field>
+
+      <div className="grid grid-cols-3 gap-3">
+        <Field label="Throttle from" hint="Leave the speed empty for no scheduled limit.">
+          <input
+            value={settings.scheduledLimit?.startTime ?? ''}
+            onChange={(event) => void patchSchedule({ startTime: event.target.value })}
+            placeholder="09:00"
+            className="field text-[12.5px] tnum"
+          />
+        </Field>
+        <Field label="Until" hint="A stop before the start crosses midnight.">
+          <input
+            value={settings.scheduledLimit?.stopTime ?? ''}
+            onChange={(event) => void patchSchedule({ stopTime: event.target.value })}
+            placeholder="17:00"
+            className="field text-[12.5px] tnum"
+          />
+        </Field>
+        <Field label="At (KB/s)" hint="Replaces the limit above during those hours.">
+          <input
+            inputMode="numeric"
+            value={settings.scheduledLimit ? String(Math.round(settings.scheduledLimit.bytesPerSecond / 1024)) : ''}
+            onChange={(event) => {
+              const kb = Number(event.target.value.replace(/[^\d]/g, ''))
+              void patchSchedule({ bytesPerSecond: kb > 0 ? kb * 1024 : 0 })
+            }}
+            placeholder="None"
+            className="field text-[12.5px] tnum"
+          />
+        </Field>
+      </div>
+
+      <Field
+        label="Borrow cookies from"
+        hint="Lets yt-dlp resolve members-only, age-gated and other signed-in pages. Close the browser first if reading its cookies fails."
+      >
+        <select
+          value={settings.cookiesFromBrowser}
+          onChange={(event) =>
+            void patch({ cookiesFromBrowser: event.target.value as typeof settings.cookiesFromBrowser })
+          }
+          className="field text-[12.5px]"
+        >
+          <option value="none">No browser (anonymous)</option>
+          <option value="chrome">Chrome</option>
+          <option value="edge">Edge</option>
+          <option value="brave">Brave</option>
+          <option value="firefox">Firefox</option>
+          <option value="chromium">Chromium</option>
+          <option value="opera">Opera</option>
+          <option value="vivaldi">Vivaldi</option>
+        </select>
+      </Field>
+
+      <SiteCredentials />
     </div>
   )
 }
@@ -751,6 +1030,16 @@ function BrowserTab(): React.ReactElement {
           ok={integration?.extensionId !== null && integration?.extensionId !== undefined}
           label="ID"
           value={integration?.extensionId ?? 'Run npm run keygen to pin the extension ID'}
+        />
+        <StatusLine
+          ok={integration?.shellHandlers.torrentFiles === true}
+          label=".torrent"
+          value={integration?.shellHandlers.torrentFiles ? 'Opens with Draco' : 'Opens with another app'}
+        />
+        <StatusLine
+          ok={integration?.shellHandlers.magnetLinks === true}
+          label="magnet:"
+          value={integration?.shellHandlers.magnetLinks ? 'Opens with Draco' : 'Opens with another app'}
         />
         {integration?.lastHandoffAt && (
           <StatusLine ok label="Last handoff" value={formatWhen(integration.lastHandoffAt)} />

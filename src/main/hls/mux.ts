@@ -174,7 +174,18 @@ function runFfmpeg(
           return
         }
         void rm(outputPath, { force: true }).catch(() => {})
-        reject(new MuxError(`ffmpeg exited with ${code}: ${stderr.trim().split('\n').pop() ?? ''}`))
+        // ffmpeg's last line is only its summary - "Error opening output files:
+        // Invalid argument" for anything the muxer refused. What actually went
+        // wrong is on the lines above it (the stream map that matched nothing,
+        // the codec the container will not take), so reporting the tail alone
+        // turned every distinct failure into the same unactionable sentence.
+        const detail = stderr
+          .split('\n')
+          .map((line) => line.trim())
+          .filter(Boolean)
+          .slice(-4)
+          .join(' | ')
+        reject(new MuxError(`ffmpeg exited with ${code}${detail ? `: ${detail}` : ''}`))
       })
     })
   })

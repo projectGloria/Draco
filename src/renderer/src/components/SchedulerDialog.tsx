@@ -38,6 +38,7 @@ function blankQueue(): Queue {
     stopTime: null,
     days: [1, 2, 3, 4, 5],
     maxConcurrent: 2,
+    speedLimit: null,
     retryLimit: 3,
     retryDelaySeconds: 30,
     onComplete: 'none',
@@ -172,6 +173,22 @@ export default function SchedulerDialog({ onClose }: { onClose(): void }): React
                 max={20}
                 value={draft.maxConcurrent}
                 onChange={(event) => patch({ maxConcurrent: Number(event.target.value) })}
+                className="field text-[12.5px] tnum"
+              />
+            </div>
+            <div className="w-[130px]">
+              <label className="label">Speed (KB/s)</label>
+              <input
+                type="number"
+                min={0}
+                value={draft.speedLimit ? Math.round(draft.speedLimit / 1024) : ''}
+                placeholder="No limit"
+                onChange={(event) => {
+                  const kb = Number(event.target.value)
+                  // Shared by every task in the queue, and never wider than the
+                  // global limit - see the Queue type.
+                  patch({ speedLimit: kb > 0 ? kb * 1024 : null })
+                }}
                 className="field text-[12.5px] tnum"
               />
             </div>

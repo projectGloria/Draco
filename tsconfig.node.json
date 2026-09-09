@@ -26,6 +26,10 @@
     "electron.vite.config.ts",
     "src/main/**/*",
     "src/preload/**/*",
-    "src/shared/**/*"
+    "src/shared/**/*",
+    // The engine tests import the modules under test with the same explicit
+    // `.ts` specifiers the engine uses on itself, so they are typechecked by
+    // the same project rather than by one of their own.
+    "tests/**/*"
   ]
 }

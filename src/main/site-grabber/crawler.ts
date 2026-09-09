@@ -4,6 +4,7 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { getDispatcher } from '../engine/http.ts'
 import { mapConcurrent } from '../engine/concurrency.ts'
+import { isPrivateHost } from '../engine/create.ts'
 
 export interface SiteGrabOptions {
   startUrl: string
@@ -79,7 +80,9 @@ export async function crawlSite(
         } as RequestInit).catch(() => null)
         if (!response?.ok) return
         const final = new URL(response.url || canonical)
-        if (options.stayOnHost && final.host !== start.host) return
+        if (final.host !== start.host) {
+          if (options.stayOnHost || isPrivateHost(final.hostname)) return
+        }
         const type = response.headers.get('content-type') ?? ''
         if (!/text\/html|application\/xhtml\+xml/i.test(type)) {
           resources.set(withoutHash(final), resourceFor(final, 'asset'))
@@ -96,7 +99,9 @@ export async function crawlSite(
         resources.set(withoutHash(final), { ...resourceFor(final, 'page'), tmpFile })
 
         for (const link of extractLinks(html, final)) {
-          if (options.stayOnHost && link.url.host !== start.host) continue
+          if (link.url.host !== start.host) {
+            if (options.stayOnHost || isPrivateHost(link.url.hostname)) continue
+          }
           if (link.kind === 'page') {
             if (depth >= options.maxDepth) continue
             const key = withoutHash(link.url)

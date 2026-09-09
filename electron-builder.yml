@@ -32,6 +32,21 @@ extraResources:
       - '**/*'
       - '!key.pem'
 
+# Double-clicking a .torrent opens it in Draco. The ProgId here is the same one
+# `src/main/shell-integration.ts` writes at startup, so an installed copy and a
+# portable or development one claim the association identically - and Options
+# can report on it without having to know which kind of copy this is.
+#
+# There is no `protocols:` block beside it on purpose: electron-builder only
+# emits those for macOS, so `magnet:` is registered at runtime instead, in the
+# same place and by the same setting.
+fileAssociations:
+  - ext: torrent
+    name: Draco.Torrent
+    description: BitTorrent file
+    mimeType: application/x-bittorrent
+    icon: resources/icon.ico
+
 win:
   icon: resources/icon.ico
   target:

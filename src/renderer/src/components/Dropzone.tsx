@@ -14,7 +14,7 @@ export default function Dropzone(): React.ReactElement {
         WebkitAppRegion: 'drag' // allow dragging the window by clicking on the widget
       } as React.CSSProperties}
       onDragEnter={(event) => {
-        if ([...event.dataTransfer.types].some((type) => type === 'text/uri-list' || type === 'text/plain')) {
+        if ([...event.dataTransfer.types].some((type) => type === 'Files' || type === 'text/uri-list' || type === 'text/plain')) {
           event.preventDefault()
           setDragging(true)
         }
@@ -29,6 +29,16 @@ export default function Dropzone(): React.ReactElement {
       onDrop={(event) => {
         event.preventDefault()
         setDragging(false)
+        // Dropped `.torrent` files take the same road as a double-clicked one:
+        // main opens them, the main window shows the dialog.
+        const paths = [...event.dataTransfer.files]
+          .map((file) => window.api.pathForDroppedFile(file))
+          .filter((path) => path.length > 0)
+        if (paths.length > 0) {
+          void window.api.openTorrentFiles(paths)
+          return
+        }
+
         const raw = event.dataTransfer.getData('text/uri-list') || event.dataTransfer.getData('text/plain')
         const urls = [...new Set(raw.split(/[\r\n\s]+/).filter((value) => /^https?:\/\//i.test(value) || /^magnet:\?/i.test(value) || /^[0-9a-fA-F]{40}$/.test(value)))]
         

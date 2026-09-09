@@ -8,6 +8,7 @@ import Dialog, { GhostButton, PrimaryButton } from './Dialog'
 import ContextMenu, { type MenuPosition } from './ContextMenu'
 import FileIcon from './FileIcon'
 import ProgressBar, { barColor } from './ProgressBar'
+import { InfoIcon, LinkIcon, ListIcon, TrackerIcon, UsersIcon } from './Icons'
 
 type TorrentTab = 'general' | 'trackers' | 'peers' | 'sources' | 'content'
 
@@ -188,12 +189,28 @@ function TorrentDetails({
   onTabChange(tab: TorrentTab): void
 }): React.ReactElement {
   const info = task.torrentInfo
-  const tabs: Array<{ id: TorrentTab; label: string }> = [
-    { id: 'general', label: 'General' },
-    { id: 'trackers', label: `Trackers${info ? ` (${info.trackers.length})` : ''}` },
-    { id: 'peers', label: `Peers${info ? ` (${info.peers.length})` : ''}` },
-    { id: 'sources', label: `HTTP Sources${info ? ` (${info.sources.length})` : ''}` },
-    { id: 'content', label: `Content${info ? ` (${info.files.length})` : ''}` }
+  const tabs: Array<{ id: TorrentTab; label: string; icon: React.ReactElement }> = [
+    { id: 'general', label: 'General', icon: <InfoIcon className="w-3.5 h-3.5" /> },
+    {
+      id: 'trackers',
+      label: `Trackers${info ? ` (${info.trackers.length})` : ''}`,
+      icon: <TrackerIcon className="w-3.5 h-3.5" />
+    },
+    {
+      id: 'peers',
+      label: `Peers${info ? ` (${info.peers.length})` : ''}`,
+      icon: <UsersIcon className="w-3.5 h-3.5" />
+    },
+    {
+      id: 'sources',
+      label: `HTTP Sources${info ? ` (${info.sources.length})` : ''}`,
+      icon: <LinkIcon className="w-3.5 h-3.5" />
+    },
+    {
+      id: 'content',
+      label: `Content${info ? ` (${info.files.length})` : ''}`,
+      icon: <ListIcon className="w-3.5 h-3.5" />
+    }
   ]
 
   return (
@@ -204,11 +221,14 @@ function TorrentDetails({
             key={entry.id}
             onClick={() => onTabChange(entry.id)}
             className={
-              'px-3.5 py-2.5 text-[11px] font-semibold whitespace-nowrap border-r border-line transition-colors ' +
+              'flex items-center gap-1.5 px-3.5 py-2.5 text-[11px] font-semibold whitespace-nowrap border-r border-line transition-colors ' +
               (tab === entry.id ? 'text-ink bg-white/[0.07]' : 'text-faint hover:text-ink hover:bg-white/[0.04]')
             }
             style={tab === entry.id ? { boxShadow: 'inset 0 -2px 0 var(--accent)' } : undefined}
           >
+            <span className="shrink-0" style={tab === entry.id ? { color: 'var(--accent)' } : undefined}>
+              {entry.icon}
+            </span>
             {entry.label}
           </button>
         ))}
@@ -309,6 +329,13 @@ function TorrentPeers({ task }: { task: DownloadTask }): React.ReactElement {
 function TorrentContent({ task }: { task: DownloadTask }): React.ReactElement {
   const files = task.torrentInfo!.files
   const [menu, setMenu] = useState<{ at: MenuPosition; path: string } | null>(null)
+  /**
+   * The row the user has clicked. `file.selected` is a different thing - it is
+   * whether the swarm should be asked for that file at all - so highlighting
+   * has to be its own state or clicking a row would look like changing what
+   * gets downloaded.
+   */
+  const [active, setActive] = useState<string | null>(null)
 
   const openItem = async (path: string): Promise<void> => {
     try {
@@ -330,10 +357,57 @@ function TorrentContent({ task }: { task: DownloadTask }): React.ReactElement {
     }
   }
 
+  /**
+   * Applies a new wanted-set. The list is rebuilt from the current one every
+   * time rather than from a local copy, so the tick reflects what the engine
+   * actually did - an empty selection is refused there, not here.
+   */
+  const applySelection = async (next: Set<string>): Promise<void> => {
+    if (next.size === 0) {
+      toast('info', 'Keep at least one file - use Remove to drop the whole torrent')
+      return
+    }
+    try {
+      await window.api.setTorrentFiles(task.id, [...next])
+    } catch (error) {
+      reportError('Could not change the torrent selection', error)
+    }
+  }
+
+  const toggleFile = (path: string): void => {
+    const next = new Set(files.filter((file) => file.selected).map((file) => file.path))
+    if (next.has(path)) next.delete(path)
+    else next.add(path)
+    void applySelection(next)
+  }
+
+  const selectedCount = files.filter((file) => file.selected).length
+
   return (
     <div className="text-[11.5px]">
-      <div className="grid grid-cols-[18px_minmax(0,1fr)_90px_160px] gap-2 px-2 pb-2 text-[10px] uppercase tracking-[0.4px] text-faint">
-        <span /><span>Name</span><span className="text-right">Size</span><span className="text-right">Progress</span>
+      <div className="flex items-center justify-between px-2 pb-2">
+        <span className="text-[10px] uppercase tracking-[0.4px] text-faint">
+          {selectedCount} of {files.length} selected
+        </span>
+        <div className="flex gap-2">
+          <button
+            type="button"
+            className="text-[10.5px] text-muted hover:text-ink"
+            onClick={() => void applySelection(new Set(files.map((file) => file.path)))}
+          >
+            Select all
+          </button>
+          <button
+            type="button"
+            className="text-[10.5px] text-muted hover:text-ink"
+            onClick={() => void applySelection(new Set(files.filter((file) => file.downloaded > 0).map((file) => file.path)))}
+          >
+            Only started
+          </button>
+        </div>
+      </div>
+      <div className="grid grid-cols-[18px_18px_minmax(0,1fr)_90px_160px] gap-2 px-2 pb-2 text-[10px] uppercase tracking-[0.4px] text-faint">
+        <span /><span /><span>Name</span><span className="text-right">Size</span><span className="text-right">Progress</span>
       </div>
       {files.map((file) => {
         const fileProgress = file.size ? Math.min(100, (file.downloaded / file.size) * 100) : 100
@@ -345,13 +419,32 @@ function TorrentContent({ task }: { task: DownloadTask }): React.ReactElement {
         return (
           <div
             key={file.path}
-            className={'grid grid-cols-[18px_minmax(0,1fr)_90px_160px] items-center gap-2 px-2 py-2 border-t border-line cursor-default hover:bg-white/[0.035] ' + (file.selected ? '' : 'opacity-45')}
+            className={'grid grid-cols-[18px_18px_minmax(0,1fr)_90px_160px] items-center gap-2 px-2 py-2 border-t border-line cursor-default select-none hover:bg-white/[0.035] ' + (file.selected ? '' : 'opacity-45')}
+            style={active === file.path
+              ? { background: 'var(--accent-soft)', boxShadow: 'inset 2px 0 0 var(--accent)' }
+              : undefined}
+            onMouseDown={() => setActive(file.path)}
             onDoubleClick={() => void openItem(file.path)}
             onContextMenu={(event) => {
               event.preventDefault()
+              // Right-clicking a row acts on that row, so it becomes the
+              // selected one too - otherwise the menu would refer to a file
+              // other than the highlighted one.
+              setActive(file.path)
               setMenu({ at: { x: event.clientX, y: event.clientY }, path: file.path })
             }}
           >
+            <input
+              type="checkbox"
+              className="w-3.5 h-3.5 accent-[var(--accent)] cursor-pointer"
+              checked={file.selected}
+              title={file.selected ? 'Downloading this file' : 'Skipping this file'}
+              onChange={() => toggleFile(file.path)}
+              // The row's own click handlers select and open; the box only ever
+              // changes what is wanted.
+              onClick={(event) => event.stopPropagation()}
+              onDoubleClick={(event) => event.stopPropagation()}
+            />
             <FileIcon name={file.path} className="w-4 h-4" />
             <span className="truncate" title={file.path}>{file.path}</span>
             <span className="text-right tnum text-muted">{formatBytes(file.size)}</span>
@@ -369,6 +462,13 @@ function TorrentContent({ task }: { task: DownloadTask }): React.ReactElement {
           items={[
             { label: 'Open', onClick: () => void openItem(menu.path) },
             { label: 'Show in Explorer', onClick: () => void revealItem(menu.path) },
+            {},
+            {
+              label: files.find((file) => file.path === menu.path)?.selected
+                ? 'Skip this file'
+                : 'Download this file',
+              onClick: () => toggleFile(menu.path)
+            },
             {},
             {
               label: 'Copy relative path',

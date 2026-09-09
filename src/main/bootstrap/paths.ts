@@ -15,12 +15,16 @@ export interface AppPaths {
   categoriesFile: string
   queuesFile: string
   quotaFile: string
+  /** Site passwords, each secret sealed by `safeStorage` - never plain JSON. */
+  credentialsFile: string
   /** Streams the extension spotted, kept between runs so the panel survives a restart. */
   mediaFile: string
   clipboardFile: string
   siteProjectsFile: string
   /** Empty stand-in files the shell is asked for a file-type icon against. */
   iconCache: string
+  /** Draco's own copies of every imported `.torrent`, keyed by info hash. */
+  torrents: string
   ffmpegExe: string
   ytDlpExe: string
   defaultDownloadDir: string
@@ -65,6 +69,7 @@ export function getPaths(): AppPaths {
     root,
     bin,
     logs: join(root, 'logs'),
+    credentialsFile: join(root, 'credentials.json'),
     tempDir: join(root, 'incomplete'),
     settingsFile: join(root, 'settings.json'),
     tasksFile: join(root, 'tasks.json'),
@@ -75,6 +80,7 @@ export function getPaths(): AppPaths {
     clipboardFile: join(root, 'clipboard.json'),
     siteProjectsFile: join(root, 'site-projects.json'),
     iconCache: join(root, 'icon-cache'),
+    torrents: join(root, 'torrents'),
     ffmpegExe: join(bin, 'ffmpeg.exe'),
     ytDlpExe: join(bin, 'yt-dlp.exe'),
     defaultDownloadDir: join(app.getPath('downloads'), 'Draco'),
@@ -92,7 +98,7 @@ export function getPaths(): AppPaths {
 /** Creates the writable tree. Safe to call repeatedly. */
 export function ensureDirs(): AppPaths {
   const p = getPaths()
-  for (const dir of [p.root, p.bin, p.logs, p.iconCache, p.tempDir]) {
+  for (const dir of [p.root, p.bin, p.logs, p.iconCache, p.torrents, p.tempDir]) {
     mkdirSync(dir, { recursive: true })
   }
   migrateLegacyTempDir(p)

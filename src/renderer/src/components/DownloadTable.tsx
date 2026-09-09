@@ -1,6 +1,7 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { ColumnId, DownloadTask, TaskStatus } from '@shared/types'
 import { formatBytes, formatEta, formatPercent, formatSpeed, formatWhen, percent } from '../lib/format'
+import { buildDisplayRows, type TaskGroup } from '@shared/groups'
 import { useApp } from '../store/app'
 import { useT, type TKey } from '../i18n'
 import { reportError, toast } from '../store/toasts'
@@ -56,10 +57,13 @@ const STATUS_COLOR: Record<TaskStatus, string> = {
 export default function DownloadTable({
   rows,
   onDetails,
+  onGroupDetails,
   onDelete
 }: {
   rows: DownloadTask[]
   onDetails(id: string): void
+  /** Opens the group's properties window - the batch equivalent of a torrent's. */
+  onGroupDetails(groupId: string): void
   onDelete(ids: string[]): void
 }): React.ReactElement {
   const t = useT()
@@ -80,11 +84,13 @@ export default function DownloadTable({
   const selectionRef = useRef(selection)
   const queuesRef = useRef(queues)
   const onDetailsRef = useRef(onDetails)
+  const onGroupDetailsRef = useRef(onGroupDetails)
   const onDeleteRef = useRef(onDelete)
   rowsRef.current = rows
   selectionRef.current = selection
   queuesRef.current = queues
   onDetailsRef.current = onDetails
+  onGroupDetailsRef.current = onGroupDetails
   onDeleteRef.current = onDelete
 
   const columns = useMemo(() => {
@@ -107,10 +113,11 @@ export default function DownloadTable({
     () => new Map(queues.map((queue) => [queue.id, queue.name])),
     [queues]
   )
+  const display = useMemo(() => buildDisplayRows(rows), [rows])
   const firstVisible = Math.max(0, Math.floor(Math.max(0, viewport.scrollTop - 32) / ROW_HEIGHT) - OVERSCAN_ROWS)
   const visibleCount = Math.ceil(viewport.height / ROW_HEIGHT) + OVERSCAN_ROWS * 2
-  const lastVisible = Math.min(rows.length, firstVisible + visibleCount)
-  const visibleRows = rows.slice(firstVisible, lastVisible)
+  const lastVisible = Math.min(display.length, firstVisible + visibleCount)
+  const visibleRows = display.slice(firstVisible, lastVisible)
 
   useEffect(() => {
     const element = body.current
@@ -208,6 +215,22 @@ export default function DownloadTable({
     )
   }, [clickRow])
 
+  /**
+   * Dragging a finished row out of Draco and onto another application - a chat
+   * window, a folder, a mail composer.
+   *
+   * `preventDefault` is what hands the drag over: it cancels Chromium's own
+   * HTML drag so the OS-level one main starts is the only drag in flight. Main
+   * resolves the paths, so a row whose file has since moved simply produces no
+   * drag rather than a drop of nothing.
+   */
+  const dragTask = useCallback((task: DownloadTask, event: React.DragEvent): void => {
+    if (task.status !== 'done') return
+    event.preventDefault()
+    const selected = selectionRef.current
+    window.api.startFileDrag(selected.includes(task.id) ? [...selected] : [task.id])
+  }, [])
+
   const hoverRow = useCallback((task: DownloadTask, event: React.MouseEvent): void => {
     // Buttons === 1 means primary button is held down
     if (event.buttons === 1) {
@@ -224,6 +247,87 @@ export default function DownloadTable({
       onDetailsRef.current(task.id)
     }
   }, [])
+
+  /**
+   * Selecting a group selects the files in it, so the ordinary commands - pause,
+   * delete, move to queue - reach every one of them without the group needing
+   * commands of its own. A modifier adds to or removes from the selection the
+   * way it does for a single row.
+   */
+  const selectGroup = useCallback((group: TaskGroup, event: React.MouseEvent): void => {
+    if (event.button === 2) return
+    const ids = group.tasks.map((task) => task.id)
+    const current = selectionRef.current
+    if (event.ctrlKey || event.metaKey || event.shiftKey) {
+      setSelection(ids.every((id) => current.includes(id))
+        ? current.filter((id) => !ids.includes(id))
+        : [...new Set([...current, ...ids])])
+      return
+    }
+    setSelection(ids)
+  }, [setSelection])
+
+  /** What is inside a group is read in its properties window. */
+  const openGroup = useCallback((group: TaskGroup): void => {
+    onGroupDetailsRef.current(group.id)
+  }, [])
+
+  const groupMenu = useCallback((event: React.MouseEvent, group: TaskGroup): void => {
+    event.preventDefault()
+    const ids = group.tasks.map((task) => task.id)
+    setSelection(ids)
+    const running = group.tasks.some((task) => task.status === 'downloading' || task.status === 'queued')
+
+    const items: MenuItem[] = [
+      { label: `Properties… (${ids.length} files)`, onClick: () => onGroupDetailsRef.current(group.id) },
+      {},
+      {
+        label: running ? `Stop ${ids.length} downloads` : `Resume ${ids.length} downloads`,
+        onClick: () => {
+          const call = running ? window.api.pauseTasks(ids) : window.api.startTasks(ids)
+          void call.catch((err) => reportError('Command failed', err))
+        }
+      },
+      {
+        label: t('openFolder'),
+        onClick: () => void window.api.revealFile(group.tasks[0].id)
+          .catch((err) => reportError('Could not open the folder', err))
+      },
+      {}
+    ]
+
+    for (const queue of queuesRef.current) {
+      items.push({
+        label: t('moveToQueue') + ': ' + queue.name,
+        checked: group.tasks.every((task) => task.queueId === queue.id),
+        onClick: () => void patchQueue(ids, queue.id)
+      })
+    }
+    if (queuesRef.current.length > 0) {
+      items.push({
+        label: t('noQueue'),
+        disabled: group.tasks.every((task) => !task.queueId),
+        onClick: () => void patchQueue(ids, null)
+      })
+      items.push({})
+    }
+
+    items.push({
+      label: `Export ${ids.length} downloads…`,
+      onClick: () => {
+        void window.api
+          .exportDownloads(ids)
+          .then((count) => {
+            if (count > 0) toast('success', `Exported ${count} download${count === 1 ? '' : 's'}`)
+          })
+          .catch((err) => reportError('Could not export', err))
+      }
+    })
+    items.push({})
+    items.push({ label: `Delete ${ids.length} downloads`, danger: true, onClick: () => onDeleteRef.current(ids) })
+
+    setMenu({ at: { x: event.clientX, y: event.clientY }, items })
+  }, [setSelection, t])
 
   const rowMenu = useCallback((event: React.MouseEvent, task: DownloadTask): void => {
     event.preventDefault()
@@ -271,6 +375,20 @@ export default function DownloadTable({
       {}
     ]
 
+    // Only offered for a torrent that has finished, which is the only row that
+    // can still be uploading. `stopSeeding` reports whether it actually was.
+    if (task.kind === 'torrent' && task.status === 'done') {
+      items.splice(2, 0, {
+        label: 'Stop seeding',
+        onClick: () => {
+          void window.api
+            .stopSeeding(ids)
+            .then((stopped) => toast('info', stopped ? 'Seeding stopped' : 'Not seeding'))
+            .catch((err) => reportError('Could not stop seeding', err))
+        }
+      })
+    }
+
     for (const queue of currentQueues) {
       items.push({
         label: t('moveToQueue') + ': ' + queue.name,
@@ -287,6 +405,34 @@ export default function DownloadTable({
       items.push({})
     }
 
+    // List-level, and put here because right-clicking the list is where a
+    // person looks for what can be done to it. Export takes the selection;
+    // import never starts what it adds.
+    items.push({})
+    items.push({
+      label: ids.length > 1 ? `Export ${ids.length} downloads…` : 'Export this download…',
+      onClick: () => {
+        void window.api
+          .exportDownloads(ids)
+          .then((count) => {
+            if (count > 0) toast('success', `Exported ${count} download${count === 1 ? '' : 's'}`)
+          })
+          .catch((err) => reportError('Could not export', err))
+      }
+    })
+    items.push({
+      label: 'Import list…',
+      onClick: () => {
+        void window.api
+          .importDownloads()
+          .then((count) => {
+            if (count > 0) toast('success', `Imported ${count} download${count === 1 ? '' : 's'} — none started`)
+          })
+          .catch((err) => reportError('Could not import', err))
+      }
+    })
+    items.push({})
+
     items.push({ label: 'Delete', danger: true, onClick: () => onDeleteRef.current(ids) })
 
     setMenu({ at: { x: event.clientX, y: event.clientY }, items })
@@ -299,11 +445,20 @@ export default function DownloadTable({
       <div
         className="flex-1 min-h-0 overflow-auto"
         ref={body}
-        onScroll={(event) => setViewport((current) => ({
-          scrollTop: event.currentTarget.scrollTop,
-          height: current.height || event.currentTarget.clientHeight,
-          width: current.width || event.currentTarget.clientWidth
-        }))}
+        onScroll={(event) => {
+          // Read the element now, not inside the updater. React nulls
+          // `currentTarget` once the handler returns, and a functional update is
+          // free to run later - during the next render - by which time reaching
+          // through the event throws and takes the whole table down with it.
+          // A group expanding by forty-eight rows changes the scroll geometry in
+          // one frame, which is exactly when that update gets deferred.
+          const { scrollTop, clientHeight, clientWidth } = event.currentTarget
+          setViewport((current) => ({
+            scrollTop,
+            height: current.height || clientHeight,
+            width: current.width || clientWidth
+          }))
+        }}
         onMouseDown={(event) => {
           if (event.target === event.currentTarget) {
             setSelection([])
@@ -355,20 +510,33 @@ export default function DownloadTable({
           {rows.length === 0 ? (
             <EmptyState />
           ) : (
-            <div className="relative" style={{ height: rows.length * ROW_HEIGHT }}>
-              {visibleRows.map((task, offset) => (
-                <Row
-                  key={task.id}
-                  task={task}
+            <div className="relative" style={{ height: display.length * ROW_HEIGHT }}>
+              {visibleRows.map((row, offset) => row.kind === 'group' ? (
+                <GroupRow
+                  key={row.group.id}
+                  group={row.group}
                   columns={columnIds}
                   template={template}
                   top={(firstVisible + offset) * ROW_HEIGHT}
-                  groupFirst={Boolean(task.groupId && rows[firstVisible + offset - 1]?.groupId !== task.groupId)}
-                  groupLast={Boolean(task.groupId && rows[firstVisible + offset + 1]?.groupId !== task.groupId)}
-                  selected={selectedIds.has(task.id)}
-                  queueLabel={task.queueId ? queueLabels.get(task.queueId) ?? '' : ''}
-                  statusLabel={t(STATUS_KEYS[task.status])}
+                  selected={row.group.tasks.every((task) => selectedIds.has(task.id))}
+                  queueLabel={row.group.summary.queueId ? queueLabels.get(row.group.summary.queueId) ?? '' : ''}
+                  statusLabel={t(STATUS_KEYS[row.group.summary.status])}
+                  onSelect={selectGroup}
+                  onOpen={openGroup}
+                  onMenu={groupMenu}
+                />
+              ) : (
+                <Row
+                  key={row.task.id}
+                  task={row.task}
+                  columns={columnIds}
+                  template={template}
+                  top={(firstVisible + offset) * ROW_HEIGHT}
+                  selected={selectedIds.has(row.task.id)}
+                  queueLabel={row.task.queueId ? queueLabels.get(row.task.queueId) ?? '' : ''}
+                  statusLabel={t(STATUS_KEYS[row.task.status])}
                   onSelect={selectTask}
+                  onDragStart={dragTask}
                   onMouseEnter={hoverRow}
                   onOpen={openTask}
                   onMenu={rowMenu}
@@ -384,6 +552,68 @@ export default function DownloadTable({
   )
 }
 
+const GroupRow = memo(function GroupRow({
+  group,
+  columns,
+  template,
+  top,
+  selected,
+  queueLabel,
+  statusLabel,
+  onSelect,
+  onOpen,
+  onMenu
+}: {
+  group: TaskGroup
+  columns: ColumnId[]
+  template: string
+  top: number
+  selected: boolean
+  queueLabel: string
+  statusLabel: string
+  onSelect(group: TaskGroup, event: React.MouseEvent): void
+  onOpen(group: TaskGroup): void
+  onMenu(event: React.MouseEvent, group: TaskGroup): void
+}): React.ReactElement {
+  return (
+    <div
+      className="absolute left-0 right-0 h-[30px] border-b border-line grid select-none cursor-pointer"
+      style={{
+        gridTemplateColumns: template,
+        transform: `translateY(${top}px)`,
+        background: selected ? 'var(--accent-soft)' : 'rgba(56, 189, 248, 0.07)',
+        boxShadow: 'inset 2px 0 0 var(--accent)',
+        borderTopColor: 'var(--accent-line)'
+      }}
+      onMouseDown={(event) => onSelect(group, event)}
+      onDoubleClick={() => onOpen(group)}
+      onContextMenu={(event) => onMenu(event, group)}
+      title={`${group.name} — ${group.tasks.length} files
+Double-click to see what is in it`}
+    >
+      {columns.map((id) => id === 'name' ? (
+        <div key={id} className="px-2.5 text-[12px] truncate min-w-0 flex items-center gap-2">
+          <SiteIcon
+            url={group.summary.sourceUrl ?? group.summary.youtube?.pageUrl ?? group.summary.url}
+            className="w-4 h-4 shrink-0"
+          />
+          <span className="truncate font-medium text-[var(--accent)]">{group.name}</span>
+          <span className="shrink-0 tnum text-[11px] text-faint">{group.tasks.length} files</span>
+        </div>
+      ) : (
+        <Cell
+          key={id}
+          id={id}
+          task={group.summary}
+          queueLabel={queueLabel}
+          statusLabel={statusLabel}
+        />
+      ))}
+      <div />
+    </div>
+  )
+})
+
 async function patchQueue(ids: string[], queueId: string | null): Promise<void> {
   try {
     for (const id of ids) await window.api.updateTask(id, { queueId })
@@ -397,12 +627,11 @@ const Row = memo(function Row({
   columns,
   template,
   top,
-  groupFirst,
-  groupLast,
   selected,
   queueLabel,
   statusLabel,
   onSelect,
+  onDragStart,
   onMouseEnter,
   onOpen,
   onMenu
@@ -411,12 +640,11 @@ const Row = memo(function Row({
   columns: ColumnId[]
   template: string
   top: number
-  groupFirst: boolean
-  groupLast: boolean
   selected: boolean
   queueLabel: string
   statusLabel: string
   onSelect(task: DownloadTask, event: React.MouseEvent): void
+  onDragStart(task: DownloadTask, event: React.DragEvent): void
   onMouseEnter(task: DownloadTask, event: React.MouseEvent): void
   onOpen(task: DownloadTask): void
   onMenu(event: React.MouseEvent, task: DownloadTask): void
@@ -427,11 +655,11 @@ const Row = memo(function Row({
       style={{
         gridTemplateColumns: template,
         transform: `translateY(${top}px)`,
-        background: selected ? 'var(--accent-soft)' : task.groupId ? 'rgba(56, 189, 248, 0.035)' : undefined,
-        boxShadow: task.groupId || selected ? 'inset 2px 0 0 var(--accent)' : undefined,
-        borderTopColor: groupFirst ? 'var(--accent-line)' : undefined,
-        borderBottomColor: groupLast ? 'var(--accent-line)' : undefined
+        background: selected ? 'var(--accent-soft)' : undefined,
+        boxShadow: selected ? 'inset 2px 0 0 var(--accent)' : undefined
       }}
+      draggable={task.status === 'done'}
+      onDragStart={(event) => onDragStart(task, event)}
       onMouseDown={(event) => onSelect(task, event)}
       onMouseEnter={(event) => onMouseEnter(task, event)}
       onDoubleClick={() => onOpen(task)}
@@ -444,7 +672,6 @@ const Row = memo(function Row({
           task={task}
           queueLabel={queueLabel}
           statusLabel={statusLabel}
-          groupFirst={groupFirst}
         />
       ))}
       <div />
@@ -456,14 +683,12 @@ function Cell({
   id,
   task,
   queueLabel,
-  statusLabel,
-  groupFirst
+  statusLabel
 }: {
   id: ColumnId
   task: DownloadTask
   queueLabel: string
   statusLabel: string
-  groupFirst: boolean
 }): React.ReactElement {
   const base =
     'px-2.5 text-[12px] truncate min-w-0 flex items-center ' +
@@ -486,19 +711,12 @@ function Cell({
               className="w-4 h-4"
             />
           </span>
-          <span className="truncate">
-            {task.groupId && (
-              <span className="text-[var(--accent)] font-medium">
-                {groupFirst ? `${task.groupName || 'Page downloads'} / ` : '↳ '}
-              </span>
-            )}
-            {task.filename}
-          </span>
+          <span className="truncate">{task.filename}</span>
         </div>
       )
 
     case 'size':
-      return <div className={base}>{formatBytes(task.size)}</div>
+      return <div className={base}>{formatBytes(task.size ?? task.expectedSize ?? null)}</div>
 
     case 'progress':
       return (
@@ -594,6 +812,23 @@ function EmptyState(): React.ReactElement {
       </div>
       <p className="text-[13px] font-semibold">{t('noDownloads')}</p>
       <p className="text-[12px] text-faint mt-1 max-w-[320px] leading-relaxed">{t('noDownloadsHint')}</p>
+      {/* An empty list is exactly where someone arriving from another machine
+          is standing, and the row menu that offers this is unreachable when
+          there are no rows to right-click. */}
+      <button
+        type="button"
+        className="mt-3 text-[11.5px] text-muted hover:text-ink underline underline-offset-2"
+        onClick={() => {
+          void window.api
+            .importDownloads()
+            .then((count) => {
+              if (count > 0) toast('success', `Imported ${count} download${count === 1 ? '' : 's'} — none started`)
+            })
+            .catch((err) => reportError('Could not import', err))
+        }}
+      >
+        Import a list of downloads
+      </button>
     </div>
   )
 }

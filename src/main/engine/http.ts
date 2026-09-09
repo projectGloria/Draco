@@ -16,6 +16,20 @@ import { Agent, ProxyAgent, interceptors, type Dispatcher } from 'undici'
 const dispatchers = new Map<number, Dispatcher>()
 const retiredDispatchers = new Set<Dispatcher>()
 let proxyUrl: string | null = null
+/**
+ * Defaults to 1280 (maxConcurrentTasks 20 x maxConnectionsPerTask 64),
+ * and dynamically resizes when settings are loaded or saved.
+ */
+let poolConnections = 1280
+
+/** Dynamically sizes the per-origin connection pool to match configured concurrency. */
+export function setPoolConnections(connections: number): void {
+  const next = Math.max(256, connections)
+  if (next === poolConnections) return
+  poolConnections = next
+  for (const dispatcher of dispatchers.values()) retiredDispatchers.add(dispatcher)
+  dispatchers.clear()
+}
 
 /** Applies to newly-created pools; active requests finish on their old pool. */
 export function setProxyUrl(next: string | null): void {
@@ -33,9 +47,10 @@ export function getDispatcher(timeoutMs: number): Dispatcher {
     // Must comfortably exceed maxConnectionsPerTask x maxConcurrentTasks, or
     // segments of the same file - and of different files on the same host -
     // would queue behind each other instead of running in parallel. This is a
-    // per-origin pool, and an idle slot costs nothing, so it is sized for the
-    // largest settings the sanitizer permits rather than the default ones.
-    connections: 256,
+    // per-origin pool, and an idle slot costs nothing in undici, so it is sized
+    // for the largest settings the sanitizer permits (or dynamically adjusted)
+    // rather than a narrow default.
+    connections: poolConnections,
     keepAliveTimeout: 30_000,
     keepAliveMaxTimeout: 120_000,
     headersTimeout: timeoutMs,

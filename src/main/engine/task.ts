@@ -1,19 +1,20 @@
 import { createHash } from 'node:crypto'
 import { createReadStream } from 'node:fs'
 import { open, rm, stat, statfs, type FileHandle } from 'node:fs/promises'
-import { basename, dirname, extname } from 'node:path'
+import { basename, dirname, extname, join } from 'node:path'
 import { spawn } from 'node:child_process'
 import type { DownloadTask, Segment } from '../../shared/types.ts'
 import { journalMatches, journalSegmentsValid, readJournal, removeJournal, segmentsForJournal, writeJournal, JOURNAL_VERSION } from './journal.ts'
 import { QuotaExceededError, type RateLimiter } from './limiter.ts'
 import { discardReservedPath, uniquePath, moveFile } from './naming.ts'
+import { authFailureMessage, type HttpAuthenticator } from './auth.ts'
 import { buildHeaders, probeUrl } from './probe.ts'
 import { logger } from '../log.ts'
 import { preallocate } from './preallocate.ts'
-import { ConnectionRamp } from './ramp.ts'
+import { ConnectionRamp, getLearnedHostCap, recordLearnedHostCap } from './ramp.ts'
 import { Segmenter } from './segmenter.ts'
 import { AbortedError, HttpStatusError, NotResumableError, ServerBusyError, runSegment } from './worker.ts'
-import { preparedYouTubeUrl } from '../youtube-url.ts'
+import { preparedYouTubeUrl, youtubeFormatId } from '../youtube-url.ts'
 import { ensureDownloadDirectory } from '../destination-path.ts'
 import { partPathFor } from './workspace.ts'
 
@@ -42,6 +43,11 @@ export interface TaskRunnerConfig {
 
 export interface TaskRunnerDeps {
   limiter: RateLimiter
+  /**
+   * Answers 401 challenges for this task. One per task, so the probe and all
+   * of its connections share what the first challenge taught them.
+   */
+  auth?: HttpAuthenticator
   /** Fired on status transitions - the points worth persisting. */
   onUpdate(task: DownloadTask): void
   onFinished(task: DownloadTask, error: Error | null): void
@@ -239,7 +245,13 @@ export class TaskRunner {
           this.deps.onFinished(this.task, null)
         } else {
           this.task.status = 'error'
-          this.task.error = error.message
+          // A 401 that reached here was not answerable - no password saved, or
+          // the saved one was refused. "HTTP 401" would be true and useless;
+          // what the user needs is which site is asking and where to say so.
+          this.task.error =
+            error instanceof HttpStatusError && error.statusCode === 401 && !this.task.youtube
+              ? authFailureMessage(this.task.finalUrl || this.task.url, this.deps.auth?.realm ?? null, this.deps.auth?.armed === true)
+              : error.message
           this.task.speed = 0
           this.task.eta = null
           this.deps.onFinished(this.task, error)
@@ -312,6 +324,12 @@ export class TaskRunner {
         ` at ${(this.task.speed / 1048576).toFixed(2)} MB/s` +
         `${this.ramp.settled ? ' (settled)' : ''}`
       )
+      if (this.ramp.settled) {
+        try {
+          const host = new URL(this.task.finalUrl || this.task.url).hostname.toLowerCase()
+          recordLearnedHostCap(host, this.connectionCap)
+        } catch {}
+      }
       // Climbing needs the new slots filled now; stepping back down needs
       // nothing, because `fill` simply stops replacing what retires.
       this.fill()
@@ -338,7 +356,11 @@ export class TaskRunner {
        * Old/restored tasks may still carry only the watch page; those use the
        * extractor fallback, and expired prepared URLs refresh after HTTP errors.
        */
-      const requestedItag = Number(this.task.youtube.videoFormatId.split('-')[0])
+      // The itag this half is for, which is the audio one on the audio child of
+      // a merged download. Pinning the prepared URL to the video itag there
+      // rejected a perfectly good audio URL and sent every audio half back
+      // through yt-dlp.
+      const requestedItag = Number(youtubeFormatId(this.task.youtube).split('-')[0])
       const prepared = preparedYouTubeUrl(
         this.task.url,
         Number.isSafeInteger(requestedItag) ? requestedItag : undefined
@@ -359,7 +381,8 @@ export class TaskRunner {
       probe = await probeUrl(probeTarget, {
         headers: this.task.headers,
         timeoutMs: this.config.timeoutMs,
-        signal: this.controller.signal
+        signal: this.controller.signal,
+        auth: this.deps.auth
       })
     } catch (err) {
       if (
@@ -417,7 +440,16 @@ export class TaskRunner {
         : 1
     // The configured maximum is a ceiling the ramp climbs towards on evidence,
     // never a number of connections to open on faith.
-    this.ramp = new ConnectionRamp(RAMP_START_CONNECTIONS, connectionTarget)
+    let startConnections = Math.min(RAMP_START_CONNECTIONS, connectionTarget)
+    try {
+      const host = new URL(this.task.finalUrl || this.task.url).hostname.toLowerCase()
+      const learned = getLearnedHostCap(host)
+      if (learned !== null) {
+        startConnections = Math.min(learned, connectionTarget)
+      }
+    } catch {}
+
+    this.ramp = new ConnectionRamp(startConnections, connectionTarget)
     this.connectionCap = this.ramp.cap
     this.task.connections = this.connectionCap
 
@@ -545,6 +577,7 @@ export class TaskRunner {
       expectedSize: this.task.size,
       signal: this.controller.signal,
       writeBufferBytes: Math.min(MAX_WRITE_BUFFER_BYTES, this.config.minSplitSize),
+      auth: this.deps.auth,
       onBytes: (count) => {
         this.received += count
         this.bytesSinceFlush += count
@@ -616,6 +649,10 @@ export class TaskRunner {
           this.ramp?.stop()
           if (this.connectionCap > 1) this.connectionCap--
           this.task.connections = this.connectionCap
+          try {
+            const host = new URL(this.task.finalUrl || this.task.url).hostname.toLowerCase()
+            recordLearnedHostCap(host, this.connectionCap)
+          } catch {}
           // Hold the slot open while backing off, so the loop does not spin and
           // immediately re-provoke the same refusal.
           const fallback = Math.min(30_000, 1000 * 2 ** (this.busyRetries - 1))
@@ -681,6 +718,8 @@ export class TaskRunner {
       }
     }
 
+    const wouldBeTarget = join(this.task.dir, this.task.filename)
+    await discardReservedPath(wouldBeTarget)
     let target = await uniquePath(this.task.dir, this.task.filename)
     try {
       await moveFile(this.partPath, target)
@@ -694,6 +733,11 @@ export class TaskRunner {
     // recovery metadata, so a transient cleanup failure must not turn a finished
     // download into a visible error.
     await removeJournal(this.journalPath).catch(() => {})
+
+    try {
+      const host = new URL(this.task.finalUrl || this.task.url).hostname.toLowerCase()
+      recordLearnedHostCap(host, this.connectionCap)
+    } catch {}
 
     if (this.task.postProcess === 'mp4' || this.task.postProcess === 'mp3') {
       this.task.detail = `Converting to ${this.task.postProcess.toUpperCase()}...`

@@ -1,4 +1,4 @@
-import { contextBridge, ipcRenderer, type IpcRendererEvent } from 'electron'
+import { contextBridge, ipcRenderer, webUtils, type IpcRendererEvent } from 'electron'
 import type {
   BootstrapState,
   Category,
@@ -41,6 +41,8 @@ const api: RendererApi = {
   addDownloads: (inputs: NewDownload[]) => ipcRenderer.invoke('tasks:addMany', inputs),
   probe: (url: string, headers?: RequestHeaders) => ipcRenderer.invoke('tasks:probe', url, headers),
   resolveYouTube: (url: string) => ipcRenderer.invoke('youtube:resolve', url),
+  resolvePlaylist: (url: string) => ipcRenderer.invoke('youtube:playlist', url),
+  addPlaylist: (input) => ipcRenderer.invoke('youtube:addPlaylist', input),
   resolveMediaPage: (url: string, headers?: RequestHeaders) => ipcRenderer.invoke('media:resolvePage', url, headers),
   listClipboardItems: () => ipcRenderer.invoke('clipboard:list'),
   retryClipboardItem: (id: string) => ipcRenderer.invoke('clipboard:retry', id),
@@ -52,12 +54,32 @@ const api: RendererApi = {
   removeTasks: (ids: string[], deleteFiles: boolean) =>
     ipcRenderer.invoke('tasks:remove', ids, deleteFiles),
   removeCompleted: () => ipcRenderer.invoke('tasks:removeCompleted'),
+  findDuplicate: (input) => ipcRenderer.invoke('tasks:findDuplicate', input),
+  exportDownloads: (ids) => ipcRenderer.invoke('tasks:export', ids),
+  importDownloads: () => ipcRenderer.invoke('tasks:import'),
   updateTask: (id: string, patch: Partial<DownloadTask>) =>
     ipcRenderer.invoke('tasks:update', id, patch),
   redownload: (id: string) => ipcRenderer.invoke('tasks:redownload', id),
   openFile: (id: string) => ipcRenderer.invoke('tasks:open', id),
   revealFile: (id: string) => ipcRenderer.invoke('tasks:reveal', id),
   openTorrentItem: (id: string, path: string) => ipcRenderer.invoke('tasks:openTorrentItem', id, path),
+  stopSeeding: (ids: string[]) => ipcRenderer.invoke('tasks:stopSeeding', ids),
+  listSeeding: () => ipcRenderer.invoke('tasks:seeding'),
+  setTorrentFiles: (id: string, paths: string[]) => ipcRenderer.invoke('tasks:setTorrentFiles', id, paths),
+  // A dropped File carries no readable path of its own any more; only the
+  // preload can ask Chromium what it was. Main still decides what the path is
+  // allowed to be - this hands over a string, not a capability.
+  pathForDroppedFile: (file: File) => {
+    try {
+      return webUtils.getPathForFile(file)
+    } catch {
+      return ''
+    }
+  },
+  openTorrentFiles: (paths: string[]) => ipcRenderer.invoke('shell:openFiles', paths),
+  // Fire-and-forget on purpose: `startDrag` only works while the dragstart it
+  // belongs to is still on the stack, so there is nothing to await.
+  startFileDrag: (ids: string[]) => ipcRenderer.send('tasks:startDrag', ids),
   revealTorrentItem: (id: string, path: string) => ipcRenderer.invoke('tasks:revealTorrentItem', id, path),
   onTasksChanged: (cb) => subscribe<DownloadTask[]>('tasks:changed', cb),
   onProgress: (cb) => subscribe<TaskProgress[]>('tasks:progress', cb),
@@ -92,6 +114,12 @@ const api: RendererApi = {
   chooseDirectory: (current?: string) => ipcRenderer.invoke('settings:chooseDirectory', current),
   getIntegration: () => ipcRenderer.invoke('integration:get'),
   registerIntegration: () => ipcRenderer.invoke('integration:register'),
+  takePendingOpens: () => ipcRenderer.invoke('shell:takePending'),
+  onShellOpen: (cb) => subscribe('shell:open', () => cb()),
+  chooseTorrentFile: () => ipcRenderer.invoke('torrent:chooseFile'),
+  listCredentials: () => ipcRenderer.invoke('credentials:list'),
+  saveCredential: (input) => ipcRenderer.invoke('credentials:save', input),
+  removeCredential: (id: string) => ipcRenderer.invoke('credentials:remove', id),
   readClipboard: () => ipcRenderer.invoke('clipboard:read'),
   copyToClipboard: (text: string) => ipcRenderer.invoke('clipboard:write', text),
   checkForUpdates: () => ipcRenderer.invoke('updates:check'),

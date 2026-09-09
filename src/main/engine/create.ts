@@ -25,6 +25,7 @@ export function createTask(input: {
   selectedFiles?: string[]
   torrentFiles?: TorrentFile[]
   kind?: TaskKind
+  expectedSize?: number | null
   audioUrl?: string | null
   audioTracks?: MediaAudioTrack[]
   youtube?: { pageUrl: string; videoFormatId: string; audioFormatId?: string | null; height?: number | null; role?: 'video' | 'audio' }
@@ -59,6 +60,8 @@ export function createTask(input: {
     manualPause: false,
     kind,
     size: null,
+    // Display only - see `DownloadTask.expectedSize`. The probe owns `size`.
+    expectedSize: positiveSize(input.expectedSize),
     received: 0,
     status: 'queued',
     resumable: false,
@@ -83,6 +86,12 @@ export function createTask(input: {
     selectedFiles: input.selectedFiles,
     torrentFiles: input.torrentFiles?.map((file) => ({ ...file }))
   }
+}
+
+function positiveSize(value: number | null | undefined): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0
+    ? Math.round(value)
+    : undefined
 }
 
 /**

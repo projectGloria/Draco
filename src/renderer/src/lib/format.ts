@@ -105,6 +105,34 @@ export function looksLikeYouTubeInput(value: string): boolean {
   }
 }
 
+/**
+ * Whether this link stands for a collection rather than one video.
+ *
+ * A quick read, only good enough to decide which dialog opens. `main` holds
+ * the authority (`youtube-playlist.ts`) and says no to anything this lets
+ * through, so a false positive costs an error message rather than a wrong
+ * download.
+ */
+export function looksLikePlaylistInput(value: string): boolean {
+  const trimmed = value.trim()
+  if (!looksLikeYouTubeInput(trimmed)) return false
+
+  try {
+    const parsed = new URL(trimmed)
+    const list = parsed.searchParams.get('list')
+    // RD/UL/TL lists are YouTube's endless generated mixes: there is no last
+    // entry, so "download the playlist" means nothing for one.
+    if (list) return !/^(RD|UL|TL)/.test(list)
+    return (
+      /^\/@[^/]+(?:\/(?:videos|shorts|streams|featured))?\/?$/i.test(parsed.pathname) ||
+      /^\/(?:channel|c|user)\/[^/]+(?:\/(?:videos|shorts|streams|featured))?\/?$/i.test(parsed.pathname) ||
+      /^\/playlist\/?$/i.test(parsed.pathname)
+    )
+  } catch {
+    return false
+  }
+}
+
 export function hostOf(url: string): string {
   try {
     return new URL(url).hostname.replace(/^www\./, '')

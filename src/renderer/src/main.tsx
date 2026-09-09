@@ -1,6 +1,7 @@
 import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
 import App from './App'
+import ErrorBoundary from './components/ErrorBoundary'
 
 /*
  * Fonts are bundled rather than fetched: the renderer runs under a
@@ -24,6 +25,8 @@ import './styles/theme.css'
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
-    <App />
+    <ErrorBoundary>
+      <App />
+    </ErrorBoundary>
   </StrictMode>
 )

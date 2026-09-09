@@ -10,7 +10,7 @@
     "start": "npm run host && npm run build && electron-vite preview",
     "build": "npm run typecheck && npm run extension:firefox && electron-vite build",
     "typecheck": "tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.web.json",
-    "test": "node --experimental-strip-types --test tests/*.test.mjs",
+    "test": "node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON --test \"tests/**/*.test.ts\"",
     "extension:firefox": "node tools/build-firefox-extension.mjs",
     "pack": "npm run host && npm run build && electron-builder --dir",
     "dist": "npm run host && npm run build && electron-builder --win",

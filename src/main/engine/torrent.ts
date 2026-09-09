@@ -1,9 +1,10 @@
 import type { Torrent } from 'webtorrent'
 import type { DownloadTask } from '../../shared/types.ts'
-import type { Runner } from './runner.ts'
+import type { Runner, SeedSession } from './runner.ts'
 import type { RunnerContext } from './manager.ts'
 import { DEFAULT_TORRENT_TRACKERS } from './create.ts'
 import { fetchCachedTorrentDescriptor } from './probe.ts'
+import { localTorrentDescriptor } from './torrent-store.ts'
 import { QuotaExceededError } from './limiter.ts'
 
 interface TorrentProgressFile {
@@ -36,6 +37,37 @@ export function torrentDownloadOptions(path: string): { path: string; deselect: 
   return { path, deselect: true }
 }
 
+/**
+ * The live torrent panel the details dialog reads. Built out here rather than
+ * inside the runner because a seeding session outlives the runner that produced
+ * it and has to keep the same panel up to date.
+ */
+function torrentInfoOf(torrent: Torrent, selectedFiles?: string[]): DownloadTask['torrentInfo'] {
+  const selected = selectedFiles ? new Set(selectedFiles) : null
+  return {
+    infoHash: torrent.infoHash,
+    files: torrent.files.map((file) => ({
+      path: file.path,
+      size: file.length,
+      downloaded: Math.min(file.length, Math.max(0, file.downloaded)),
+      selected: !selected || selected.has(file.path)
+    })),
+    peers: torrent.wires.slice(0, 250).map((wire: any) => ({
+      address: wire.remoteAddress && wire.remotePort
+        ? `${wire.remoteAddress}:${wire.remotePort}`
+        : wire.type || 'Connected peer',
+      client: String(wire.peerExtendedHandshake?.v || wire.peerId || 'Unknown'),
+      type: String(wire.type || 'peer'),
+      downloadSpeed: Number(wire.downloadSpeed?.() || 0),
+      uploadSpeed: Number(wire.uploadSpeed?.() || 0)
+    })),
+    trackers: [...torrent.announce],
+    sources: [...torrent.urlList],
+    uploaded: torrent.uploaded,
+    ratio: Number.isFinite(torrent.ratio) ? torrent.ratio : 0
+  }
+}
+
 export class TorrentRunner implements Runner {
   public running = false
   private client: any | null = null
@@ -65,10 +97,7 @@ export class TorrentRunner implements Runner {
     const wt = await (new Function("return import('webtorrent')")())
     const WebTorrentModule = wt.default || wt
     this.client = new (WebTorrentModule as any)()
-    if (typeof this.client.throttleDownload === 'function') {
-      const limit = this.context.limiter.limit ?? -1
-      this.client.throttleDownload(limit)
-    }
+    this.applyThrottles()
 
     // Start with no pieces selected. WebTorrent otherwise selects the entire
     // payload before its metadata event, which can queue hundreds of megabytes
@@ -76,7 +105,12 @@ export class TorrentRunner implements Runner {
     let torrentId: string | Uint8Array = this.task.url
     if (this.task.url.startsWith('magnet:')) {
       try {
-        const cached = await fetchCachedTorrentDescriptor(this.task.url, undefined)
+        // Draco's own copy first: a torrent added from a file needs no
+        // discovery at all, and its descriptor is authoritative where a public
+        // cache is merely convenient.
+        const cached =
+          (await localTorrentDescriptor(this.task.url)) ??
+          (await fetchCachedTorrentDescriptor(this.task.url, undefined))
         if (!this.running) {
           this.cleanup()
           return
@@ -167,10 +201,7 @@ export class TorrentRunner implements Runner {
   tick(): void {
     if (!this.running || !this.torrent) return
 
-    if (typeof this.client?.throttleDownload === 'function') {
-      const limit = this.context.limiter.limit ?? -1
-      this.client.throttleDownload(limit)
-    }
+    this.applyThrottles()
 
     const downloaded = this.selectedDownloaded()
     const delta = downloaded - this.lastReportedDownloaded
@@ -210,6 +241,59 @@ export class TorrentRunner implements Runner {
     return false
   }
 
+  /**
+   * Pushes the current caps at the client.
+   *
+   * Download follows the app-wide limiter every other runner obeys. Upload is a
+   * separate setting on purpose: sharing one cap would make giving back cost
+   * the user the speed they set for getting, and then nobody leaves seeding on.
+   */
+  private applyThrottles(): void {
+    if (!this.client) return
+    if (typeof this.client.throttleDownload === 'function') {
+      this.client.throttleDownload(this.context.limiter.limit ?? -1)
+    }
+    if (typeof this.client.throttleUpload === 'function') {
+      this.client.throttleUpload(this.context.uploadLimit ?? -1)
+    }
+  }
+
+  /**
+   * Changes which files this torrent is fetching, while it is running.
+   *
+   * Deselecting is not the same as never having selected: pieces already on
+   * disk stay where they are, so unticking a file stops it growing rather than
+   * deleting it. Size and received are recomputed from the new selection,
+   * because a progress bar measured against files nobody is fetching any more
+   * would never reach the end.
+   */
+  setSelectedFiles(paths: string[] | undefined): void {
+    this.task.selectedFiles = paths
+    if (!this.torrent || !this.torrent.metadata) return
+
+    const selected = paths ? new Set(paths) : null
+    for (const file of this.torrent.files as any[]) {
+      if (!selected || selected.has(file.path)) file.select()
+      else file.deselect()
+    }
+
+    this.task.size = selected
+      ? (this.torrent.files as any[])
+          .filter((file) => selected.has(file.path))
+          .reduce((sum: number, file: any) => sum + file.length, 0)
+      : this.torrent.length
+
+    const downloaded = this.selectedDownloaded()
+    this.task.received = Math.min(downloaded, this.task.size ?? downloaded)
+    // The limiter was already charged for whatever arrived; re-baseline so a
+    // shrunken selection is not read as a negative delta on the next tick.
+    this.lastReportedDownloaded = downloaded
+    this.updateTorrentInfo()
+
+    if (this.running && this.selectedComplete()) this.complete()
+    else this.context.onUpdate(this.task)
+  }
+
   /** WebTorrent's torrent-level counter includes pieces for unselected files. */
   private selectedDownloaded(): number {
     if (!this.torrent) return 0
@@ -223,29 +307,7 @@ export class TorrentRunner implements Runner {
 
   private updateTorrentInfo(): void {
     if (!this.torrent) return
-    const selected = this.task.selectedFiles ? new Set(this.task.selectedFiles) : null
-    this.task.torrentInfo = {
-      infoHash: this.torrent.infoHash,
-      files: this.torrent.files.map((file) => ({
-        path: file.path,
-        size: file.length,
-        downloaded: Math.min(file.length, Math.max(0, file.downloaded)),
-        selected: !selected || selected.has(file.path)
-      })),
-      peers: this.torrent.wires.slice(0, 250).map((wire: any) => ({
-        address: wire.remoteAddress && wire.remotePort
-          ? `${wire.remoteAddress}:${wire.remotePort}`
-          : wire.type || 'Connected peer',
-        client: String(wire.peerExtendedHandshake?.v || wire.peerId || 'Unknown'),
-        type: String(wire.type || 'peer'),
-        downloadSpeed: Number(wire.downloadSpeed?.() || 0),
-        uploadSpeed: Number(wire.uploadSpeed?.() || 0)
-      })),
-      trackers: [...this.torrent.announce],
-      sources: [...this.torrent.urlList],
-      uploaded: this.torrent.uploaded,
-      ratio: Number.isFinite(this.torrent.ratio) ? this.torrent.ratio : 0
-    }
+    this.task.torrentInfo = torrentInfoOf(this.torrent, this.task.selectedFiles)
   }
 
   private complete(): void {
@@ -258,8 +320,64 @@ export class TorrentRunner implements Runner {
     this.task.eta = null
     this.updateTorrentInfo()
     this.context.onUpdate(this.task)
-    this.cleanup()
+
+    // Hand the live swarm connection to the manager instead of destroying it.
+    // The download is over either way - `onFinished` still runs, the row still
+    // goes green, the queue still starts the next task - but the peers who made
+    // this download possible keep an upload to talk to.
+    if (!this.handOverForSeeding()) this.cleanup()
+
     this.context.onFinished(this.task, null)
+  }
+
+  /**
+   * Detaches the client from this runner and registers it as a seed.
+   *
+   * Ownership moves wholesale: the runner drops its references first, so a
+   * later `pause` or `cleanup` here can never destroy a client the manager is
+   * still ticking. Returns false when nothing took it on, in which case the
+   * caller tears the client down as before.
+   */
+  private handOverForSeeding(): boolean {
+    const client = this.client
+    const torrent = this.torrent
+    if (!client || !torrent || !this.context.onSeed) return false
+
+    this.client = null
+    this.torrent = null
+
+    const task = this.task
+    let stopped = false
+
+    const session: SeedSession = {
+      taskId: task.id,
+      progress: () => ({
+        uploaded: Number(torrent.uploaded) || 0,
+        ratio: Number.isFinite(torrent.ratio) ? torrent.ratio : 0,
+        uploadSpeed: Number(torrent.uploadSpeed) || 0,
+        peers: torrent.wires?.length ?? 0
+      }),
+      refreshInfo: () => {
+        if (stopped) return
+        task.torrentInfo = torrentInfoOf(torrent, task.selectedFiles)
+      },
+      applyUploadLimit: (bytesPerSecond) => {
+        if (stopped || typeof (client as any).throttleUpload !== 'function') return
+        ;(client as any).throttleUpload(bytesPerSecond ?? -1)
+      },
+      stop: () => {
+        if (stopped) return
+        stopped = true
+        try {
+          client.destroy()
+        } catch {
+          // A client that is already gone is the outcome this wanted anyway.
+        }
+      }
+    }
+
+    this.context.onSeed(task, session)
+    return true
   }
 
   private cleanup(): void {

@@ -142,3 +142,48 @@ export class ConnectionRamp {
     return true
   }
 }
+
+/* ------------------------------------------------------------------ */
+/* Learned host connection limits                                      */
+/* ------------------------------------------------------------------ */
+
+interface LearnedCap {
+  cap: number
+  updatedAt: number
+}
+
+const learnedCaps = new Map<string, LearnedCap>()
+const LEARNED_TTL_MS = 60 * 60 * 1000 // 1 hour
+
+/**
+ * Returns the last learned sustainable connection cap for a host, or null if unmeasured or expired.
+ */
+export function getLearnedHostCap(host: string, now = Date.now()): number | null {
+  const normalized = host.toLowerCase().trim()
+  const entry = learnedCaps.get(normalized)
+  if (!entry) return null
+  if (now - entry.updatedAt > LEARNED_TTL_MS) {
+    learnedCaps.delete(normalized)
+    return null
+  }
+  return entry.cap
+}
+
+/**
+ * Remembers the learned sustainable connection cap for a host so future tasks
+ * start at peak concurrency without repeating the ramp discovery cycle or re-provoking 429s.
+ */
+export function recordLearnedHostCap(host: string, cap: number, now = Date.now()): void {
+  const normalized = host.toLowerCase().trim()
+  if (!normalized) return
+  learnedCaps.set(normalized, {
+    cap: Math.max(1, Math.floor(cap)),
+    updatedAt: now
+  })
+}
+
+/** Clears all learned caps (useful for testing or network resets). */
+export function clearLearnedHostCaps(): void {
+  learnedCaps.clear()
+}
+

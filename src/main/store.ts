@@ -107,7 +107,17 @@ export function defaultSettings(): Settings {
     adaptiveConnectionCeiling: null,
     minSplitSize: 1024 * 1024,
     speedLimit: null,
+    scheduledLimit: null,
+    // Seeding on, with a ratio target that ends it on its own. A default of
+    // "seed forever" would be a background upload the user never asked for.
+    seedTorrents: true,
+    seedRatioLimit: 2,
+    seedTimeMinutes: null,
+    uploadLimit: null,
     proxyUrl: null,
+    // Off by default: reading another program's cookie store is not something
+    // to start doing without being asked.
+    cookiesFromBrowser: 'none',
     hostConnectionLimits: [],
     quotaBytes: null,
     quotaWindowMinutes: 60,
@@ -128,6 +138,7 @@ export function defaultSettings(): Settings {
     takeoverExtensions: [],
     takeoverExcludeHosts: [],
     watchClipboard: true,
+    associateTorrents: true,
     showDropzone: false,
     showProgressWindow: true,
     accent: '#38bdf8',
@@ -291,6 +302,7 @@ export async function loadQueues(): Promise<Queue[]> {
       name: 'Main queue',
       taskIds: [],
       mode: 'manual',
+      speedLimit: null,
       startTime: null,
       stopTime: null,
       days: [],

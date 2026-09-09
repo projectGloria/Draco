@@ -1,0 +1,96 @@
+{
+  "version": 1,
+  "columns": 4,
+  "widgets": [
+    {
+      "id": "7bf3a86d-1c81-4a6d-bcc7-f32ab0ca2bec",
+      "type": "capture",
+      "x": 0,
+      "y": 0,
+      "w": 2,
+      "h": 2,
+      "config": {}
+    },
+    {
+      "id": "64d0863c-5875-40e7-9f9f-96dd7475b9e9",
+      "type": "daily",
+      "x": 2,
+      "y": 0,
+      "w": 1,
+      "h": 2,
+      "config": {}
+    },
+    {
+      "id": "fc61aeee-76e5-4ed2-ba85-4626a76be684",
+      "type": "progress",
+      "x": 3,
+      "y": 0,
+      "w": 1,
+      "h": 2,
+      "config": {}
+    },
+    {
+      "id": "adb6f4b1-7288-4764-ab9e-abdb24e0626d",
+      "type": "graph",
+      "x": 0,
+      "y": 2,
+      "w": 2,
+      "h": 3,
+      "config": {}
+    },
+    {
+      "id": "523375de-4174-48dc-879d-ed6b075c80f3",
+      "type": "tasks",
+      "x": 2,
+      "y": 2,
+      "w": 2,
+      "h": 3,
+      "config": {}
+    },
+    {
+      "id": "61d0f047-5c05-4652-92ae-2f309c41dc3e",
+      "type": "calendar",
+      "x": 0,
+      "y": 5,
+      "w": 2,
+      "h": 3,
+      "config": {}
+    },
+    {
+      "id": "44f1d740-ff13-4d0f-a306-57bd9913a0f0",
+      "type": "recent",
+      "x": 2,
+      "y": 5,
+      "w": 2,
+      "h": 3,
+      "config": {}
+    },
+    {
+      "id": "6707cfda-9958-423c-9311-f79baa84cac4",
+      "type": "heatmap",
+      "x": 0,
+      "y": 8,
+      "w": 4,
+      "h": 2,
+      "config": {}
+    },
+    {
+      "id": "e020996e-efe7-4504-baed-55989d4448d2",
+      "type": "tags",
+      "x": 0,
+      "y": 10,
+      "w": 2,
+      "h": 2,
+      "config": {}
+    },
+    {
+      "id": "5fcddc25-71a2-4cc6-b54d-b670438d462a",
+      "type": "stats",
+      "x": 2,
+      "y": 10,
+      "w": 2,
+      "h": 1,
+      "config": {}
+    }
+  ]
+}

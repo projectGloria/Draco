@@ -1,6 +1,8 @@
 import { useState } from 'react'
 import { looksLikeUrl } from '../lib/format'
+import { reportError } from '../store/toasts'
 import Dialog, { GhostButton, PrimaryButton } from './Dialog'
+import { TorrentIcon } from './Icons'
 
 /**
  * IDM's "Add URL" box. One URL per line, so pasting a list from somewhere else
@@ -15,6 +17,7 @@ export default function AddUrlDialog({
   onClose(): void
 }): React.ReactElement {
   const [text, setText] = useState('')
+  const [choosing, setChoosing] = useState(false)
 
   const lines = text
     .split(/\r?\n/)
@@ -38,6 +41,29 @@ export default function AddUrlDialog({
       onClose={onClose}
       footer={
         <>
+          {/* Double-clicking a torrent is the usual way in; this is the way in
+              when Windows has some other client registered for the type. */}
+          <GhostButton
+            onClick={() => {
+              setChoosing(true)
+              void window.api
+                .chooseTorrentFile()
+                .then((magnetUri) => {
+                  if (!magnetUri) return
+                  onSubmit([magnetUri])
+                  onClose()
+                })
+                .catch((err) => reportError('Could not open that torrent file', err))
+                .finally(() => setChoosing(false))
+            }}
+            disabled={choosing}
+          >
+            <span className="inline-flex items-center gap-1.5">
+              <TorrentIcon />
+              {choosing ? 'Opening…' : 'Torrent file…'}
+            </span>
+          </GhostButton>
+          <span className="flex-1" />
           <GhostButton onClick={onClose}>Cancel</GhostButton>
           <PrimaryButton onClick={submit} disabled={valid.length === 0}>
             {valid.length > 1 ? `Add ${valid.length} downloads` : 'Continue'}

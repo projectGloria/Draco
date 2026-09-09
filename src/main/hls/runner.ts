@@ -803,6 +803,8 @@ export class HlsRunner implements Runner {
    * name that says so. Throwing here would discard a download that finished.
    */
   private async finalize(): Promise<string> {
+    const wouldBeTarget = join(this.task.dir, this.task.filename)
+    await discardReservedPath(wouldBeTarget)
     const target = await uniquePath(this.task.dir, this.task.filename)
     const muxTemp = muxTempPath(target)
 

@@ -4,21 +4,25 @@ import type { DownloadTask, TaskProgress } from '../../shared/types.ts'
 import { QuotaExceededError, RateLimiter, type QuotaState } from './limiter.ts'
 import { mapConcurrent } from './concurrency.ts'
 import { connectionsForUrl, type HostConnectionLimit } from './network-rules.ts'
-import { setProxyUrl } from './http.ts'
+import { setPoolConnections, setProxyUrl } from './http.ts'
 import { readJournal } from './journal.ts'
-import type { Runner } from './runner.ts'
+import type { Runner, SeedSession } from './runner.ts'
 import { TaskRunner } from './task.ts'
 import { logger } from '../log.ts'
 import { downloadSubtitles } from '../media/subtitles.ts'
 import { scanFile } from '../security/scanner.ts'
 import { normalizeDownloadDirectory } from '../destination-path.ts'
 import { TorrentRunner } from './torrent.ts'
+import { describeSeeding, isSeedingDetail, seedTargetReached, type SeedTargets } from './seeding.ts'
+import { HttpAuthenticator, type Credentials } from './auth.ts'
+import { effectiveSpeedLimit, type ScheduledLimit } from './limit-window.ts'
 import {
   intermediatePathsFor,
   isDracoIntermediate,
   partPathFor,
   workspaceDir
 } from './workspace.ts'
+import { discardReservedPath } from './naming.ts'
 
 const log = logger('manager')
 const RECOVERY_CONCURRENCY = 8
@@ -57,6 +61,16 @@ export interface EngineSettings {
   antivirusProgram: string | null
   antivirusArgs: string[]
   antivirusTimeoutSeconds: number
+  /** Keep a finished torrent connected to its swarm. */
+  seedTorrents?: boolean
+  /** Stop seeding at this ratio, or null to ignore ratio. */
+  seedRatioLimit?: number | null
+  /** Stop seeding after this many minutes, or null to ignore the clock. */
+  seedTimeMinutes?: number | null
+  /** Upload cap in bytes/sec, separate from `speedLimit`, or null for no cap. */
+  uploadLimit?: number | null
+  /** A cap that replaces `speedLimit` between two times of day. */
+  scheduledLimit?: ScheduledLimit | null
 }
 
 /** Everything a runner needs from the manager, whatever kind of runner it is. */
@@ -70,8 +84,18 @@ export interface RunnerContext {
   tempDir?: string
   checkDiskSpace?: boolean
   exponentialBackoff?: boolean
+  /** Upload cap for the runners that can upload at all, in bytes/sec. */
+  uploadLimit?: number | null
+  /** Answers 401 challenges. One per task; see `engine/auth.ts`. */
+  auth?: HttpAuthenticator
   onUpdate(task: DownloadTask): void
   onFinished(task: DownloadTask, error: Error | null): void
+  /**
+   * Offered a finished torrent's live swarm connection. Present only when the
+   * caller wants seeding; a runner that finds it missing tears its client down
+   * as it always did.
+   */
+  onSeed?(task: DownloadTask, session: SeedSession): void
   onProbed?(task: DownloadTask): void | Promise<void>
   /**
   * The signed media URL for this task's format.
@@ -103,6 +127,22 @@ export interface ManagerOptions {
   createMpdRunner?(task: DownloadTask, context: RunnerContext): Runner
   createDashRunner?(task: DownloadTask, context: RunnerContext): Runner
   refreshYouTube?: (task: DownloadTask, force: boolean) => Promise<string>
+  /**
+   * The password for a challenged request, or null when none is saved.
+   *
+   * Injected rather than imported: the store it comes from is sealed with
+   * Electron's `safeStorage`, and an Electron import anywhere in this module's
+   * graph stops `tools/dl.ts` and the engine tests dead.
+   */
+  resolveCredentials?: (url: string, realm: string) => Credentials | null
+  /**
+   * A queue's own speed cap, in bytes/sec, or null when it has none.
+   *
+   * Injected because queues belong to the scheduler: the manager decides what
+   * runs, and asking it to own the queue list as well would give the same fact
+   * two homes.
+   */
+  queueSpeedLimit?: (queueId: string) => number | null
 }
 
 /** How often speed, ETA and segment snapshots are recomputed and published. */
@@ -116,8 +156,24 @@ export class DownloadManager {
   private disposed = false
   private lastQuotaSnapshotAt = 0
   private lastQuotaUsed = -1
+  /** When the time-of-day limit was last re-checked; see `ensureTicker`. */
+  private lastLimitCheckAt = 0
   /** Tasks stopped by the transfer quota, to be started again by `quotaTimer`. */
   private quotaHeld = new Set<string>()
+  /**
+   * Finished torrents still giving back, held apart from `runners` on purpose:
+   * a seed is not a download. It must not occupy a concurrency slot, must not
+   * delay the next queued task, and outlives the runner that produced it.
+   */
+  private seeders = new Map<string, { session: SeedSession; startedAt: number }>()
+  /**
+   * One limiter per capped queue, shared by every task in it.
+   *
+   * Per task would be no cap at all: four downloads in a queue limited to
+   * 200 KB/s would move 800. Each spends through the app-wide limiter, so a
+   * queue cap can only ever be *narrower* than the global one.
+   */
+  private queueLimiters = new Map<string, RateLimiter>()
   private quotaTimer: NodeJS.Timeout | null = null
   private catTimer: NodeJS.Timeout | null = null
   /** The one-shot timers that end each cat-mode burst, so `dispose` can too. */
@@ -144,6 +200,9 @@ export class DownloadManager {
 
     await mapConcurrent(tasks, RECOVERY_CONCURRENCY, async (task) => {
       task.dir = normalizeDownloadDirectory(task.dir)
+      // Seeding does not survive the process that was doing it, so a restored
+      // row must not go on claiming a ratio nothing is updating.
+      if (isSeedingDetail(task.detail)) task.detail = null
       if (task.status === 'downloading' || task.status === 'probing' || task.status === 'queued') {
         task.status = 'paused'
         task.speed = 0
@@ -187,6 +246,7 @@ export class DownloadManager {
   /** Pauses everything and waits for the journals to land. Used on quit. */
   async shutdown(): Promise<void> {
     this.dispose()
+    this.stopSeeding([...this.seeders.keys()])
     await Promise.allSettled([...this.runners.values()].map((r) => r.pause()))
     this.options.onQuotaState?.(this.limiter.quotaState)
   }
@@ -261,6 +321,9 @@ export class DownloadManager {
   async pause(ids: string[], byUser = false): Promise<void> {
     log.info(`Pause requested for ${ids.length} tasks`)
     const waits: Promise<void>[] = []
+    // Stop is stop. A finished torrent that keeps uploading after the user
+    // pressed it would be the app ignoring the one control it offers.
+    this.stopSeeding(ids)
 
     for (const id of ids) {
       const task = this.tasks.get(id)
@@ -314,6 +377,8 @@ export class DownloadManager {
       this.tasks.delete(id)
       this.runners.delete(id)
       this.quotaHeld.delete(id)
+      this.seeders.get(id)?.session.stop()
+      this.seeders.delete(id)
     }
 
     this.emitTasks()
@@ -371,7 +436,7 @@ export class DownloadManager {
     const connectionCeiling = task.singleConnectionFallback ? 1 : ceiling
 
     const context: RunnerContext = {
-      limiter: this.limiter,
+      limiter: this.limiterFor(task),
       maxConnections: effectiveConnections,
       retryLimit: settings.retryLimit,
       timeoutMs: settings.timeoutMs,
@@ -379,7 +444,18 @@ export class DownloadManager {
       tempDir: settings.tempDir,
       checkDiskSpace: settings.checkDiskSpace,
       exponentialBackoff: settings.exponentialBackoff,
+      uploadLimit: settings.uploadLimit ?? null,
+      // One authenticator per launch, so the probe and every connection of this
+      // download share what the first 401 taught them, and a restarted task
+      // starts over rather than reusing a nonce the server has since retired.
+      auth: this.authenticatorFor(),
       onUpdate: () => this.emitTasks(),
+      // Opt-in, not opt-out: a caller that never mentions seeding - `tools/dl.ts`
+      // driving the engine from a terminal - gets the old behaviour, where the
+      // client is torn down the moment the download finishes.
+      ...(settings.seedTorrents === true
+        ? { onSeed: (seeded, session) => this.adoptSeed(seeded, session) }
+        : {}),
       onFinished: (finished, error) => {
         const r = this.runners.get(task.id)
         if (r) void this.onFinished(r, finished, error)
@@ -434,6 +510,7 @@ export class DownloadManager {
         },
         {
           limiter: context.limiter,
+          auth: context.auth,
           onUpdate: context.onUpdate,
           onFinished: context.onFinished,
           onProbed: context.onProbed,
@@ -451,11 +528,221 @@ export class DownloadManager {
     void runner.start()
   }
 
+  /**
+   * The limiter a task should spend through: its queue's, when that queue is
+   * capped, otherwise the app's.
+   */
+  private limiterFor(task: DownloadTask): RateLimiter {
+    const queueId = task.queueId
+    if (!queueId) return this.limiter
+
+    const limit = this.options.queueSpeedLimit?.(queueId) ?? null
+    if (limit === null) {
+      this.queueLimiters.delete(queueId)
+      return this.limiter
+    }
+
+    const existing = this.queueLimiters.get(queueId)
+    if (existing) {
+      existing.setLimit(limit)
+      return existing
+    }
+
+    const limiter = new RateLimiter(limit, this.limiter)
+    this.queueLimiters.set(queueId, limiter)
+    return limiter
+  }
+
   private applyNetworkSettings(): void {
     const settings = this.options.getSettings()
-    this.limiter.setLimit(settings.speedLimit)
+    // The scheduled cap replaces the ordinary one while its window is open, so
+    // this is recomputed rather than read - see `limit-window.ts`.
+    this.limiter.setLimit(effectiveSpeedLimit(settings))
     this.limiter.setQuota(settings.quotaBytes, settings.quotaWindowMinutes * 60_000)
     setProxyUrl(settings.proxyUrl)
+    const maxPerTask = Math.max(settings.maxConnectionsPerTask, settings.adaptiveConnectionCeiling ?? 0)
+    setPoolConnections(settings.maxConcurrentTasks * maxPerTask)
+
+    // A seed is running with the cap it was handed when it started, so a change
+    // made in Options has to be pushed at the sessions already in flight.
+    const uploadLimit = settings.uploadLimit ?? null
+    for (const seed of this.seeders.values()) seed.session.applyUploadLimit(uploadLimit)
+
+    // A queue whose cap was edited - or removed - while its tasks are running.
+    for (const [queueId, limiter] of this.queueLimiters) {
+      const limit = this.options.queueSpeedLimit?.(queueId) ?? null
+      if (limit === null) this.queueLimiters.delete(queueId)
+      else limiter.setLimit(limit)
+    }
+  }
+
+  /* ---------------------------------------------------------------- */
+  /* Seeding                                                           */
+  /* ---------------------------------------------------------------- */
+
+  /**
+   * A fresh authenticator, or undefined when the app wired up no credential
+   * store at all - `tools/dl.ts`, which has no keychain to ask.
+   */
+  private authenticatorFor(): HttpAuthenticator | undefined {
+    const resolve = this.options.resolveCredentials
+    return resolve ? new HttpAuthenticator(resolve) : undefined
+  }
+
+  private seedTargets(): SeedTargets {
+    const settings = this.options.getSettings()
+    return {
+      ratioLimit: settings.seedRatioLimit ?? null,
+      minutes: settings.seedTimeMinutes ?? null
+    }
+  }
+
+  /** Takes ownership of a finished torrent's swarm connection. */
+  private adoptSeed(task: DownloadTask, session: SeedSession): void {
+    // Two seeds for one task would mean two clients on the same files. The
+    // older one is the stale one, so it goes.
+    this.seeders.get(task.id)?.session.stop()
+    this.seeders.set(task.id, { session, startedAt: Date.now() })
+    session.applyUploadLimit(this.options.getSettings().uploadLimit ?? null)
+    log.info(`seeding ${task.filename}`)
+    this.ensureTicker()
+  }
+
+  /**
+   * Stops seeding whatever of these tasks is seeding, and says whether anything
+   * was. Called by the user's Stop, by pause, by remove, and by shutdown - a
+   * seed must never outlive the row it belongs to.
+   */
+  stopSeeding(ids: string[]): boolean {
+    let stopped = false
+    for (const id of ids) {
+      const seed = this.seeders.get(id)
+      if (!seed) continue
+      seed.session.stop()
+      this.seeders.delete(id)
+      stopped = true
+
+      const task = this.tasks.get(id)
+      if (task && task.status === 'done') {
+        task.detail = null
+        task.speed = 0
+      }
+    }
+    if (stopped) this.emitTasks()
+    return stopped
+  }
+
+  /** Which tasks are seeding right now, for the UI and for the context menu. */
+  seedingIds(): string[] {
+    return [...this.seeders.keys()]
+  }
+
+  /**
+   * Changes which files inside a torrent are wanted.
+   *
+   * A running torrent is told directly, so the change takes effect on the next
+   * piece rather than at the next restart. A stopped one only records the
+   * choice; its size is recomputed from the metadata Draco already has, so the
+   * row reads correctly before it is ever started again.
+   *
+   * An empty selection is refused rather than obeyed: it would leave a torrent
+   * that can never complete, and "none" is what Remove is for.
+   */
+  setTorrentFiles(id: string, paths: string[]): boolean {
+    const task = this.tasks.get(id)
+    if (!task || task.kind !== 'torrent') return false
+
+    const known = task.torrentInfo?.files.map((file) => file.path)
+      ?? task.torrentFiles?.map((file) => file.path)
+      ?? []
+    const wanted = [...new Set(paths.filter((path) => known.includes(path)))]
+    if (wanted.length === 0) return false
+
+    const selected: string[] | undefined = wanted.length === known.length ? undefined : wanted
+
+    const runner = this.runners.get(id)
+    if (runner instanceof TorrentRunner) {
+      runner.setSelectedFiles(selected)
+    } else {
+      task.selectedFiles = selected
+      const sizes = new Map(
+        (task.torrentInfo?.files ?? task.torrentFiles ?? []).map((file) => [file.path, file.size])
+      )
+      task.size = wanted.reduce((total, path) => total + (sizes.get(path) ?? 0), 0) || task.size
+      if (task.torrentInfo) {
+        const chosen = new Set(wanted)
+        task.torrentInfo = {
+          ...task.torrentInfo,
+          files: task.torrentInfo.files.map((file) => ({ ...file, selected: chosen.has(file.path) }))
+        }
+        task.received = task.torrentInfo.files
+          .filter((file) => chosen.has(file.path))
+          .reduce((total, file) => total + file.downloaded, 0)
+      }
+    }
+
+    this.emitTasks()
+    return true
+  }
+
+  /**
+   * One pass over the live seeds: refresh what the UI shows, and stop the ones
+   * that have met their target. Returns the progress rows to publish.
+   */
+  private tickSeeders(now: number): TaskProgress[] {
+    if (this.seeders.size === 0) return []
+
+    const targets = this.seedTargets()
+    const updates: TaskProgress[] = []
+    const finished: string[] = []
+
+    for (const [id, seed] of this.seeders) {
+      const task = this.tasks.get(id)
+      if (!task) {
+        // The row went away without going through `remove` - stop regardless,
+        // rather than seeding something the user can no longer see.
+        finished.push(id)
+        continue
+      }
+
+      const progress = seed.session.progress()
+      seed.session.refreshInfo()
+
+      if (seedTargetReached({ ...progress, startedAt: seed.startedAt }, targets, now)) {
+        log.info(`seed target reached for ${task.filename} at ratio ${progress.ratio.toFixed(2)}`)
+        finished.push(id)
+        task.detail = null
+        task.speed = 0
+        continue
+      }
+
+      // Speed here is the upload rate: the row is finished downloading, so the
+      // only number still moving is what it is giving back.
+      task.speed = progress.uploadSpeed
+      task.detail = describeSeeding({ ...progress, startedAt: seed.startedAt }, targets)
+      updates.push({
+        id: task.id,
+        received: task.received,
+        size: task.size,
+        speed: task.speed,
+        eta: null,
+        status: task.status,
+        segments: task.segments,
+        error: task.error,
+        detail: task.detail,
+        torrentInfo: task.torrentInfo
+      })
+    }
+
+    if (finished.length > 0) {
+      for (const id of finished) {
+        this.seeders.get(id)?.session.stop()
+        this.seeders.delete(id)
+      }
+      this.emitTasks()
+    }
+
+    return updates
   }
 
   private async onFinished(
@@ -738,7 +1025,7 @@ export class DownloadManager {
     if (this.ticker || this.disposed) return
 
     this.ticker = setInterval(() => {
-      if (this.runners.size === 0) {
+      if (this.runners.size === 0 && this.seeders.size === 0) {
         // Nothing to report: stop the timer rather than waking the renderer
         // four times a second for an idle app.
         if (this.ticker) clearInterval(this.ticker)
@@ -746,7 +1033,7 @@ export class DownloadManager {
         return
       }
 
-      const updates: TaskProgress[] = []
+      const updates: TaskProgress[] = this.tickSeeders(Date.now())
       for (const runner of this.runners.values()) {
         runner.tick()
         const t = runner.task
@@ -766,6 +1053,15 @@ export class DownloadManager {
 
       if (updates.length > 0) this.options.onProgress(updates)
       const now = Date.now()
+
+      // A scheduled cap opens and closes with the clock, and a download running
+      // across that moment has to feel it. Checked on a slow interval rather
+      // than every tick: it is a comparison of minutes, not of milliseconds.
+      if (now - this.lastLimitCheckAt >= 15_000) {
+        this.lastLimitCheckAt = now
+        this.applyNetworkSettings()
+      }
+
       // A quota is a coarse budget - losing up to 30s of it to a crash costs
       // nothing - and there is nothing to persist at all when no quota is set
       // or usage hasn't moved since the last snapshot.
@@ -896,6 +1192,14 @@ async function sweepOrphanedIntermediates(
   tempDir: string | undefined,
   tasks: DownloadTask[]
 ): Promise<void> {
+  // Reclaim any 0-byte reservation files stranded in destination directories
+  // by an ungraceful shutdown or crash of an in-flight DASH/HLS/video task.
+  for (const task of tasks) {
+    if (task.status !== 'done' && task.dir && task.filename) {
+      await discardReservedPath(join(task.dir, task.filename)).catch(() => {})
+    }
+  }
+
   if (!tempDir) return
 
   let entries: string[]

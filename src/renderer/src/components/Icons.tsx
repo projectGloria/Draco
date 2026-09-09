@@ -293,3 +293,33 @@ export function LayersIcon(props: GlyphProps): React.ReactElement {
     </Svg>
   )
 }
+
+export function GlobeIcon(props: GlyphProps): React.ReactElement {
+  return (
+    <Svg {...props}>
+      <circle cx="12" cy="12" r="8.6" />
+      <path d="M3.4 12h17.2" />
+      <path d="M12 3.4c2.2 2.4 3.3 5.3 3.3 8.6S14.2 18.2 12 20.6c-2.2-2.4-3.3-5.3-3.3-8.6S9.8 5.8 12 3.4z" />
+    </Svg>
+  )
+}
+
+export function UsersIcon(props: GlyphProps): React.ReactElement {
+  return (
+    <Svg {...props}>
+      <circle cx="9.2" cy="8.4" r="3.2" />
+      <path d="M3.2 19.2a6 6 0 0 1 12 0" />
+      <path d="M16 5.6a3.2 3.2 0 0 1 0 6.2M17 14.4a5.4 5.4 0 0 1 3.8 4.8" />
+    </Svg>
+  )
+}
+
+export function TrackerIcon(props: GlyphProps): React.ReactElement {
+  return (
+    <Svg {...props}>
+      <circle cx="12" cy="12" r="2.1" />
+      <path d="M7.8 7.8a6 6 0 0 0 0 8.4M16.2 16.2a6 6 0 0 0 0-8.4" />
+      <path d="M4.9 4.9a10 10 0 0 0 0 14.2M19.1 19.1a10 10 0 0 0 0-14.2" />
+    </Svg>
+  )
+}

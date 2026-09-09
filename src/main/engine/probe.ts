@@ -1,7 +1,9 @@
 import type { ProbeResult, RequestHeaders } from '../../shared/types.ts'
+import type { HttpAuthenticator } from './auth.ts'
 import { getDispatcher } from './http.ts'
 import { isEmptyRangeResponse } from './probe-helpers.ts'
 import { filenameFromDisposition, filenameFromUrl, sanitizeFilename } from './naming.ts'
+import { localTorrentDescriptor } from './torrent-store.ts'
 import { HttpStatusError } from './worker.ts'
 
 /**
@@ -22,6 +24,12 @@ export interface ProbeOptions {
   headers?: RequestHeaders
   timeoutMs?: number
   signal?: AbortSignal
+  /**
+   * Answers a 401 challenge. Shared with the task that follows the probe, so a
+   * download does not have to be challenged a second time to learn what the
+   * probe already found out.
+   */
+  auth?: HttpAuthenticator
 }
 
 /** Flattens our captured-header shape into a plain header bag. */
@@ -75,6 +83,32 @@ export async function probeUrl(url: string, options: ProbeOptions = {}): Promise
   const headers = buildHeaders(options.headers)
   const dispatcher = getDispatcher(timeoutMs)
 
+  /**
+   * `fetch`, plus the one retry a 401 challenge is worth.
+   *
+   * The probe is where a protected download is first met, so answering here is
+   * what makes Add URL work at all on one - and the authenticator is shared
+   * with the task that follows, which therefore starts already knowing.
+   */
+  const authedFetch = async (target: string, init: Record<string, unknown>): Promise<Response> => {
+    const build = (): RequestInit => {
+      const authorization = options.auth?.headerFor(target, String(init.method ?? 'GET'))
+      const base = (init.headers ?? {}) as Record<string, string>
+      return {
+        ...init,
+        headers: authorization ? { ...base, authorization } : base,
+        dispatcher
+      } as RequestInit
+    }
+
+    const first = await fetch(target, build())
+    if (first.status !== 401) return first
+    if (!options.auth?.challenged(target, first.headers.get('www-authenticate') ?? undefined)) return first
+
+    await first.body?.cancel().catch(() => {})
+    return fetch(target, build())
+  }
+
   let finalUrl = url
   let size: number | null = null
   let etag: string | null = null
@@ -85,13 +119,12 @@ export async function probeUrl(url: string, options: ProbeOptions = {}): Promise
   // HEAD first: free when supported, and plenty of servers answer it with
   // everything needed.
   try {
-    const head = await fetch(url, {
+    const head = await authedFetch(url, {
       method: 'HEAD',
       headers,
       redirect: 'follow',
-      signal: options.signal,
-      dispatcher
-    } as RequestInit)
+      signal: options.signal
+    })
 
     if (head.ok) {
       finalUrl = head.url || finalUrl
@@ -116,13 +149,12 @@ export async function probeUrl(url: string, options: ProbeOptions = {}): Promise
   // from HEAD. Some media CDNs issue method-specific or single-use redirects;
   // a ranged GET against the HEAD destination can therefore return 404 even
   // though following the original URL again succeeds.
-  const ranged = await fetch(url, {
+  const ranged = await authedFetch(url, {
     method: 'GET',
     headers: { ...headers, range: 'bytes=0-0' },
     redirect: 'follow',
-    signal: options.signal,
-    dispatcher
-  } as RequestInit)
+    signal: options.signal
+  })
 
   try {
     finalUrl = ranged.url || finalUrl
@@ -154,13 +186,12 @@ export async function probeUrl(url: string, options: ProbeOptions = {}): Promise
       // false "file is forbidden" result: accept the endpoint as a
       // non-resumable download and let the single-stream worker fetch it.
       if (ranged.status === 403 || ranged.status === 405 || ranged.status === 416) {
-        const plain = await fetch(url, {
+        const plain = await authedFetch(url, {
           method: 'GET',
           headers,
           redirect: 'follow',
-          signal: options.signal,
-          dispatcher
-        } as RequestInit)
+          signal: options.signal
+        })
         try {
           if (plain.ok) {
             finalUrl = plain.url || finalUrl
@@ -246,6 +277,17 @@ async function probeTorrent(url: string, options: ProbeOptions): Promise<ProbeRe
   const cached = probeCache.get(cacheKey)
   if (cached && Date.now() < cached.expiresAt) return cached.result
 
+  // An imported `.torrent` already says what is inside it. Asking the swarm
+  // would be up to 45 seconds of peer discovery to learn what is sitting in a
+  // file on this disk - and it would fail outright for a torrent with no live
+  // peers, which is precisely when someone has the descriptor to hand.
+  const local = await localTorrentDescriptor(url)
+  if (local) {
+    const result = torrentProbeResult(url, local.metadata)
+    setProbeCache(cacheKey, { result, expiresAt: Date.now() + 5 * 60_000 })
+    return result
+  }
+
   const { default: WebTorrent } = await import('webtorrent')
   const client = new WebTorrent()
   const timeoutMs = Math.max(options.timeoutMs ?? 45_000, 45_000)
@@ -292,25 +334,28 @@ async function probeTorrent(url: string, options: ProbeOptions): Promise<ProbeRe
       if (options.signal?.aborted) onAbort()
     })
 
-    const torrentFiles = torrent.files.map((file) => ({
-      path: String(file.path),
-      size: Number(file.length)
-    }))
-    const result: ProbeResult = {
-      finalUrl: url,
-      size: Number(torrent.length),
-      resumable: true,
-      etag: null,
-      lastModified: null,
-      mimeType: 'application/x-bittorrent',
-      filename: torrent.name || 'torrent_download',
-      statusCode: 200,
-      torrentFiles
-    }
+    const result = torrentProbeResult(url, torrent)
     setProbeCache(cacheKey, { result, expiresAt: Date.now() + 5 * 60_000 })
     return result
   } finally {
     client.destroy()
+  }
+}
+
+function torrentProbeResult(url: string, torrent: TorrentProbeMetadata): ProbeResult {
+  return {
+    finalUrl: url,
+    size: Number(torrent.length),
+    resumable: true,
+    etag: null,
+    lastModified: null,
+    mimeType: 'application/x-bittorrent',
+    filename: torrent.name || 'torrent_download',
+    statusCode: 200,
+    torrentFiles: torrent.files.map((file) => ({
+      path: String(file.path),
+      size: Number(file.length)
+    }))
   }
 }
 

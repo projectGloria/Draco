@@ -1,7 +1,8 @@
 import { randomUUID } from 'node:crypto'
-import { access, constants, rename } from 'node:fs/promises'
+import { access, constants, readFile, rename, writeFile } from 'node:fs/promises'
+import { existsSync } from 'node:fs'
 import { join } from 'node:path'
-import { BrowserWindow, clipboard, dialog, ipcMain, shell } from 'electron'
+import { app, BrowserWindow, clipboard, dialog, ipcMain, nativeImage, shell } from 'electron'
 import type {
   Category,
   ClipboardItem,
@@ -24,6 +25,10 @@ import type { PipeServer } from './bridge/pipe-server.ts'
 import { directoryFor } from './categories.ts'
 import { normalizeDownloadDirectory } from './destination-path.ts'
 import { createTask, filenameForKind, kindForUrl, validateUrl } from './engine/create.ts'
+import { importTorrentFile } from './engine/torrent-store.ts'
+import { findDuplicate } from './engine/duplicate.ts'
+import { buildTransferFile, buildUrlList, parseTransferFile } from './transfer-list.ts'
+import { listCredentials, removeCredential, saveCredential } from './credentials.ts'
 import { discardReservedPath, sanitizeFilename, uniquePath } from './engine/naming.ts'
 import type { DownloadManager } from './engine/manager.ts'
 import { probeUrl } from './engine/probe.ts'
@@ -33,8 +38,14 @@ import { couldBeHtmlPageUrl, isSupportedMediaPageUrl } from './media-url.ts'
 import { getToolStatus, updateTool } from './tools.ts'
 import { checkForUpdates } from './update.ts'
 import { chosenYouTubeUrls, isSupportedYouTubeUrl } from './youtube-url.ts'
-import { getYouTubePrimeStatus, resolveMediaPage, resolveYouTube } from './youtube.ts'
+import { getYouTubePrimeStatus, resolveMediaPage, resolvePlaylist, resolveYouTube } from './youtube.ts'
+import { MAX_PLAYLIST_ENTRIES, isPlaylistUrl, singleVideoUrl, type PlaylistEntry } from './youtube-playlist.ts'
 import { iconForExtension, iconForSite } from './icons.ts'
+import {
+  registerShellHandlers,
+  shellHandlerStatus,
+  unregisterShellHandlers
+} from './shell-integration.ts'
 import { logger } from './log.ts'
 import type { Scheduler } from './queue/scheduler.ts'
 import type { SiteProjectManager } from './site-grabber/projects.ts'
@@ -52,6 +63,7 @@ import {
   createProgressWindow,
   getMainWindow,
   send,
+  showMainWindow,
   syncDropzoneWindow,
   updateProgressWindow
 } from './windows.ts'
@@ -72,6 +84,13 @@ export interface AppContext {
    * survive until there is something to show it in.
    */
   pendingHandoffs: HandoffRequest[]
+  /**
+   * Torrents and magnet links the shell asked Draco to open, waiting for a
+   * window to show them in. Held here for the same reason `pendingHandoffs`
+   * is: a double-clicked `.torrent` can be what started the app, and that
+   * request has to outlive a bootstrap that has not created a window yet.
+   */
+  pendingOpens: string[]
   clipboardItems: ClipboardItem[]
   lastHandoffAt: number | null
   quit(): void
@@ -213,6 +232,41 @@ function applyClipboardMedia(
 }
 
 /**
+ * Opens whatever the shell handed us: a magnet link, or a path to a `.torrent`
+ * file that was double-clicked.
+ *
+ * A torrent file is imported rather than used where it lies - see
+ * `engine/torrent-store.ts` - so from here on both cases are a magnet URI and
+ * take the ordinary Add-torrent path, file picker and all.
+ *
+ * Nothing is downloaded by this. Opening a torrent means showing the user what
+ * is in it; starting it is still their decision, which is the whole point of
+ * the dialog it lands in.
+ */
+export async function openShellTarget(ctx: AppContext, target: string): Promise<void> {
+  try {
+    const url = /^magnet:/i.test(target)
+      ? validateUrl(target)
+      : (await importTorrentFile(target)).magnetUri
+
+    // The dialog is the destination, so a repeat of one already waiting would
+    // only queue a second identical window behind the first.
+    if (!ctx.pendingOpens.includes(url)) {
+      ctx.pendingOpens.push(url)
+      if (ctx.pendingOpens.length > 12) ctx.pendingOpens.shift()
+    }
+    log.info(`shell open: ${target}`)
+    showMainWindow()
+    send('shell:open', null)
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    log.warn(`could not open ${target}: ${message}`)
+    showMainWindow()
+    send('toast', { kind: 'error', message })
+  }
+}
+
+/**
  * Adds a handoff request to the pending queue, dropping the oldest once it's
  * full. The dropped request's confirm window is closed along with it - a
  * window whose request no longer exists in `pendingHandoffs` can never be
@@ -273,6 +327,7 @@ export function placeTask(input: NewDownload): DownloadTask {
     filename: chosenName,
     categoryId,
     queueId: input.queueId ?? null,
+    expectedSize: input.expectedSize,
     headers: input.headers,
     subtitles: input.subtitles,
     description: input.description,
@@ -365,6 +420,86 @@ export function registerIpc(ctx: AppContext): void {
 
   handle('tasks:get', (id: string) => ctx.manager.get(id) ?? null)
 
+  /**
+   * Whether this download has been had before. Reported, never enforced: asking
+   * for it again is a legitimate request, and a downloader that argues about it
+   * is worse than one that stays quiet.
+   */
+  handle('tasks:findDuplicate', (input: { url: string; pageUrl?: string | null; filename?: string; dir?: string }) => {
+    if (typeof input?.url !== 'string') return null
+    return findDuplicate(ctx.manager.list(), {
+      url: input.url,
+      pageUrl: typeof input.pageUrl === 'string' ? input.pageUrl : null,
+      filename: typeof input.filename === 'string' ? input.filename : undefined,
+      dir: typeof input.dir === 'string' ? input.dir : undefined
+    })
+  })
+
+  /** Writes the list somewhere it can be read on another machine. */
+  handle('tasks:export', async (ids: string[] | null): Promise<number> => {
+    const all = ctx.manager.list()
+    const chosen = Array.isArray(ids) && ids.length > 0
+      ? all.filter((task) => ids.includes(task.id))
+      : all
+    if (chosen.length === 0) throw new Error('There is nothing to export')
+
+    const window = getMainWindow()
+    const result = await dialog.showSaveDialog(window ?? new BrowserWindow({ show: false }), {
+      title: 'Export downloads',
+      defaultPath: `draco-downloads-${new Date().toISOString().slice(0, 10)}.json`,
+      filters: [
+        { name: 'Draco download list', extensions: ['json'] },
+        { name: 'Plain URL list', extensions: ['txt'] }
+      ]
+    })
+    if (result.canceled || !result.filePath) return 0
+
+    // The extension chooses the format, because that is what the user just
+    // told the save dialog they wanted.
+    const asText = /\.txt$/i.test(result.filePath)
+    await writeFile(
+      result.filePath,
+      asText ? buildUrlList(chosen) : JSON.stringify(buildTransferFile(chosen), null, 2),
+      'utf8'
+    )
+    log.info(`exported ${chosen.length} download(s) to ${result.filePath}`)
+    return chosen.length
+  })
+
+  /** Reads either format back. Imported rows are never started by themselves. */
+  handle('tasks:import', async (): Promise<number> => {
+    const window = getMainWindow()
+    const result = await dialog.showOpenDialog(window ?? new BrowserWindow({ show: false }), {
+      title: 'Import downloads',
+      properties: ['openFile'],
+      filters: [
+        { name: 'Download lists', extensions: ['json', 'txt'] },
+        { name: 'All files', extensions: ['*'] }
+      ]
+    })
+    if (result.canceled || !result.filePaths[0]) return 0
+
+    const text = await readFile(result.filePaths[0], 'utf8')
+    if (text.length > 8 * 1024 * 1024) throw new Error('That file is too large to be a download list')
+
+    const items = parseTransferFile(text)
+    if (items.length === 0) throw new Error('No downloadable links were found in that file')
+
+    let added = 0
+    for (const item of items) {
+      try {
+        const task = placeTask(item)
+        ctx.manager.add(task, false)
+        added++
+      } catch {
+        // One malformed row must not cost the rest of the file.
+      }
+    }
+    persistTaskSnapshot(ctx)
+    log.info(`imported ${added} download(s) from ${result.filePaths[0]}`)
+    return added
+  })
+
   handle('tasks:probe', (url: string, headers: RequestHeaders | undefined) =>
     probeUrl(validateUrl(url), { headers, timeoutMs: getSettings().timeoutMs })
   )
@@ -373,6 +508,51 @@ export function registerIpc(ctx: AppContext): void {
     const pageUrl = validateUrl(url)
     if (!isSupportedYouTubeUrl(pageUrl)) throw new Error('Not a supported YouTube URL')
     return resolveYouTube(pageUrl, { referer: pageUrl })
+  })
+
+  /** What one playlist or channel link stands for, without resolving any of it. */
+  handle('youtube:playlist', async (url: string) => {
+    const pageUrl = validateUrl(url)
+    if (!isPlaylistUrl(pageUrl)) throw new Error('That is not a YouTube playlist or channel')
+    const listing = await resolvePlaylist(pageUrl)
+    return { ...listing, singleVideoUrl: singleVideoUrl(pageUrl) }
+  })
+
+  /**
+   * Turns a listing into downloads.
+   *
+   * Entries are resolved one at a time in the background rather than up front:
+   * a hundred videos would be a hundred yt-dlp runs before the first byte
+   * moved, and YouTube's signed URLs would have started expiring before the
+   * last of them was even queued. Rows appear as each entry resolves, so the
+   * list fills in while the earlier ones are already downloading.
+   */
+  handle('youtube:addPlaylist', (input: {
+    entries: PlaylistEntry[]
+    title: string
+    height: number | null
+    audioOnly: boolean
+    queueId: string | null
+    dir?: string
+  }) => {
+    const entries = (Array.isArray(input?.entries) ? input.entries : [])
+      .filter((entry): entry is PlaylistEntry => typeof entry?.url === 'string')
+      .slice(0, MAX_PLAYLIST_ENTRIES)
+    if (entries.length === 0) throw new Error('Nothing in that listing to download')
+
+    const groupId = randomUUID()
+    const groupName = String(input.title || 'Playlist').slice(0, 200)
+
+    void expandPlaylist(ctx, entries, {
+      groupId,
+      groupName,
+      height: typeof input.height === 'number' ? input.height : null,
+      audioOnly: input.audioOnly === true,
+      queueId: typeof input.queueId === 'string' ? input.queueId : null,
+      dir: typeof input.dir === 'string' ? input.dir : undefined
+    })
+
+    return { accepted: entries.length, groupId }
   })
 
   handle('media:resolvePage', (url: string, headers?: RequestHeaders) => {
@@ -505,6 +685,26 @@ export function registerIpc(ctx: AppContext): void {
     if (!target) return false
     shell.showItemInFolder(target)
     return true
+  })
+
+  /**
+   * Stops a finished torrent from seeding. Reported back so the caller can say
+   * something when the row was not seeding in the first place.
+   */
+  handle('tasks:stopSeeding', (ids: string[]) => {
+    const list = Array.isArray(ids) ? ids.filter((id): id is string => typeof id === 'string') : []
+    return ctx.manager.stopSeeding(list)
+  })
+
+  handle('tasks:seeding', () => ctx.manager.seedingIds())
+
+  /** Changes which files inside a torrent are wanted, running or not. */
+  handle('tasks:setTorrentFiles', (id: string, paths: string[]) => {
+    if (typeof id !== 'string' || !Array.isArray(paths)) return false
+    const wanted = paths.filter((path): path is string => typeof path === 'string')
+    const changed = ctx.manager.setTorrentFiles(id, wanted)
+    if (changed) persistTaskSnapshot(ctx)
+    return changed
   })
 
   handle('tasks:openTorrentItem', async (id: string, itemPath: string) => {
@@ -655,6 +855,13 @@ export function registerIpc(ctx: AppContext): void {
     ctx.manager.applySettings()
     if (patch.watchClipboard !== undefined) ctx.setClipboardWatch(patch.watchClipboard === true)
     if (patch.showDropzone !== undefined) syncDropzoneWindow(patch.showDropzone === true)
+    if (patch.associateTorrents !== undefined) {
+      // Registry work, so it is done off the settings round trip: the toggle
+      // must not sit there waiting on reg.exe, and Options re-reads the real
+      // state from `integration:get` anyway.
+      void (next.associateTorrents ? registerShellHandlers() : unregisterShellHandlers())
+        .catch((error) => log.warn(`shell handler update failed: ${String(error)}`))
+    }
     return next
   })
 
@@ -673,6 +880,7 @@ export function registerIpc(ctx: AppContext): void {
       firefoxExtensionPath: getPaths().firefoxExtensionDir,
       extensionId: await readExtensionId(),
       registered: await checkRegistered(),
+      shellHandlers: await shellHandlerStatus(),
       bridgeListening: ctx.pipe.listening,
       lastHandoffAt: ctx.lastHandoffAt
     }
@@ -680,15 +888,100 @@ export function registerIpc(ctx: AppContext): void {
 
   handle('integration:register', async (): Promise<IntegrationStatus> => {
     const registered = await ensureRegistered()
+    // One button, both integrations: someone pressing "Register" after
+    // installing the extension expects the file association it was told about
+    // in the same panel to be retried too.
+    const shellHandlers = getSettings().associateTorrents
+      ? await registerShellHandlers()
+      : await shellHandlerStatus()
     return {
       extensionPath: getPaths().extensionDir,
       firefoxExtensionPath: getPaths().firefoxExtensionDir,
       extensionId: await readExtensionId(),
       registered,
+      shellHandlers,
       bridgeListening: ctx.pipe.listening,
       lastHandoffAt: ctx.lastHandoffAt
     }
   })
+
+  /* torrents opened from the shell */
+
+  handle('shell:takePending', () => ctx.pendingOpens.splice(0, ctx.pendingOpens.length))
+
+  handle('torrent:chooseFile', async (): Promise<string | null> => {
+    const window = getMainWindow()
+    const result = await dialog.showOpenDialog(window ?? new BrowserWindow({ show: false }), {
+      title: 'Open torrent file',
+      properties: ['openFile'],
+      filters: [
+        { name: 'Torrent files', extensions: ['torrent'] },
+        { name: 'All files', extensions: ['*'] }
+      ]
+    })
+    if (result.canceled || !result.filePaths[0]) return null
+    return (await importTorrentFile(result.filePaths[0])).magnetUri
+  })
+
+  /**
+   * Torrent files dropped on a window. They take the same road as a
+   * double-clicked one - imported into the store, then queued as pending opens
+   * - so a drop of five files behaves exactly like selecting five in Explorer
+   * and pressing Enter: one dialog, then the next.
+   *
+   * The renderer sends paths, never contents, and only a `.torrent` is acted
+   * on; anything else in the drop is reported back as ignored.
+   */
+  handle('shell:openFiles', async (paths: string[]): Promise<number> => {
+    const torrents = (Array.isArray(paths) ? paths : [])
+      .filter((path) => typeof path === 'string' && path.toLowerCase().endsWith('.torrent'))
+      // A dropped folder can be thousands of files; a drop is never worth that
+      // many dialogs.
+      .slice(0, 24)
+    for (const path of torrents) await openShellTarget(ctx, path)
+    return torrents.length
+  })
+
+  /**
+   * Dragging a finished download out of the list and onto another application.
+   *
+   * `startDrag` is only valid while the renderer's `dragstart` is still being
+   * handled, which is why this is a `send` and not an `invoke` - there is
+   * nothing to wait for and no time to wait in. For the same reason the file
+   * check here is synchronous: an `await` would land after the drag is gone.
+   *
+   * The renderer names task ids; every path is resolved here, so the worst a
+   * compromised renderer can offer another app is a file Draco downloaded.
+   */
+  ipcMain.on('tasks:startDrag', (event, rawIds: unknown) => {
+    const ids = Array.isArray(rawIds) ? rawIds.filter((id): id is string => typeof id === 'string') : []
+    const files = ids
+      .slice(0, 100)
+      .map((id) => ctx.manager.get(id))
+      .filter((task): task is DownloadTask => task?.status === 'done')
+      .map((task) => join(task.dir, task.filename))
+      .filter((path) => existsSync(path))
+    if (files.length === 0) return
+
+    try {
+      event.sender.startDrag({ file: files[0], files, icon: dragIcon() })
+    } catch (error) {
+      log.warn(`could not start drag: ${error instanceof Error ? error.message : String(error)}`)
+    }
+  })
+
+  /* saved site passwords - the secrets never cross this boundary */
+
+  handle('credentials:list', () => listCredentials())
+  handle('credentials:save', (input: { host: string; realm?: string; username: string; password: string }) =>
+    saveCredential({
+      host: String(input?.host ?? ''),
+      realm: String(input?.realm ?? ''),
+      username: String(input?.username ?? ''),
+      password: String(input?.password ?? '')
+    })
+  )
+  handle('credentials:remove', (id: string) => removeCredential(String(id)))
 
   handle('tools:status', (checkLatest: boolean) => getToolStatus(checkLatest === true))
   handle('tools:update', (id: ToolId) => updateTool(id))
@@ -747,6 +1040,24 @@ export function registerIpc(ctx: AppContext): void {
  * there, which reads as a broken button. Checking first turns that into the
  * `missing` state the list and the progress window already know how to show.
  */
+/**
+ * The cursor image for a drag out of the list. Windows refuses a drag with an
+ * empty icon, so a flat square stands in when the app icon cannot be read -
+ * a dull cursor is better than a drag that throws.
+ */
+let cachedDragIcon: Electron.NativeImage | null = null
+function dragIcon(): Electron.NativeImage {
+  if (cachedDragIcon) return cachedDragIcon
+
+  const packaged = join(process.resourcesPath, 'icon.ico')
+  const dev = join(app.getAppPath(), 'resources', 'icon.ico')
+  const image = nativeImage.createFromPath(existsSync(packaged) ? packaged : dev)
+  cachedDragIcon = image.isEmpty()
+    ? nativeImage.createFromBitmap(Buffer.alloc(32 * 32 * 4, 0x60), { width: 32, height: 32 })
+    : image.resize({ width: 32, height: 32 })
+  return cachedDragIcon
+}
+
 async function openable(ctx: AppContext, id: string): Promise<string | null> {
   const task = ctx.manager.get(id)
   if (!task) return null
@@ -784,6 +1095,127 @@ async function openableTorrentItem(
   } catch {
     return null
   }
+}
+
+/**
+ * Resolves playlist entries one at a time and adds each as a download.
+ *
+ * Sequential on purpose. yt-dlp is a whole process per lookup and YouTube
+ * rate-limits a burst of them, so eight at once would be slower than one at a
+ * time and considerably ruder. The user sees rows appear as it works, which is
+ * the honest picture of what is happening.
+ *
+ * One entry failing is not the batch failing: a private or region-blocked video
+ * in the middle of a playlist must not cost the other ninety-nine.
+ */
+async function expandPlaylist(
+  ctx: AppContext,
+  entries: PlaylistEntry[],
+  options: {
+    groupId: string
+    groupName: string
+    height: number | null
+    audioOnly: boolean
+    queueId: string | null
+    dir?: string
+  }
+): Promise<void> {
+  let added = 0
+  const failures: string[] = []
+
+  for (const entry of entries) {
+    // Deleting the rows is how the user cancels a listing that is still
+    // filling in. Once something has been added, the group going empty can
+    // only mean it was removed - so stop, rather than adding the other ninety
+    // videos back one by one.
+    if (added > 0 && !ctx.manager.list().some((task) => task.groupId === options.groupId)) {
+      log.info(`playlist ${options.groupName} cancelled after ${added} entries`)
+      return
+    }
+
+    try {
+      const resolved = await resolveYouTube(entry.url, { referer: entry.url })
+      const variant = pickPlaylistVariant(resolved.variants, options.height, options.audioOnly)
+      if (!variant) {
+        failures.push(entry.title)
+        continue
+      }
+
+      const task = placeTask({
+        url: variant.url,
+        sourceUrl: entry.url,
+        groupId: options.groupId,
+        groupName: options.groupName,
+        groupFolder: options.groupName,
+        audioUrl: variant.audioUrl ?? null,
+        audioTracks: variant.audioTracks,
+        youtube: variant.youtube
+          ? {
+              pageUrl: entry.url,
+              videoFormatId: variant.youtube.videoFormatId,
+              audioFormatId: variant.youtube.audioFormatId ?? null,
+              height: variant.height,
+              role: variant.youtube.role ?? 'video'
+            }
+          : undefined,
+        filename: resolved.title,
+        dir: options.dir,
+        queueId: options.queueId,
+        // A queued task is started by the scheduler, not by the add.
+        autoStart: options.queueId === null,
+        suppressProgressWindow: true
+      })
+      ctx.manager.add(task, options.queueId === null)
+      added++
+    } catch (error) {
+      failures.push(entry.title)
+      log.warn(`playlist entry failed (${entry.title}): ${error instanceof Error ? error.message : String(error)}`)
+    }
+  }
+
+  persistTaskSnapshot(ctx)
+  send('toast', {
+    kind: failures.length === 0 ? 'success' : 'info',
+    message: failures.length === 0
+      ? `Added ${added} video(s) from ${options.groupName}`
+      : `Added ${added} of ${entries.length} from ${options.groupName}; ${failures.length} could not be resolved`
+  })
+}
+
+/**
+ * The variant closest to what the user asked for.
+ *
+ * Never a rung above the request unless there is nothing below it - the same
+ * rule the format substitution follows, and for the same reason: quietly
+ * fetching 4K for someone who chose 720p is its own kind of wrong.
+ */
+export function pickPlaylistVariant(
+  variants: MediaVariant[],
+  height: number | null,
+  audioOnly: boolean
+): MediaVariant | null {
+  const audio = variants.filter((variant) => variant.youtube?.role === 'audio')
+  if (audioOnly) {
+    return audio.length > 0
+      ? audio.reduce((best, variant) => ((variant.bandwidth ?? 0) > (best.bandwidth ?? 0) ? variant : best))
+      : null
+  }
+
+  const video = variants.filter((variant) => variant.youtube?.role !== 'audio')
+  if (video.length === 0) return audio[0] ?? null
+  if (height === null) {
+    // "Best" means the tallest rung on offer for this particular video, which
+    // differs from video to video in the same playlist.
+    return video.reduce((best, variant) => ((variant.height ?? 0) > (best.height ?? 0) ? variant : best))
+  }
+
+  const atOrBelow = video.filter((variant) => (variant.height ?? 0) <= height)
+  const pool = atOrBelow.length > 0 ? atOrBelow : video
+  return pool.reduce((best, variant) => {
+    const distance = Math.abs((variant.height ?? 0) - height)
+    const bestDistance = Math.abs((best.height ?? 0) - height)
+    return distance < bestDistance ? variant : best
+  })
 }
 
 function persistTaskSnapshot(ctx: AppContext): void {

@@ -17,16 +17,18 @@ import type {
   TaskStatus
 } from '@shared/types'
 import { ensureDirs, getPaths } from './bootstrap/paths.ts'
+import { loadCredentials, resolveCredentials } from './credentials.ts'
 import { ClipboardWatcher } from './clipboard.ts'
 import { ensureRegistered } from './bridge/integration.ts'
 import { PipeServer } from './bridge/pipe-server.ts'
 import type { HostMessage, HostReply } from './bridge/protocol.ts'
 import { validateUrl } from './engine/create.ts'
+import { setTorrentStoreDir } from './engine/torrent-store.ts'
 import { closeDispatchers } from './engine/http.ts'
 import { DownloadManager } from './engine/manager.ts'
 import { MpdRunner } from './dash/runner.ts'
 import { HlsRunner } from './hls/runner.ts'
-import { handoffToTask, prepareClipboardItem, pushPendingHandoff, recordMedia, refileTask, registerIpc, type AppContext } from './ipc.ts'
+import { handoffToTask, openShellTarget, prepareClipboardItem, pushPendingHandoff, recordMedia, refileTask, registerIpc, type AppContext } from './ipc.ts'
 import { logger, setLogDirectory } from './log.ts'
 import { Scheduler } from './queue/scheduler.ts'
 import { SiteProjectManager } from './site-grabber/projects.ts'
@@ -46,6 +48,7 @@ import {
   saveQueues,
   saveSiteProjects
 } from './store.ts'
+import { registerShellHandlers, shellTargetsFromArgv } from './shell-integration.ts'
 import { createTray, destroyTray } from './tray.ts'
 import { getToolStatus } from './tools.ts'
 import { checkForUpdates } from './update.ts'
@@ -70,7 +73,7 @@ import {
   resolveYouTube,
   resolveYouTubeInstant
 } from './youtube.ts'
-import { isSupportedYouTubeUrl } from './youtube-url.ts'
+import { isSupportedYouTubeUrl, youtubeFormatId } from './youtube-url.ts'
 
 const log = logger('main')
 
@@ -127,7 +130,15 @@ function updateOpenProgressWindows(tasks: DownloadTask[]): void {
 if (!app.requestSingleInstanceLock()) {
   app.quit()
 } else {
-  app.on('second-instance', () => showMainWindow())
+  app.on('second-instance', (_event, argv) => {
+    // Double-clicking a `.torrent` while Draco is already running is a second
+    // launch: Windows hands the path to the new process, which finds the lock
+    // taken and forwards its whole command line here.
+    for (const target of shellTargetsFromArgv(argv)) {
+      if (ctx) void openShellTarget(ctx, target)
+    }
+    showMainWindow()
+  })
   // A throw in here would otherwise leave the splash spinning forever with the
   // reason buried in an unhandled rejection warning.
   void main().catch((err) => {
@@ -159,6 +170,13 @@ async function main(): Promise<void> {
   app.setAppUserModelId('com.nihil.draco')
 
   createSplashWindow()
+
+  /**
+   * The scheduler owns the queues and is built after the manager, which needs
+   * to ask it about them. A late-bound lookup keeps that one-way: the manager
+   * still holds no queue list of its own.
+   */
+  let queueSpeedLimitLookup: (queueId: string) => number | null = () => null
 
   const manager = new DownloadManager({
     /*
@@ -242,11 +260,18 @@ async function main(): Promise<void> {
         }
       ),
     createMpdRunner: (task, context) => new MpdRunner(task, context),
+    // The engine asks; only this side of the wall can open the sealed store.
+    resolveCredentials,
+    // Queues belong to the scheduler, so the manager asks rather than owning a
+    // second copy of the list. Assigned after the scheduler exists, below.
+    queueSpeedLimit: (queueId) => queueSpeedLimitLookup(queueId),
     createDashRunner: (task, context) => new DashRunner(task, context),
     refreshYouTube: async (task, force) => {
       if (!task.youtube) throw new Error('Missing YouTube source metadata')
       const audio = task.youtube.role === 'audio'
-      const formatId = task.youtube.videoFormatId
+      // Role-correct: the audio half of a merged download must resolve its own
+      // itag, not the video's - see `youtubeFormatId`.
+      const formatId = youtubeFormatId(task.youtube)
       if (!formatId) throw new Error('Missing YouTube format identity')
       // What the itag was a name for, so a format yt-dlp has never heard of
       // resolves to the same quality rather than failing the download.
@@ -264,6 +289,9 @@ async function main(): Promise<void> {
     onPending: (pending) => send('queues:pending', pending),
     onExitRequested: () => quit()
   })
+
+  queueSpeedLimitLookup = (queueId) =>
+    scheduler.list().find((queue) => queue.id === queueId)?.speedLimit ?? null
 
   const siteProjects = new SiteProjectManager({
     manager,
@@ -290,6 +318,7 @@ async function main(): Promise<void> {
     pipe,
     media: [],
     pendingHandoffs: [],
+    pendingOpens: [],
     clipboardItems: [],
     lastHandoffAt: null,
     quit,
@@ -311,10 +340,14 @@ async function runBootstrap(): Promise<void> {
   await runStep('appdata', async () => {
     const paths = ensureDirs()
     setLogDirectory(paths.logs)
+    setTorrentStoreDir(paths.torrents)
   })
 
   await runStep('settings', async () => {
     await loadSettings()
+    // Before any task can run, so the first protected download of the session
+    // is answered from the store rather than failing while it loads.
+    await loadCredentials()
     ctx!.manager.restoreQuota(await loadQuotaState())
     await loadCategories()
   })
@@ -339,6 +372,15 @@ async function runBootstrap(): Promise<void> {
   })
 
   await runStep('integration', async () => {
+    // The installer already claims `.torrent` and `magnet:`, but a dev run and
+    // a portable copy have no installer, and another client may have taken
+    // them since. Best-effort, like the browser registration below it.
+    if (getSettings().associateTorrents) {
+      await registerShellHandlers().catch((error) =>
+        log.warn(`could not register the torrent handlers: ${String(error)}`)
+      )
+    }
+
     const registered = await ensureRegistered()
     if (!Object.values(registered).some(Boolean)) {
       // Browser integration is optional. A machine with no supported Chromium
@@ -362,10 +404,17 @@ function finish(): void {
   if (!ctx || finished) return
   finished = true
 
+  // What this launch was asked to open, if it was started by a double-clicked
+  // torrent or a magnet link rather than by the user.
+  const shellTargets = shellTargetsFromArgv(process.argv)
+
   closeSplash()
   // A handoff that arrived during startup is what caused this launch in the
-  // first place; the window must not open minimised on top of it.
-  createMainWindow(getSettings().startMinimized && ctx.pendingHandoffs.length === 0)
+  // first place; the window must not open minimised on top of it. The same
+  // goes for a torrent the shell handed us.
+  createMainWindow(
+    getSettings().startMinimized && ctx.pendingHandoffs.length === 0 && shellTargets.length === 0
+  )
   createTray({
     onShow: showMainWindow,
     onPauseAll: () => void ctx!.manager.pauseAll(),
@@ -388,6 +437,12 @@ function finish(): void {
   }
 
   if (updateSettings.autoCheckUpdates) void announceToolUpdates()
+
+  // After the window exists, so the Add-torrent dialog has somewhere to open.
+  // The queue in `ctx.pendingOpens` is what the renderer actually drains, so
+  // this cannot race the first paint.
+  for (const target of shellTargets) void openShellTarget(ctx, target)
+
   log.info('ready')
 }
 

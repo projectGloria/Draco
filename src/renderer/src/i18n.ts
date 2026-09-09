@@ -22,7 +22,8 @@ const en = {
   moveToQueue: 'Move to queue', noQueue: 'No queue', columns: 'Columns',
   confirmDeleteTitle: 'Delete downloads', confirmDeleteBody: 'Delete {count} download(s) from the list?',
   confirmDeleteFiles: 'Also delete the downloaded files', cancel: 'Cancel', confirm: 'Delete',
-  fileMissing: 'That file is no longer where Draco left it'
+  fileMissing: 'That file is no longer where Draco left it',
+  dropTitle: 'Drop to download', dropHint: 'HTTP and HTTPS links, or .torrent files'
 } as const
 
 type Key = keyof typeof en
@@ -52,7 +53,8 @@ const tr: Record<Key, string> = {
   moveToQueue: 'Kuyruğa taşı', noQueue: 'Kuyruk yok', columns: 'Sütunlar',
   confirmDeleteTitle: 'İndirmeleri sil', confirmDeleteBody: '{count} indirme listeden silinsin mi?',
   confirmDeleteFiles: 'İndirilen dosyaları da sil', cancel: 'Vazgeç', confirm: 'Sil',
-  fileMissing: 'Bu dosya Draco’nun bıraktığı yerde değil'
+  fileMissing: 'Bu dosya Draco’nun bıraktığı yerde değil',
+  dropTitle: 'İndirmek için bırakın', dropHint: 'HTTP ve HTTPS bağlantıları veya .torrent dosyaları'
 }
 
 export function useT(): (key: Key, values?: Record<string, string | number>) => string {

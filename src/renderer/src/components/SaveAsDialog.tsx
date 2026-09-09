@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import type { ClipboardItem, MediaVariant, NewDownload, ProbeResult, RequestHeaders, YouTubeResolution } from '@shared/types'
-import { formatBytes, hostOf, looksLikeYouTubeInput } from '../lib/format'
+import type { ClipboardItem, DuplicateMatch, MediaVariant, NewDownload, ProbeResult, RequestHeaders, YouTubeResolution } from '@shared/types'
+import { formatBytes, formatWhen, hostOf, looksLikeYouTubeInput } from '../lib/format'
 import { useApp } from '../store/app'
 import { reportError } from '../store/toasts'
 import Dialog, { GhostButton, PrimaryButton } from './Dialog'
@@ -72,9 +72,11 @@ export default function SaveAsDialog({
   const [youtube, setYoutube] = useState<YouTubeResolution | null>(preparedMedia ?? null)
   const [youtubeVariantIndex, setYoutubeVariantIndex] = useState(0)
   const [selectedMediaIndices, setSelectedMediaIndices] = useState<Set<number>>(
-    () => new Set((preparedMedia?.variants ?? []).map((_variant, index) => index))
+    () => defaultSelection(preparedMedia?.variants ?? [])
   )
   const [detectedMedia, setDetectedMedia] = useState(clipboardItem?.kind === 'media')
+  /** An existing row this download would repeat. Advisory only. */
+  const [duplicate, setDuplicate] = useState<DuplicateMatch | null>(null)
   const torrentSelectionEmpty = selectedFiles !== null && selectedFiles.size === 0
   const torrentMode = isTorrentInput(url) || probe?.torrentFiles !== undefined
   const youtubeMode = looksLikeYouTubeInput(url)
@@ -83,6 +85,22 @@ export default function SaveAsDialog({
   const youtubeVariant = youtube?.variants[youtubeVariantIndex] ?? null
   const cannotStart = torrentSelectionEmpty ||
     (pageAssetMode ? selectedMediaIndices.size === 0 : mediaMode && !youtubeVariant)
+
+  useEffect(() => {
+    let cancelled = false
+    void window.api
+      .findDuplicate({ url, pageUrl: youtubeMode ? url : null })
+      .then((match) => {
+        if (!cancelled) setDuplicate(match)
+      })
+      .catch(() => {
+        // A duplicate check that fails is not worth a message: the download
+        // itself is unaffected.
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [url, youtubeMode])
 
   useEffect(() => {
     if (probe?.torrentFiles) {
@@ -106,7 +124,7 @@ export default function SaveAsDialog({
         .then((result) => {
           if (cancelled) return
           setYoutube(result)
-          setSelectedMediaIndices(new Set(result.variants.map((_variant, index) => index)))
+          setSelectedMediaIndices(defaultSelection(result.variants))
           const first = result.variants[0] ?? null
           setFilename((current) => (touched.current ? current : youtubeFilename(result.title, first)))
         })
@@ -128,7 +146,7 @@ export default function SaveAsDialog({
         .then((result) => {
           if (cancelled) return
           setYoutube(result)
-          setSelectedMediaIndices(new Set(result.variants.map((_variant, index) => index)))
+          setSelectedMediaIndices(defaultSelection(result.variants))
           const first = result.variants[0] ?? null
           setFilename((current) => (touched.current ? current : youtubeFilename(result.title, first)))
         })
@@ -152,7 +170,7 @@ export default function SaveAsDialog({
           const media = await window.api.resolveMediaPage(url, headers)
           if (cancelled) return
           setYoutube(media)
-          setSelectedMediaIndices(new Set(media.variants.map((_variant, index) => index)))
+          setSelectedMediaIndices(defaultSelection(media.variants))
           const first = media.variants[0] ?? null
           setFilename((current) => (touched.current ? current : youtubeFilename(media.title, first)))
           return
@@ -172,7 +190,7 @@ export default function SaveAsDialog({
             setDetectedMedia(true)
             setProbe(null)
             setYoutube(media)
-            setSelectedMediaIndices(new Set(media.variants.map((_variant, index) => index)))
+            setSelectedMediaIndices(defaultSelection(media.variants))
             const first = media.variants[0] ?? null
             setFilename((current) => (touched.current ? current : youtubeFilename(media.title, first)))
             return
@@ -208,6 +226,9 @@ export default function SaveAsDialog({
           groupFolder: grouped ? groupName : undefined,
           audioUrl: variant.audioUrl ?? null,
           audioTracks: variant.audioTracks,
+          // The page told us the size; without this the row and the group total
+          // both read "—" until each file has been probed one at a time.
+          expectedSize: variant.estimatedSize,
           youtube: variant.youtube
             ? {
                 pageUrl: url,
@@ -294,6 +315,25 @@ export default function SaveAsDialog({
         </>
       }
     >
+      {duplicate && (
+        <div className="mb-3.5 rounded-lg px-3 py-2.5 text-[11.5px] leading-relaxed border border-[rgba(250,204,21,0.25)] bg-[rgba(250,204,21,0.08)] flex items-center gap-3">
+          <span className="min-w-0 flex-1 text-warn">
+            {duplicate.status === 'done'
+              ? `Already downloaded as ${duplicate.filename}${duplicate.completedAt ? ` on ${formatWhen(duplicate.completedAt)}` : ''}.`
+              : `Already in the list as ${duplicate.filename} (${duplicate.status}).`}
+          </span>
+          {duplicate.status === 'done' && (
+            <button
+              type="button"
+              className="shrink-0 text-[11px] text-muted hover:text-ink underline underline-offset-2"
+              onClick={() => void window.api.revealFile(duplicate.taskId)}
+            >
+              Show me
+            </button>
+          )}
+        </div>
+      )}
+
       <div
         className={
           torrentMode
@@ -509,6 +549,9 @@ function PageAssetSelection({
       const difference = (a.variant.estimatedSize ?? -1) - (b.variant.estimatedSize ?? -1)
       return sizeDirection === 'asc' ? difference : -difference
     }), [variants, query, sizeDirection])
+  // With a filter typed, the buttons act on what is on screen. "flac" then
+  // "Select matches" is how somebody takes a whole album in one format.
+  const filtered = visible.length !== variants.length
   return (
     <section className="border border-line rounded-lg bg-white/[0.02] overflow-hidden">
       <div className="px-3.5 py-2.5 bg-white/[0.04] border-b border-line flex items-center gap-3">
@@ -522,15 +565,19 @@ function PageAssetSelection({
         <div className="flex items-center gap-2 text-[10px] uppercase tracking-[0.3px]">
           <button
             className="text-faint hover:text-ink transition-colors"
-            onClick={() => onSelectionChange(new Set(variants.map((_variant, index) => index)))}
+            onClick={() => onSelectionChange(new Set([...selected, ...visible.map(({ index }) => index)]))}
           >
-            Select all
+            {filtered ? 'Select matches' : 'Select all'}
           </button>
           <button
             className="text-faint hover:text-ink transition-colors"
-            onClick={() => onSelectionChange(new Set())}
+            onClick={() => {
+              const next = new Set(selected)
+              for (const { index } of visible) next.delete(index)
+              onSelectionChange(next)
+            }}
           >
-            Select none
+            {filtered ? 'Clear matches' : 'Select none'}
           </button>
         </div>
       </div>
@@ -539,7 +586,7 @@ function PageAssetSelection({
         <input
           value={query}
           onChange={(event) => setQuery(event.target.value)}
-          placeholder="Search fetched files…"
+          placeholder="Search fetched files (try flac, mp3, jpg)…"
           className="field !py-1.5 text-[11.5px]"
           spellCheck={false}
         />
@@ -623,6 +670,19 @@ function MediaLoadingState({ phase }: { phase: 'page' | 'qualities' | 'file' }):
         </div>
       </div>
     </div>
+  )
+}
+
+/**
+ * Which rows are ticked when the picker opens.
+ *
+ * Everything, unless the resolver marked rows as alternatives of one another -
+ * a khinsider album lists every track as both FLAC and MP3, and ticking both
+ * means downloading the album twice.
+ */
+function defaultSelection(variants: MediaVariant[]): Set<number> {
+  return new Set(
+    variants.map((_variant, index) => index).filter((index) => variants[index].defaultSelected !== false)
   )
 }
 

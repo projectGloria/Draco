@@ -147,6 +147,8 @@ export class DashRunner implements Runner {
 
       const videoPath = join(this.task.dir, this.videoRunner.task.filename)
       const audioPath = join(this.task.dir, this.audioRunner.task.filename)
+      const wouldBeTarget = join(this.task.dir, this.task.filename)
+      await discardReservedPath(wouldBeTarget)
       const targetPath = await uniquePath(this.task.dir, this.task.filename)
       this.reservedTarget = targetPath
       const muxTemp = muxTempPath(targetPath)

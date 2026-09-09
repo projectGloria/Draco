@@ -3,6 +3,9 @@ import { dirname } from 'node:path'
 import { spawn } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { getPaths } from './bootstrap/paths.ts'
+import { cookieArgs, explainCookieFailure } from './ytdlp-cookies.ts'
+import { MAX_PLAYLIST_ENTRIES, parseFlatPlaylist, type PlaylistListing } from './youtube-playlist.ts'
+import { getSettings } from './store.ts'
 import { logger } from './log.ts'
 import { parseSha256, parseYtDlpVersion } from './tools-version.ts'
 import type { MediaVariant, PageFormat, RequestHeaders, YouTubeResolution } from '../shared/types.ts'
@@ -20,6 +23,7 @@ import { electronNodeRuntimeArgs, electronNodeRuntimeEnv } from './youtube-runti
 import { normalizeYtDlpError } from './youtube-error.ts'
 import { isSunoUrl } from './media-url.ts'
 import { resolveSuno } from './suno.ts'
+import { isKhinsiderUrl, resolveKhinsider } from './khinsider.ts'
 import { resolveHtmlPageMedia } from './page-media.ts'
 
 const log = logger('youtube')
@@ -114,11 +118,72 @@ export async function resolveYouTube(
   }
 }
 
+/**
+ * Everything one playlist or channel link stands for.
+ *
+ * `--flat-playlist` is the whole point: yt-dlp lists the entries without
+ * resolving any of them, so a 200-video channel costs one lookup instead of
+ * two hundred. Each entry is resolved later, when its own download starts,
+ * which is also the only moment at which YouTube's signed URLs are still fresh.
+ */
+export async function resolvePlaylist(pageUrl: string): Promise<PlaylistListing> {
+  const executable = await ensureYtDlp()
+  const cookieBrowser = getSettings().cookiesFromBrowser
+
+  const { stdout, stderr, code } = await runCapture(
+    executable,
+    [
+      '--dump-single-json',
+      '--flat-playlist',
+      '--skip-download',
+      '--no-warnings',
+      '--no-progress',
+      // One more than the cap, so a listing that was truncated can be reported
+      // as truncated rather than silently ending on a round number.
+      '--playlist-end',
+      String(MAX_PLAYLIST_ENTRIES + 1),
+      ...cookieArgs(cookieBrowser),
+      ...electronNodeRuntimeArgs(),
+      pageUrl
+    ],
+    PLAYLIST_LOOKUP_TIMEOUT_MS,
+    electronNodeRuntimeEnv()
+  )
+
+  if (code !== 0) {
+    const cookieProblem = explainCookieFailure(stderr, cookieBrowser)
+    if (cookieProblem) throw new Error(cookieProblem)
+    const detail = lastUsefulLine(stderr) || lastUsefulLine(stdout) || `yt-dlp exited with ${code}`
+    throw new Error(normalizeYtDlpError(detail, pageUrl))
+  }
+
+  let parsed: unknown = null
+  for (const line of stdout.split(/\r?\n/).map((value) => value.trim()).filter(Boolean).reverse()) {
+    try {
+      parsed = JSON.parse(line)
+      break
+    } catch {
+      // Keep looking - an update notice can share the stream.
+    }
+  }
+
+  const listing = parseFlatPlaylist(parsed)
+  if (listing.entries.length === 0) {
+    throw new Error('That link lists no videos Draco can download')
+  }
+  log.info(`playlist ${listing.title}: ${listing.entries.length} entries`)
+  return listing
+}
+
 export async function resolveMediaPage(
   pageUrl: string,
   headers: RequestHeaders | undefined
 ): Promise<YouTubeResolution> {
   if (isSunoUrl(pageUrl)) return resolveSuno(pageUrl, headers)
+  // khinsider publishes each track in several formats behind its own page, so
+  // neither the extractor nor the generic HTML pass can see past the album
+  // page's track links. Its own reader knows where the files actually are.
+  if (isKhinsiderUrl(pageUrl)) return resolveKhinsider(pageUrl, headers)
   // Run both paths: an extractor understands embedded players, while the HTML
   // pass sees direct/lazy images and site-builder video attributes. Ordinary
   // pages often contain both, and returning only whichever completed first
@@ -545,11 +610,18 @@ async function usable(path: string): Promise<boolean> {
   }
 }
 
+/** A channel listing walks pages, so it gets longer than a single lookup. */
+const PLAYLIST_LOOKUP_TIMEOUT_MS = 180_000
+
 async function dumpJson(
   executable: string,
   url: string,
   headers?: RequestHeaders
 ): Promise<YtDlpInfo> {
+  // Borrowed from the browser when the user has chosen one. This is the only
+  // way a members-only or age-gated page resolves at all, and it applies to
+  // every extractor because every lookup comes through here.
+  const cookieBrowser = getSettings().cookiesFromBrowser
   const args = [
     '--dump-single-json',
     '--skip-download',
@@ -558,6 +630,7 @@ async function dumpJson(
     '--no-progress',
     '--remote-components',
     'ejs:github',
+    ...cookieArgs(cookieBrowser),
     ...electronNodeRuntimeArgs(),
     url
   ]
@@ -576,6 +649,12 @@ async function dumpJson(
     electronNodeRuntimeEnv()
   )
   if (code !== 0) {
+    // A cookie failure reads as an extractor failure unless it is named: the
+    // message otherwise says the video is unavailable, when what happened is
+    // that Chrome had the cookie database open.
+    const cookieProblem = explainCookieFailure(stderr, cookieBrowser)
+    if (cookieProblem) throw new Error(cookieProblem)
+
     const detail = lastUsefulLine(stderr) || lastUsefulLine(stdout) || `yt-dlp exited with ${code}`
     throw new Error(normalizeYtDlpError(detail, url))
   }

@@ -19,6 +19,7 @@ import type {
 } from '@shared/types'
 import { sanitizeFilename, filenameFromUrl } from './engine/naming.ts'
 import { toFolderName } from './store-sanitize-path.ts'
+import { isCookieBrowser } from './ytdlp-cookies.ts'
 import { safeDownloadDirectory } from './destination-path.ts'
 
 export const COLUMN_IDS: ColumnId[] = [
@@ -114,6 +115,18 @@ export function sanitizeSettings(input: unknown, base: Settings, defaultColumns:
   const accent = typeof source.accent === 'string' && /^#[0-9a-f]{6}$/i.test(source.accent)
     ? source.accent.toLowerCase()
     : base.accent
+  const uploadLimit = typeof source.uploadLimit === 'number' && Number.isFinite(source.uploadLimit) && source.uploadLimit > 0
+    ? source.uploadLimit
+    : null
+  // Null means "no target on this axis", which is a real choice - seed until
+  // stopped - so only a positive number counts as a target being set.
+  const seedRatioLimit = typeof source.seedRatioLimit === 'number' && Number.isFinite(source.seedRatioLimit) && source.seedRatioLimit > 0
+    ? Math.min(1000, source.seedRatioLimit)
+    : null
+  const seedTimeMinutes = typeof source.seedTimeMinutes === 'number' && Number.isFinite(source.seedTimeMinutes) && source.seedTimeMinutes > 0
+    ? Math.min(60 * 24 * 365, Math.floor(source.seedTimeMinutes))
+    : null
+  const scheduledLimit = sanitizeScheduledLimit(source.scheduledLimit)
   const proxyUrl = sanitizeProxyUrl(source.proxyUrl)
   const hostConnectionLimits = sanitizeHostConnectionLimits(source.hostConnectionLimits)
   const quotaBytes = typeof source.quotaBytes === 'number' && Number.isSafeInteger(source.quotaBytes) && source.quotaBytes > 0
@@ -136,6 +149,13 @@ export function sanitizeSettings(input: unknown, base: Settings, defaultColumns:
     adaptiveConnectionCeiling,
     minSplitSize: clamp(source.minSplitSize, 64 * 1024, 256 * 1024 * 1024, base.minSplitSize),
     speedLimit,
+    scheduledLimit,
+    // Checked rather than trusted: this value becomes a command-line argument.
+    cookiesFromBrowser: isCookieBrowser(source.cookiesFromBrowser) ? source.cookiesFromBrowser : 'none',
+    seedTorrents: source.seedTorrents !== false,
+    seedRatioLimit,
+    seedTimeMinutes,
+    uploadLimit,
     proxyUrl,
     hostConnectionLimits,
     quotaBytes,
@@ -161,6 +181,7 @@ export function sanitizeSettings(input: unknown, base: Settings, defaultColumns:
     takeoverExtensions: lowerList(source.takeoverExtensions),
     takeoverExcludeHosts: lowerList(source.takeoverExcludeHosts),
     watchClipboard: source.watchClipboard === true,
+    associateTorrents: source.associateTorrents !== false,
     showDropzone: source.showDropzone === true,
     showProgressWindow: source.showProgressWindow !== false,
     accent,
@@ -218,6 +239,21 @@ function mergeColumns(stored: unknown[], defaultsFactory: () => ColumnPref[]): C
     })
   }
   return defaults.map((column) => byId.get(column.id) ?? column)
+}
+
+/**
+ * A time-of-day cap is three values that only mean anything together, so a
+ * malformed one is dropped whole rather than half-kept.
+ */
+function sanitizeScheduledLimit(input: unknown): Settings['scheduledLimit'] {
+  if (!isRecord(input)) return null
+  const startTime = validTime(input.startTime)
+  const stopTime = validTime(input.stopTime)
+  const bytesPerSecond = typeof input.bytesPerSecond === 'number' && Number.isFinite(input.bytesPerSecond)
+    ? Math.floor(input.bytesPerSecond)
+    : 0
+  if (!startTime || !stopTime || bytesPerSecond <= 0) return null
+  return { startTime, stopTime, bytesPerSecond }
 }
 
 export function sanitizeCategories(input: unknown, fallback: () => Category[]): Category[] {
@@ -294,6 +330,9 @@ export function sanitizeTasks(input: unknown, defaultDir: string): DownloadTask[
       manualPause: raw.manualPause === true,
       kind,
       size,
+      // Survives a restart so a batch added yesterday still shows its total
+      // before anything in it has been probed again.
+      expectedSize: safeNonNegativeInt(raw.expectedSize) ?? undefined,
       received,
       status,
       resumable: raw.resumable === true,
@@ -402,6 +441,9 @@ export function sanitizeQueues(input: unknown): Queue[] {
       stopTime: validTime(raw.stopTime),
       days,
       maxConcurrent: clamp(raw.maxConcurrent, 1, 20, 1),
+      speedLimit: typeof raw.speedLimit === 'number' && Number.isFinite(raw.speedLimit) && raw.speedLimit > 0
+        ? Math.floor(raw.speedLimit)
+        : null,
       retryLimit: clamp(raw.retryLimit, 0, 20, 3),
       retryDelaySeconds: clamp(raw.retryDelaySeconds, 0, 86_400, 30),
       onComplete: QUEUE_ACTIONS.includes(raw.onComplete as QueueCompletionAction) ? raw.onComplete as QueueCompletionAction : 'none',

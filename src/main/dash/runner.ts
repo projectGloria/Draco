@@ -28,6 +28,7 @@ export class MpdRunner implements Runner {
   private samples: Array<{ t: number; received: number }> = []
   private durationSeconds: number | null = null
   private mediaSeconds = 0
+  private lastProgressAt = 0
 
   constructor(task: DownloadTask, context: RunnerContext) {
     this.task = task
@@ -102,6 +103,14 @@ export class MpdRunner implements Runner {
       const rate = this.mediaSeconds / Math.max(0.25, (now - (this.task.startedAt ?? now)) / 1000)
       this.task.eta = rate > 0 ? Math.max(0, Math.round((this.durationSeconds - this.mediaSeconds) / rate)) : null
     }
+
+    if (this.task.status === 'downloading' && this.lastProgressAt > 0 && now - this.lastProgressAt > 5000) {
+      if (this.task.detail === 'Downloading MPEG-DASH media…') {
+        this.task.detail = 'Streaming MPEG-DASH media (engine active)…'
+      }
+    } else if (this.task.status === 'downloading' && this.task.detail === 'Streaming MPEG-DASH media (engine active)…') {
+      this.task.detail = 'Downloading MPEG-DASH media…'
+    }
   }
 
   async resetForRestart(): Promise<boolean> {
@@ -147,12 +156,15 @@ export class MpdRunner implements Runner {
     this.task.status = 'downloading'
     this.task.detail = 'Downloading MPEG-DASH media…'
     this.task.startedAt = this.task.startedAt ?? Date.now()
+    this.lastProgressAt = Date.now()
     this.task.connections = 1
     this.context.onUpdate(this.task)
 
     await this.runFfmpeg(ffmpegPath, this.task.finalUrl, this.outputPath)
     if (this.controller.signal.aborted) throw new Error('Cancelled')
 
+    const wouldBeTarget = join(this.task.dir, this.task.filename)
+    await discardReservedPath(wouldBeTarget)
     const targetPath = await uniquePath(this.task.dir, this.task.filename)
     this.reservedTarget = targetPath
     try {
@@ -228,8 +240,14 @@ export class MpdRunner implements Runner {
     if (separator < 1) return
     const key = line.slice(0, separator)
     const value = line.slice(separator + 1)
-    if (key === 'total_size' && /^\d+$/.test(value)) this.task.received = Number(value)
-    if (key === 'out_time_us' && /^\d+$/.test(value)) this.mediaSeconds = Number(value) / 1_000_000
+    if (key === 'total_size' && /^\d+$/.test(value)) {
+      this.task.received = Number(value)
+      this.lastProgressAt = Date.now()
+    }
+    if (key === 'out_time_us' && /^\d+$/.test(value)) {
+      this.mediaSeconds = Number(value) / 1_000_000
+      this.lastProgressAt = Date.now()
+    }
     // Not broadcast from here: tick() already reads task.received on the
     // manager's shared ticker, so the figure reaches the UI through the 4 Hz
     // progress feed without a full task-list emit twice a second.

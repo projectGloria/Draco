@@ -37,16 +37,24 @@ export async function downloadSubtitles(
       const declared = Number(response.headers.get('content-length') ?? 0)
       if (declared > MAX_SUBTITLE_BYTES) throw new Error('caption file is larger than 20 MB')
 
+      const reader = response.body.getReader()
       const chunks: Buffer[] = []
       let total = 0
-      for await (const raw of response.body as unknown as AsyncIterable<Uint8Array>) {
-        const chunk = Buffer.from(raw)
-        total += chunk.length
-        if (total > MAX_SUBTITLE_BYTES) throw new Error('caption file is larger than 20 MB')
-        // Passed through, so a low speed limit cannot leave this stuck on
-        // "Saving subtitles" with no way to interrupt it.
-        await limiter.consume(chunk.length, signal)
-        chunks.push(chunk)
+      try {
+        for (;;) {
+          if (signal?.aborted) break
+          const { done, value } = await reader.read()
+          if (done) break
+          const chunk = Buffer.from(value)
+          total += chunk.length
+          if (total > MAX_SUBTITLE_BYTES) throw new Error('caption file is larger than 20 MB')
+          // Passed through, so a low speed limit cannot leave this stuck on
+          // "Saving subtitles" with no way to interrupt it.
+          await limiter.consume(chunk.length, signal)
+          chunks.push(chunk)
+        }
+      } finally {
+        reader.releaseLock()
       }
 
       const target = await uniquePath(task.dir, subtitleFilename(task.filename, track))

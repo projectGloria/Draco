@@ -1,6 +1,7 @@
 import type { FileHandle } from 'node:fs/promises'
 import { request } from 'undici'
 import type { Segment } from '../../shared/types.ts'
+import type { HttpAuthenticator } from './auth.ts'
 import { getDispatcher } from './http.ts'
 import { QuotaExceededError, type RateLimiter } from './limiter.ts'
 import { logger } from '../log.ts'
@@ -97,6 +98,12 @@ export interface SegmentContext {
   writeBufferBytes: number
   /** Called after every write so the task can update speed and journal state. */
   onBytes(count: number): void
+  /**
+   * Shared with every other connection on this task, so the first one to be
+   * challenged teaches all of them - eight connections should not each have to
+   * be told "no" by the server before they say who they are.
+   */
+  auth?: HttpAuthenticator
 }
 
 export async function runSegment(seg: Segment, ctx: SegmentContext): Promise<void> {
@@ -151,12 +158,28 @@ async function attemptSegment(seg: Segment, ctx: SegmentContext): Promise<void> 
   const requestedEnd = seg.end
   const range = openEnded ? `bytes=${requestedStart}-` : `bytes=${requestedStart}-${requestedEnd}`
 
-  const res = await request(ctx.url, {
-    method: 'GET',
-    headers: { ...ctx.headers, range },
-    dispatcher: getDispatcher(ctx.timeoutMs),
-    signal: ctx.signal
-  })
+  const send = async (): Promise<Awaited<ReturnType<typeof request>>> => {
+    // Sent up front once the task has been challenged even once, so only the
+    // very first request of a protected download pays for a round trip.
+    const authorization = ctx.auth?.headerFor(ctx.url, 'GET')
+    return request(ctx.url, {
+      method: 'GET',
+      headers: { ...ctx.headers, ...(authorization ? { authorization } : {}), range },
+      dispatcher: getDispatcher(ctx.timeoutMs),
+      signal: ctx.signal
+    })
+  }
+
+  let res = await send()
+
+  // A 401 that names a challenge is a server saying who it wants to hear from,
+  // not a signed URL that expired. `challenged` answers false when there is no
+  // password for it, or when this exact nonce has already been refused - so a
+  // wrong password fails once rather than being retried until the account locks.
+  if (res.statusCode === 401 && ctx.auth?.challenged(ctx.url, res.headers['www-authenticate'])) {
+    await res.body.dump().catch(() => {})
+    res = await send()
+  }
 
   // A non-resumable server is allowed to return the complete file for the
   // initial single-connection request. What is unsafe is a 200 that ignores a

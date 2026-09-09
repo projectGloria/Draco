@@ -13,14 +13,34 @@ import SiteGrabberDialog from './components/SiteGrabberDialog'
 import Sidebar from './components/Sidebar'
 import StatusBar from './components/StatusBar'
 import TaskDetailDialog from './components/TaskDetailDialog'
+import GroupDetailDialog from './components/GroupDetailDialog'
 import TitleBar from './components/TitleBar'
 import Toasts from './components/Toasts'
 import ToolUpdateDialog from './components/ToolUpdateDialog'
 import Toolbar, { type ToolbarActions } from './components/Toolbar'
 import Dropzone from './components/Dropzone'
-import { resolvedLanguage } from './i18n'
-import { looksLikeTorrentInput, looksLikeYouTubeInput } from './lib/format'
+import PlaylistDialog from './components/PlaylistDialog'
+import { resolvedLanguage, useT } from './i18n'
+import { looksLikePlaylistInput, looksLikeTorrentInput, looksLikeYouTubeInput } from './lib/format'
 import type { ClipboardItem, ToolStatus } from '@shared/types'
+
+/**
+ * Drag types worth lighting the window up for. `Files` is what Explorer offers
+ * for a dropped `.torrent`; the two text flavours are what a browser offers for
+ * a dragged link.
+ */
+const DROPPABLE_TYPES = new Set(['Files', 'text/uri-list', 'text/plain'])
+
+/**
+ * The on-disk paths behind a drop. A `File` no longer carries its own path, so
+ * the preload has to ask Chromium for each one; anything it will not name - a
+ * dragged selection from a web page, say - drops out here.
+ */
+function droppedPaths(transfer: DataTransfer): string[] {
+  return [...transfer.files]
+    .map((file) => window.api.pathForDroppedFile(file))
+    .filter((path) => path.length > 0)
+}
 
 export default function App(): React.ReactElement {
   if (window.location.hash === '#dropzone') {
@@ -39,14 +59,25 @@ export default function App(): React.ReactElement {
   const [search, setSearch] = useState('')
   const [addOpen, setAddOpen] = useState(false)
   const [saveAsUrl, setSaveAsUrl] = useState<string | null>(null)
+  /** A playlist or channel link, which stands for many downloads rather than one. */
+  const [playlistUrl, setPlaylistUrl] = useState<string | null>(null)
+  /**
+   * Torrents Windows asked Draco to open, beyond the one on screen. Selecting
+   * several `.torrent` files and pressing Enter launches one process per file,
+   * and a dialog per file all at once would be unusable - so they queue, and
+   * the next opens as the current one is closed.
+   */
+  const [openQueue, setOpenQueue] = useState<string[]>([])
   const [clipboardDownload, setClipboardDownload] = useState<ClipboardItem | null>(null)
   const [detailId, setDetailId] = useState<string | null>(null)
+  const [groupDetailId, setGroupDetailId] = useState<string | null>(null)
   const [schedulerOpen, setSchedulerOpen] = useState(false)
   const [siteGrabberOpen, setSiteGrabberOpen] = useState(false)
   const [optionsOpen, setOptionsOpen] = useState(false)
   const [confirm, setConfirm] = useState<ConfirmRequest | null>(null)
   const [toolUpdates, setToolUpdates] = useState<ToolStatus[] | null>(null)
   const [draggingUrl, setDraggingUrl] = useState(false)
+  const t = useT()
 
   useEffect(() => {
     void init()
@@ -62,9 +93,26 @@ export default function App(): React.ReactElement {
     // user decides.
     const offTools = window.api.onToolUpdates((tools) => setToolUpdates(tools))
 
+    // A double-clicked `.torrent` or a clicked magnet link. Main holds them
+    // until they are drained, so one that arrived during startup - the whole
+    // reason this window exists - is still here by the time it can be shown.
+    const drainShellOpens = (): void => {
+      void window.api
+        .takePendingOpens()
+        .then((urls) => {
+          if (urls.length === 0) return
+          setSaveAsUrl((current) => current ?? urls[0])
+          setOpenQueue((queue) => [...queue, ...urls.slice(1)])
+        })
+        .catch((err) => reportError('Could not open that torrent', err))
+    }
+    drainShellOpens()
+    const offShellOpen = window.api.onShellOpen(drainShellOpens)
+
     return () => {
       offToast()
       offTools()
+      offShellOpen()
     }
   }, [init])
 
@@ -200,7 +248,7 @@ export default function App(): React.ReactElement {
     <div
       className="app-bg h-full flex flex-col overflow-hidden"
       onDragEnter={(event) => {
-        if ([...event.dataTransfer.types].some((type) => type === 'text/uri-list' || type === 'text/plain')) {
+        if ([...event.dataTransfer.types].some((type) => DROPPABLE_TYPES.has(type))) {
           event.preventDefault()
           setDraggingUrl(true)
         }
@@ -215,6 +263,19 @@ export default function App(): React.ReactElement {
       onDrop={(event) => {
         event.preventDefault()
         setDraggingUrl(false)
+        // Files first: a drop carrying real files never also means a link, and
+        // Chromium puts a `text/plain` copy of the file name next to them.
+        const paths = droppedPaths(event.dataTransfer)
+        if (paths.length > 0) {
+          void window.api
+            .openTorrentFiles(paths)
+            .then((opened) => {
+              if (opened === 0) toast('info', 'Drop a .torrent file, or an HTTP link')
+            })
+            .catch((error) => reportError('Could not open the dropped files', error))
+          return
+        }
+
         const raw = event.dataTransfer.getData('text/uri-list') || event.dataTransfer.getData('text/plain')
         const urls = [...new Set(raw.split(/[\r\n\s]+/).filter((value) => /^https?:\/\//i.test(value)))]
         if (urls.length === 1) setSaveAsUrl(urls[0])
@@ -222,7 +283,7 @@ export default function App(): React.ReactElement {
           void window.api.addDownloads(urls.map((url) => ({ url })))
             .then(() => toast('success', `${urls.length} dropped links added`))
             .catch((error) => reportError('Could not add dropped links', error))
-        } else toast('info', 'Drop an HTTP or HTTPS link')
+        } else toast('info', 'Drop a .torrent file, or an HTTP link')
       }}
     >
       <span
@@ -249,7 +310,12 @@ export default function App(): React.ReactElement {
               }}
             />
           ) : (
-            <DownloadTable rows={rows} onDetails={setDetailId} onDelete={requestDelete} />
+            <DownloadTable
+              rows={rows}
+              onDetails={setDetailId}
+              onGroupDetails={setGroupDetailId}
+              onDelete={requestDelete}
+            />
           )}
         </main>
       </div>
@@ -263,13 +329,24 @@ export default function App(): React.ReactElement {
             // One URL gets the Save As step; a pasted list would turn that into
             // a dialog per line, so those are filed by category and started.
             if (urls.length === 1) {
-              setSaveAsUrl(urls[0])
+              // A playlist link is not one download and must not go through a
+              // dialog that would silently resolve it to a single video.
+              if (looksLikePlaylistInput(urls[0])) setPlaylistUrl(urls[0])
+              else setSaveAsUrl(urls[0])
               return
             }
             void window.api.addDownloads(urls.map((url) => ({ url })))
               .then(() => toast('success', `${urls.length} downloads added`))
               .catch((err) => reportError('Could not add the downloads', err))
           }}
+        />
+      )}
+
+      {playlistUrl && (
+        <PlaylistDialog
+          url={playlistUrl}
+          onClose={() => setPlaylistUrl(null)}
+          onSingleVideo={(single) => setSaveAsUrl(single)}
         />
       )}
 
@@ -282,12 +359,17 @@ export default function App(): React.ReactElement {
             setClipboardDownload(null)
           } : undefined}
           onClose={() => {
-            setSaveAsUrl(null)
             setClipboardDownload(null)
+            // Whatever the shell handed us next, rather than nothing.
+            setSaveAsUrl(openQueue[0] ?? null)
+            setOpenQueue((queue) => queue.slice(1))
           }}
         />
       )}
       {detailId && <TaskDetailDialog id={detailId} onClose={() => setDetailId(null)} />}
+      {groupDetailId && (
+        <GroupDetailDialog groupId={groupDetailId} onClose={() => setGroupDetailId(null)} />
+      )}
       {schedulerOpen && <SchedulerDialog onClose={() => setSchedulerOpen(false)} />}
       {siteGrabberOpen && <SiteGrabberDialog onClose={() => setSiteGrabberOpen(false)} />}
       {optionsOpen && (
@@ -311,8 +393,8 @@ export default function App(): React.ReactElement {
       {draggingUrl && (
         <div className="pointer-events-none fixed inset-3 z-[95] grid place-items-center rounded-2xl border-2 border-dashed border-[var(--accent)] bg-black/70 backdrop-blur-sm">
           <div className="text-center">
-            <div className="text-lg font-semibold text-ink">Drop links to download</div>
-            <div className="text-xs text-muted mt-1">HTTP and HTTPS addresses are accepted</div>
+            <div className="text-lg font-semibold text-ink">{t('dropTitle')}</div>
+            <div className="text-xs text-muted mt-1">{t('dropHint')}</div>
           </div>
         </div>
       )}

@@ -40,17 +40,23 @@ export class RateLimiter {
   private quotaUsed = 0
   private quotaStartedAt = Date.now()
   /**
-   * A limiter whose quota is charged alongside this one's.
+   * The limiter this one spends *through*.
    *
-   * Cat mode needs its own rate cap - a background trickle, not the user's full
-   * speed - but the transfer budget belongs to the app, not to one limiter. A
-   * private limiter with no quota of its own would spend the budget without
-   * ever counting against it.
+   * A child exists to be slower than the app in some particular way - cat
+   * mode's background trickle, a queue the user capped - and everything it
+   * spends is also spent by the app. So the parent's rate and the parent's
+   * transfer budget both apply on top of this one's, and neither can be
+   * escaped by having a private limiter.
+   *
+   * It used to charge only the parent's *quota*. That left a hole exactly where
+   * per-queue limits needed to be honest: three capped queues could sail past
+   * the app-wide speed limit between them, because nothing was asking the
+   * parent for permission to move the bytes.
    */
-  private readonly quotaParent: RateLimiter | null
+  private readonly parent: RateLimiter | null
 
-  constructor(bytesPerSecond: number | null = null, quotaParent: RateLimiter | null = null) {
-    this.quotaParent = quotaParent
+  constructor(bytesPerSecond: number | null = null, parent: RateLimiter | null = null) {
+    this.parent = parent
     this.setLimit(bytesPerSecond)
   }
 
@@ -117,6 +123,13 @@ export class RateLimiter {
     if (bytes <= 0) return
     if (signal?.aborted) throw new Error('aborted')
 
+    // The parent goes first, and is asked for the whole thing: its rate and its
+    // quota are the app-wide budget, and a child that stayed inside its own cap
+    // must still not be able to spend past the app's. A quota it cannot pay
+    // throws from here, before this limiter charges itself for bytes that were
+    // never allowed to move.
+    if (this.parent) await this.parent.consume(bytes, signal)
+
     if (this.bytesPerSecond !== Infinity) {
       this.refill()
       this.tokens -= bytes
@@ -128,10 +141,6 @@ export class RateLimiter {
       }
     }
 
-    // The parent is charged first and unconditionally: its budget is the shared
-    // one, and a child that stopped short of its own limit must still not be
-    // able to spend past the app's.
-    this.quotaParent?.chargeQuota(bytes)
     this.chargeQuota(bytes)
   }
 

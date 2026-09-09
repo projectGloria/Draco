@@ -1,4 +1,29 @@
 /**
+ * Which format a task is actually fetching.
+ *
+ * `videoFormatId` names the *primary* stream, not necessarily the video one:
+ * which stream that is depends on the role. `DashRunner` splits a merged
+ * download into two children that share one `youtube` block, so the audio half
+ * has to resolve `audioFormatId`; an audio-only download (a music variant)
+ * carries its single format in `videoFormatId` with no `audioFormatId` beside
+ * it, which is why the fallback matters.
+ *
+ * Reading `videoFormatId` unconditionally made the audio half of every merged
+ * download resolve the *video* itag. Both halves then fetched the same stream:
+ * the task reported twice the video's size, and the mux failed because the file
+ * handed to ffmpeg as audio held no audio track.
+ */
+export function youtubeFormatId(youtube: {
+  videoFormatId: string
+  audioFormatId?: string | null
+  role?: 'video' | 'audio'
+}): string {
+  return youtube.role === 'audio'
+    ? youtube.audioFormatId || youtube.videoFormatId
+    : youtube.videoFormatId
+}
+
+/**
  * YouTube media handed over by the extension is accepted only from Google's
  * media CDN and only when its itag matches the format the page described.
  */
