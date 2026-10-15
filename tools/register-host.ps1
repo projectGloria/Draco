@@ -130,7 +130,8 @@ $firefoxManifestJson = @{
 [System.IO.File]::WriteAllText($FirefoxManifestPath, $firefoxManifestJson, $utf8NoBom)
 
 # The host reads this to know what to launch when the pipe is not answering.
-$hostConfigJson = @{ appPath = $AppExe; appArgs = @() } | ConvertTo-Json
+$appArguments = if ([System.IO.Path]::GetFileName($AppExe) -ieq 'electron.exe') { @($RepoRoot) } else { @() }
+$hostConfigJson = @{ appPath = $AppExe; appArgs = @($appArguments) } | ConvertTo-Json
 [System.IO.File]::WriteAllText((Join-Path $DataDir 'host-config.json'), $hostConfigJson, $utf8NoBom)
 
 foreach ($entry in $RegistryKeys.GetEnumerator()) {

@@ -85,6 +85,19 @@ describe('journal storage', () => {
     strictEqual(await readJournal(future), null, 'a journal from another build is not ours to trust')
   })
 
+  it('rejects parseable journals with invalid metadata or segment shapes', async () => {
+    const path = join(dir, 'malformed.json')
+    for (const changes of [
+      { segments: [null] }, { segments: [{}] }, { size: '1000' },
+      { size: -1 }, { finalUrl: null }, { etag: {} },
+      { segments: [{ start: 0, end: 999, position: 2000 }] },
+      { segments: [{ start: 0, end: 400, position: 100 }] }
+    ]) {
+      await writeFile(path, JSON.stringify({ ...journal(), ...changes }))
+      strictEqual(await readJournal(path), null)
+    }
+  })
+
   it('sweeps temp files a crash left under names nobody knows', async () => {
     const path = join(dir, 'swept.dracodl.json')
     await writeJournal(path, journal())
@@ -121,28 +134,23 @@ describe('journalMatches', () => {
 
   it('refuses weak validators - equivalent is not byte-identical', () => {
     strictEqual(journalMatches(journal({ etag: 'W/"abc"' }), probe({ etag: 'W/"abc"' })), false)
+    strictEqual(journalMatches(journal({ etag: 'abc' }), probe({ etag: 'abc' })), false)
   })
 
-  it('refuses a moved redirect target when no strong ETag settles it', () => {
-    const without = journal({ etag: null })
-    strictEqual(journalMatches(without, probe({ etag: null, finalUrl: 'https://other.test/f.bin' })), false)
-    strictEqual(
-      journalMatches(without, probe({ etag: null, finalUrl: 'https://other.test/f.bin' }), { allowFinalUrlChange: true }),
-      true,
-      'YouTube signs a fresh CDN URL every time; its identity is held elsewhere'
-    )
+  it('refuses a moved redirect target even when the ETag text matches', () => {
+    strictEqual(journalMatches(journal(), probe({ finalUrl: 'https://other.test/f.bin' })), false)
   })
 
-  it('falls back to Last-Modified, then to size alone', () => {
-    strictEqual(journalMatches(journal({ etag: null }), probe({ etag: null })), true)
+  it('does not trust Last-Modified or size alone for byte identity', () => {
+    strictEqual(journalMatches(journal({ etag: null }), probe({ etag: null })), false)
     strictEqual(
       journalMatches(journal({ etag: null }), probe({ etag: null, lastModified: 'Thu, 22 Oct 2015 07:28:00 GMT' })),
       false
     )
     strictEqual(
       journalMatches(journal({ etag: null, lastModified: null }), probe({ etag: null, lastModified: null })),
-      true,
-      'size alone is weak, but refusing it would make resume useless on much of the web'
+      false,
+      'same-size replacements must not be spliced into a partial file'
     )
     strictEqual(
       journalMatches(
@@ -196,5 +204,19 @@ describe('journalSegmentsValid', () => {
   it('accepts an open-ended range only when the length is unknown', () => {
     strictEqual(valid([{ start: 0, end: -1, position: 10, active: false }], null), true)
     strictEqual(valid([{ start: 0, end: -1, position: 10, active: false }]), false, 'a known length needs a real tail')
+  })
+
+  it('correctly persists and reads itag-specific DASH half journals', async () => {
+    const vPath = join(dir, 'video.mp4.v.137.mp4.dracodl.json')
+    const aPath = join(dir, 'video.mp4.a.140.m4a.dracodl.json')
+    await writeJournal(vPath, journal({ filename: 'video.mp4.v.137.mp4', size: 50_000_000,
+      segments: [{ start: 0, end: 49_999_999, position: 400, active: false }] }))
+    await writeJournal(aPath, journal({ filename: 'video.mp4.a.140.m4a', size: 5_000_000,
+      segments: [{ start: 0, end: 4_999_999, position: 400, active: false }] }))
+
+    const vRead = await readJournal(vPath)
+    const aRead = await readJournal(aPath)
+    strictEqual(vRead?.size, 50_000_000)
+    strictEqual(aRead?.size, 5_000_000)
   })
 })

@@ -101,7 +101,10 @@ export function chooseChallenge(challenges: AuthChallenge[]): AuthChallenge | nu
 
   let best: AuthChallenge | null = null
   for (const challenge of challenges) {
-    if (challenge.scheme === 'digest' && !challenge.nonce) continue
+    if (challenge.scheme === 'digest') {
+      if (!challenge.nonce || !/^(MD5|SHA-?256)(-sess)?$/i.test(challenge.algorithm ?? 'MD5')) continue
+      if (challenge.qop && !challenge.qop.split(',').some((value) => value.trim().toLowerCase() === 'auth')) continue
+    }
     if (!best || score(challenge) > score(best)) best = challenge
   }
   return best
@@ -174,6 +177,7 @@ export function digestAuthHeader(
   ]
   if (challenge.algorithm) parts.push(`algorithm=${challenge.algorithm}`)
   if (qop) parts.push(`qop=auth`, `nc=${nc}`, `cnonce="${escapeQuoted(options.cnonce)}"`)
+  else if (/-sess$/i.test(challenge.algorithm ?? '')) parts.push(`cnonce="${escapeQuoted(options.cnonce)}"`)
   if (challenge.opaque) parts.push(`opaque="${escapeQuoted(challenge.opaque)}"`)
 
   return `Digest ${parts.join(', ')}`
@@ -197,6 +201,7 @@ function escapeQuoted(value: string): string {
 export class HttpAuthenticator {
   private challenge: AuthChallenge | null = null
   private credentials: Credentials | null = null
+  private origin: string | null = null
   private nonceCount = 0
   /**
    * The realm of the last challenge seen, whether or not it could be answered.
@@ -228,6 +233,8 @@ export class HttpAuthenticator {
   challenged(url: string, header: string | string[] | undefined): boolean {
     const challenge = chooseChallenge(parseChallenges(header))
     if (!challenge) return false
+    let origin: string
+    try { origin = new URL(url).origin } catch { return false }
 
     // Basic sends the password in plain text. Over http:// that hands it to
     // anyone on the path, so it is refused rather than quietly leaked.
@@ -236,6 +243,7 @@ export class HttpAuthenticator {
     this.observedRealm = challenge.realm || null
 
     const sameNonce =
+      this.origin === origin &&
       this.challenge?.scheme === challenge.scheme &&
       this.challenge?.realm === challenge.realm &&
       this.challenge?.nonce === challenge.nonce
@@ -245,11 +253,13 @@ export class HttpAuthenticator {
     // request to compute again, not a rejection.
     if (sameNonce && this.nonceCount > 0 && !challenge.stale) return false
 
-    const credentials = this.credentials ?? this.resolve(url, challenge.realm)
+    const credentials = this.origin === origin && this.challenge?.realm === challenge.realm && this.credentials
+      ? this.credentials : this.resolve(url, challenge.realm)
     if (!credentials) return false
 
     this.challenge = challenge
     this.credentials = credentials
+    this.origin = origin
     if (!sameNonce) this.nonceCount = 0
     return true
   }
@@ -257,6 +267,9 @@ export class HttpAuthenticator {
   /** The `Authorization` value for this request, or null when there is none. */
   headerFor(url: string, method: string): string | null {
     if (!this.challenge || !this.credentials) return null
+    try {
+      if (new URL(url).origin !== this.origin) return null
+    } catch { return null }
 
     if (this.challenge.scheme === 'basic') {
       this.nonceCount++

@@ -7,10 +7,19 @@ import { CloseGlyph } from './Icons'
  * download table.
  */
 
+/**
+ * The dialogs currently mounted, innermost last. Escape belongs to the
+ * topmost one only: `document`-level listeners all fire for the same event,
+ * so without this a single press closed a dialog *and* the one stacked on
+ * top of it, throwing away whatever the lower dialog had unsaved.
+ */
+const openDialogs: Array<Record<string, never>> = []
+
 export default function Dialog({
   title,
   subtitle,
   width = 520,
+  height,
   onClose,
   showClose = true,
   autoFocus = true,
@@ -20,6 +29,7 @@ export default function Dialog({
   title: string
   subtitle?: string
   width?: number
+  height?: number
   onClose(): void
   showClose?: boolean
   autoFocus?: boolean
@@ -27,19 +37,48 @@ export default function Dialog({
   children: React.ReactNode
 }): React.ReactElement {
   const card = useRef<HTMLDivElement>(null)
+  const token = useRef<Record<string, never>>({}).current
+  const onCloseRef = useRef(onClose)
+  onCloseRef.current = onClose
 
   useEffect(() => {
+    openDialogs.push(token)
     const onKey = (event: KeyboardEvent): void => {
+      if (openDialogs[openDialogs.length - 1] !== token) return
       if (event.key === 'Escape') {
         event.stopPropagation()
-        onClose()
+        onCloseRef.current()
+        return
+      }
+      if (event.key !== 'Tab') return
+      const controls = [...(card.current?.querySelectorAll<HTMLElement>(
+        'a[href], button:not(:disabled), input:not(:disabled):not([type="hidden"]), select:not(:disabled), textarea:not(:disabled), [tabindex]:not([tabindex="-1"])'
+      ) ?? [])].filter((element) => element.getClientRects().length > 0)
+      if (controls.length === 0) {
+        event.preventDefault()
+        card.current?.focus()
+        return
+      }
+      const first = controls[0]
+      const last = controls[controls.length - 1]
+      if (event.shiftKey && (document.activeElement === first || !card.current?.contains(document.activeElement))) {
+        event.preventDefault()
+        last.focus()
+      } else if (!event.shiftKey && (document.activeElement === last || !card.current?.contains(document.activeElement))) {
+        event.preventDefault()
+        first.focus()
       }
     }
     document.addEventListener('keydown', onKey)
-    return () => document.removeEventListener('keydown', onKey)
-  }, [onClose])
+    return () => {
+      const at = openDialogs.indexOf(token)
+      if (at >= 0) openDialogs.splice(at, 1)
+      document.removeEventListener('keydown', onKey)
+    }
+  }, [token])
 
   useEffect(() => {
+    const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null
     // The first field, or the card itself when the dialog is read-only.
     if (autoFocus) {
       const focusable = card.current?.querySelector<HTMLElement>(
@@ -48,6 +87,9 @@ export default function Dialog({
       focusable?.focus()
     } else {
       card.current?.focus()
+    }
+    return () => {
+      if (previousFocus?.isConnected) previousFocus.focus()
     }
   }, [autoFocus])
 
@@ -68,7 +110,7 @@ export default function Dialog({
         aria-label={title}
         className="pop-in surface-card rounded-card w-full max-h-full flex flex-col
                    shadow-[0_28px_80px_rgba(0,0,0,0.6)] overflow-hidden outline-none"
-        style={{ maxWidth: width }}
+        style={{ maxWidth: width, height: height ? `min(${height}px, calc(100vh - 48px))` : undefined }}
       >
         <div className="flex items-start gap-3 px-5 py-3.5 border-b border-line shrink-0">
           <div className="min-w-0 flex-1">
@@ -91,7 +133,7 @@ export default function Dialog({
           )}
         </div>
 
-        <div className="px-5 py-4 max-[600px]:px-3 overflow-y-auto min-h-0">{children}</div>
+        <div className="px-5 py-4 max-[600px]:px-3 overflow-y-auto min-h-0 flex-1">{children}</div>
 
         {footer && (
           <div className="px-5 py-3.5 max-[600px]:px-3 border-t border-line flex flex-wrap items-center justify-end gap-2 shrink-0">

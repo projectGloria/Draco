@@ -1,5 +1,6 @@
 import type { MediaVariant, RequestHeaders } from '../../shared/types.ts'
-import { getDispatcher } from '../engine/http.ts'
+import { fetchGuarded } from '../fetch-guard.ts'
+import { readResponseText } from '../response-limit.ts'
 import { buildHeaders } from '../engine/probe.ts'
 
 export interface MpdSummary {
@@ -82,22 +83,26 @@ export function inspectMpd(xml: string): MpdSummary {
 export async function resolveMpd(
   url: string,
   headers: RequestHeaders,
-  timeoutMs = 30_000
+  timeoutMs = 30_000,
+  signal?: AbortSignal
 ): Promise<{ summary: MpdSummary; variants: MediaVariant[] }> {
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), timeoutMs)
+  const requestSignal = signal ? AbortSignal.any([signal, controller.signal]) : controller.signal
 
   try {
-    const response = await fetch(url, {
+    const response = await fetchGuarded(url, {
       headers: buildHeaders(headers),
-      redirect: 'follow',
-      signal: controller.signal,
-      dispatcher: getDispatcher(timeoutMs)
-    } as RequestInit)
-    if (!response.ok) throw new Error(`Could not fetch DASH manifest (HTTP ${response.status})`)
-
-    const xml = await response.text()
-    if (xml.length > 10_000_000) throw new Error('The DASH manifest is unexpectedly large')
+      signal: requestSignal,
+      timeoutMs
+    })
+    let xml: string
+    try {
+      if (!response.ok) throw new Error(`Could not fetch DASH manifest (HTTP ${response.status})`)
+      xml = await readResponseText(response, 10_000_000)
+    } finally {
+      await response.body?.cancel().catch(() => {})
+    }
     const summary = inspectMpd(xml)
     if (summary.dynamic) throw new Error('Live MPEG-DASH streams are not supported yet')
 

@@ -1,6 +1,10 @@
 appId: com.nihil.draco
 productName: Draco
 copyright: Copyright © 2026
+beforePack: tools/check-bundle.cjs
+# Dependencies supply Node-API Windows prebuilds. The hook loads them in the
+# target Electron runtime before packaging, avoiding a Visual Studio rebuild.
+npmRebuild: false
 
 directories:
   output: dist
@@ -11,6 +15,13 @@ files:
   - package.json
 
 extraResources:
+  - from: resources/runtime
+    to: runtime
+  - from: extension-firefox
+    to: extension-firefox
+    filter:
+      - '**/*'
+      - '!key.pem'
   # The tray reads this at runtime, so it has to sit outside the asar.
   - from: resources/icon.ico
     to: icon.ico

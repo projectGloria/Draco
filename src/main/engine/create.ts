@@ -9,11 +9,14 @@ import { normalizeDownloadDirectory } from '../destination-path.ts'
  */
 export function createTask(input: {
   url: string
+  handoffId?: string
   sourceUrl?: string
+  thumbnailUrl?: string | null
   groupId?: string
   groupName?: string
   groupFolder?: string
   dir: string
+  dirLocked?: boolean
   filename?: string
   categoryId?: string | null
   queueId?: string | null
@@ -39,8 +42,10 @@ export function createTask(input: {
 
   return {
     id: randomUUID(),
+    handoffId: input.handoffId,
     url: input.url,
     sourceUrl: input.sourceUrl,
+    thumbnailUrl: input.thumbnailUrl,
     groupId: input.groupId,
     groupName: input.groupName,
     groupFolder: input.groupFolder,
@@ -53,6 +58,7 @@ export function createTask(input: {
     // should give way to whatever the server actually calls the file.
     filenameLocked: Boolean(input.filename),
     dir: normalizeDownloadDirectory(input.dir),
+    dirLocked: input.dirLocked === true,
     categoryId: input.categoryId ?? null,
     queueId: input.queueId ?? null,
     queueRetryCount: 0,
@@ -64,6 +70,7 @@ export function createTask(input: {
     expectedSize: positiveSize(input.expectedSize),
     received: 0,
     status: 'queued',
+    finalizationStage: null,
     resumable: false,
     singleConnectionFallback: false,
     segments: [],
@@ -79,6 +86,8 @@ export function createTask(input: {
     lastModified: null,
     headers: input.headers ?? {},
     subtitles: input.subtitles?.map((track) => ({ ...track })) ?? [],
+    subtitleFiles: [],
+    subtitleDigests: [],
     mimeType: null,
     description: input.description ?? '',
     expectedChecksum: input.expectedChecksum ?? undefined,
@@ -113,6 +122,26 @@ export interface ValidateUrlOptions {
 
 export function validateUrl(raw: string, options: ValidateUrlOptions = {}): string {
   let trimmed = raw.trim()
+
+  /*
+   * A pasted address with no scheme is a URL the user means, not a typo.
+   *
+   * `youtube.com/playlist?list=...` is what copying from an address bar
+   * frequently gives you, and it failed `new URL()` outright - so it never
+   * reached the playlist check and was reported as "not a valid URL".
+   *
+   * A path separator is required, so a bare `file.iso` still fails with a
+   * message about not being a URL rather than becoming a request to a host of
+   * that name. Nothing about the private-address check below is weakened:
+   * `192.168.1.1/admin` normalises and is then refused exactly as before.
+   */
+  if (
+    !/^[a-z][a-z0-9+.-]*:/i.test(trimmed) &&
+    /^[a-z0-9-]+(\.[a-z0-9-]+)+[:/?#]/i.test(trimmed)
+  ) {
+    trimmed = 'https://' + trimmed
+  }
+
   if (/^[0-9a-fA-F]{40}$/.test(trimmed)) {
     // A bare hash carries no tracker hints. DHT remains enabled, while these
     // public fallbacks make metadata discovery much less dependent on the

@@ -1,0 +1,9 @@
+  • electron-builder  version=26.17.0 os=10.0.26100
+  • loaded configuration  file=C:\Users\Nihil\Desktop\Github Repos\Draco\electron-builder.yml
+  • building        target=nsis file=dist\Draco-0.1.2-x64.exe archs=x64 oneClick=false perMachine=false
+  • no code signing certificate configured, signing is skipped  path=C:\Users\Nihil\AppData\Local\Temp\t-lqAwBa\elevate-staging-0\resources\elevate.exe
+  • no code signing certificate configured, signing is skipped  path=dist\Draco-0.1.2-x64.__uninstaller.exe
+  • no code signing certificate configured, signing is skipped  path=dist\Draco-0.1.2-x64.exe
+  • building block map  blockMapFile=dist\Draco-0.1.2-x64.exe.blockmap
+  • building        target=portable file=dist\Draco-0.1.2-portable.exe archs=x64
+  • no code signing certificate configured, signing is skipped  path=dist\Draco-0.1.2-portable.exe

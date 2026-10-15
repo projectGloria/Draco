@@ -21,10 +21,19 @@ const MAX_LOG_BYTES = 4 * 1024 * 1024
 /** Tracked rather than stat'ed per line; the file is only ours to append to. */
 let bytesWritten = -1
 
+/**
+ * Whether the log directory has been created since it was last set.
+ *
+ * `mkdir -p` ran before every single appended line, so every log write was two
+ * syscalls where one would do - on a promise chain that serialises all of them.
+ */
+let directoryReady = false
+
 /** Configured after Electron is ready; keeping this module Electron-free lets engine tests import it. */
 export function setLogDirectory(path: string): void {
   logDirectory = path
   bytesWritten = -1
+  directoryReady = false
 }
 
 /** Waits until all queued writes have reached disk. Primarily useful for shutdown and tests. */
@@ -44,7 +53,10 @@ function write(level: Level, scope: string, message: string): void {
   queue = queue
     .then(async () => {
       if (!logDirectory) return
-      await mkdir(logDirectory, { recursive: true })
+      if (!directoryReady) {
+        await mkdir(logDirectory, { recursive: true })
+        directoryReady = true
+      }
       const path = join(logDirectory, 'main.log')
 
       if (bytesWritten < 0) {

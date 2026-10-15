@@ -1,0 +1,18 @@
+  • electron-builder  version=26.17.0 os=10.0.26100
+  • loaded configuration  file=C:\Users\Nihil\Desktop\Github Repos\Draco\electron-builder.yml
+Native binary loaded: bufferutil/prebuilds/win32-x64/bufferutil.node
+Native binary loaded: utf-8-validate/prebuilds/win32-x64/utf-8-validate.node
+Native binary loaded: utp-native/prebuilds/win32-x64/node.napi.node
+Native binary loaded: fs-native-extensions/prebuilds/win32-x64/fs-native-extensions.node
+Native binary loaded: node-datachannel/build/Release/node_datachannel.node
+  • skipped dependencies rebuild  reason=npmRebuild is set to false
+  • packaging       platform=win32 arch=x64 electron=43.7.9 appOutDir=dist\win-unpacked
+  • downloaded      label=electron progress=100%
+  • downloaded electron zip extracted successfully  output=C:\Users\Nihil\Desktop\Github Repos\Draco\dist\win-unpacked
+  • searching for node modules  pm=npm searchDir=C:\Users\Nihil\Desktop\Github Repos\Draco
+  • duplicate dependency references  dependencies=["fetch-blob@3.2.0","cross-fetch-ponyfill@1.0.3","debug@4.4.3","debug@4.4.3","streamx@2.28.0","pump@3.0.4","once@1.4.0","pump@3.0.4","string_decoder@1.1.1","end-of-stream@1.4.5","string_decoder@1.1.1","bencode@4.0.1","debug@4.4.3","randombytes@2.1.0","k-bucket@5.1.0","chrome-dgram@3.0.6","chrome-net@3.3.4","randombytes@2.1.0","bencode@4.0.1","debug@4.4.3","streamx@2.28.0","lru@3.1.0","bencode@4.0.1","once@1.4.0","run-parallel@1.2.0","cross-fetch-ponyfill@1.0.3","streamx@2.28.0","streamx@2.28.0","bare-url@2.5.4","bare-url@2.5.4","run-parallel@1.2.0","cross-fetch-ponyfill@1.0.3","once@1.4.0","debug@4.4.3","parse-torrent@11.0.24","once@1.4.0","once@1.4.0","streamx@2.28.0","bittorrent-dht@11.0.12","chrome-dgram@3.0.6","debug@4.4.3","@thaunknown/simple-peer@10.1.2","debug@4.4.3","streamx@2.28.0","bencode@4.0.1","chrome-dgram@3.0.6","compact2string@1.4.1","cross-fetch-ponyfill@1.0.3","debug@4.4.3","lru@3.1.0","once@1.4.0","run-parallel@1.2.0","string2compact@2.0.2","bufferutil@4.1.0","utf-8-validate@6.0.6","debug@4.4.3","run-parallel@1.2.0","bencode@4.0.1","debug@4.4.3","bencode@4.0.1"]
+  • updating asar integrity executable resource  executablePath=dist\win-unpacked\Draco.exe
+  • no code signing certificate configured, signing is skipped  path=dist\win-unpacked\resources\runtime\yt-dlp.exe
+  • no code signing certificate configured, signing is skipped  path=dist\win-unpacked\resources\runtime\ffmpeg.exe
+  • no code signing certificate configured, signing is skipped  path=dist\win-unpacked\resources\runtime\ffprobe.exe
+  • no code signing certificate configured, signing is skipped  path=dist\win-unpacked\Draco.exe

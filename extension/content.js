@@ -149,7 +149,6 @@ addEventListener(
 
     const suggested = anchor.getAttribute('download') || ''
 
-    let replayNode = null
     const replay = () => {
       if (anchor.target === '_blank') {
         window.open(url, '_blank')
@@ -159,9 +158,25 @@ addEventListener(
     }
 
     void sendToExtension({ type: 'draco:link-click', url, filename: suggested || undefined })
-      .then((reply) => {
+      .then(async (reply) => {
         // No answer means the same as a refusal here. The navigation has
         // already been cancelled, so it has to be given back either way.
+        if (reply?.pending && reply.handoffId) {
+          const deadline = Date.now() + 5 * 60_000
+          while (extensionAlive()) {
+            await new Promise((done) => setTimeout(done, 2000))
+            const result = await sendToExtension({
+              type: 'draco:handoff-status',
+              handoffId: reply.handoffId,
+              url,
+              expired: Date.now() >= deadline
+            })
+            if (result?.ok && result.taken) return
+            if ((result?.ok && !result.pending) || Date.now() >= deadline) break
+          }
+          replay()
+          return
+        }
         if (!reply?.taken) replay()
       })
   },
@@ -553,13 +568,49 @@ function setLabel(entry, text, state, title) {
   }
 }
 
+function xPostForVideo(video) {
+  if (!/(^|\.)(x\.com|twitter\.com)$/i.test(location.hostname)) return null
+
+  // 1. If currently on a status page or media viewer, the URL is the post itself.
+  const locMatch = /^\/([A-Za-z0-9_]{1,15}|i(?:\/web)?)\/status\/(\d+)/i.exec(location.pathname)
+  if (locMatch) {
+    return `${location.origin}/${locMatch[1]}/status/${locMatch[2]}`
+  }
+
+  // 2. Feed or profile view: look for the containing post/article's permalink.
+  const article = video ? video.closest('article') : null
+  const post = video ? (video.closest('[data-testid="quoteTweet"]') || article) : null
+  if (post) {
+    const timestamp = [...post.querySelectorAll('a[href]')]
+      .find((link) => link.querySelector('time'))
+    if (timestamp) {
+      try {
+        const url = new URL(timestamp.href, location.href)
+        if (/(^|\.)(x\.com|twitter\.com)$/i.test(url.hostname)) {
+          const match = /^\/([A-Za-z0-9_]{1,15}|i(?:\/web)?)\/status\/(\d+)/i.exec(url.pathname)
+          if (match) return `${url.origin}/${match[1]}/status/${match[2]}`
+        }
+      } catch {}
+    }
+
+    // Fallback: search for any anchor in the article that points to a status
+    for (const a of post.querySelectorAll('a[href]')) {
+      const href = a.getAttribute('href') || ''
+      const match = /^\/([A-Za-z0-9_]{1,15}|i(?:\/web)?)\/status\/(\d+)/i.exec(href)
+      if (match) return `${location.origin}/${match[1]}/status/${match[2]}`
+    }
+  }
+
+  return null
+}
+
 async function grab(entry) {
   setLabel(entry, 'Checking…', 'busy')
 
   const isYouTube =
     (
-      /(^|\.)youtube\.com$/i.test(location.hostname) &&
-      (/^\/watch$/i.test(location.pathname) || /^\/shorts\//i.test(location.pathname))
+      /(^|\.)(youtube\.com|youtube-nocookie\.com)$/i.test(location.hostname) &&
+      (/^\/watch$/i.test(location.pathname) || /^\/(shorts|embed|live)\//i.test(location.pathname))
     ) ||
     /(^|\.)youtu\.be$/i.test(location.hostname)
 
@@ -589,9 +640,29 @@ async function grab(entry) {
     }
   }
 
+  if (/(^|\.)(x\.com|twitter\.com)$/i.test(location.hostname)) {
+    const postUrl = xPostForVideo(entry.video)
+    if (!postUrl) {
+      setLabel(entry, 'Post not found', 'bad', 'Open this video’s X post and try again.')
+      return
+    }
+    try {
+      const reply = await chrome.runtime.sendMessage({ type: 'draco:grab-best', postUrl })
+      if (reply?.ok) {
+        setLabel(entry, 'Opened in Draco', 'done')
+        retire(entry)
+      } else {
+        setLabel(entry, 'X post failed', 'bad', reply?.error ?? 'Could not extract this X post.')
+      }
+    } catch (err) {
+      setLabel(entry, 'X post failed', 'bad', err instanceof Error ? err.message : String(err))
+    }
+    return
+  }
+
   const source = entry.video.currentSrc || entry.video.src || ''
   const subtitles = [...entry.video.querySelectorAll('track[src]')]
-    .filter((track) => track.kind === 'subtitles' || track.kind === 'captions')
+    .filter((track) => (track.kind === 'subtitles' || track.kind === 'captions') && /^https?:/i.test(track.src))
     .slice(0, 20)
     .map((track) => {
       const url = new URL(track.src, location.href).href

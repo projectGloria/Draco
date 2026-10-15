@@ -1,13 +1,18 @@
-import { chmod, mkdir, rename, rm, stat, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, rm, stat, writeFile } from 'node:fs/promises'
 import { dirname } from 'node:path'
 import { spawn } from 'node:child_process'
-import { createHash } from 'node:crypto'
+import { killTree } from './proc.ts'
+import { createHash, randomUUID } from 'node:crypto'
 import { getPaths } from './bootstrap/paths.ts'
+import { fetchGuarded } from './fetch-guard.ts'
+import { readResponseText } from './response-limit.ts'
 import { cookieArgs, explainCookieFailure } from './ytdlp-cookies.ts'
 import { MAX_PLAYLIST_ENTRIES, parseFlatPlaylist, type PlaylistListing } from './youtube-playlist.ts'
 import { getSettings } from './store.ts'
 import { logger } from './log.ts'
-import { parseSha256, parseYtDlpVersion } from './tools-version.ts'
+import { parseYtDlpVersion } from './tools-version.ts'
+import { verifyYtDlpDigest } from './ytdlp-digest.ts'
+import { replaceVerifiedExecutable } from './hls/replace-executable.ts'
 import type { MediaVariant, PageFormat, RequestHeaders, YouTubeResolution } from '../shared/types.ts'
 import {
   buildVariants,
@@ -15,16 +20,24 @@ import {
   directFormats,
   formatsFromPage,
   formatsFromYtDlp,
+  offeredTiers,
+  rungsBelow,
   selectDirectYtFormat,
+  tierFor,
+  tierLabel,
   type WantedFormat,
   type YtDlpFormat
 } from './youtube-ladder.ts'
+import { isSupportedYouTubeUrl } from './youtube-url.ts'
 import { electronNodeRuntimeArgs, electronNodeRuntimeEnv } from './youtube-runtime.ts'
-import { normalizeYtDlpError } from './youtube-error.ts'
+import { describeQualityShortfall, normalizeYtDlpError } from './youtube-error.ts'
 import { isSunoUrl } from './media-url.ts'
 import { resolveSuno } from './suno.ts'
 import { isKhinsiderUrl, resolveKhinsider } from './khinsider.ts'
 import { resolveHtmlPageMedia } from './page-media.ts'
+import { isXPage, xPostUrl } from '../shared/x-post.ts'
+import { resolveTwitterPost } from './twitter.ts'
+import { loadYouTubeSessions, type YtDlpInfo } from './youtube-sessions.ts'
 
 const log = logger('youtube')
 
@@ -40,14 +53,6 @@ const MIN_YTDLP_BYTES = 2_000_000
 const YTDLP_LOOKUP_TIMEOUT_MS = 45_000
 
 let ytdlpProvision: Promise<string> | null = null
-
-interface YtDlpInfo {
-  id?: string
-  title?: string
-  thumbnail?: string
-  duration?: number
-  formats?: YtDlpFormat[]
-}
 
 /**
  * The quality ladder without touching the network, built from what the browser
@@ -84,21 +89,15 @@ export async function primeYouTube(
   pageUrl: string,
   headers: RequestHeaders | undefined
 ): Promise<void> {
-  // The browser cookie is attached to every handoff by default, but in
-  // practice YouTube's cookie-authenticated response consistently omits a
-  // usable URL for the itags the page ladder actually offers (observed on
-  // every video, every format - not an edge case). Priming with the cookie
-  // attached was warming a cache entry that got discarded and re-fetched from
-  // scratch the moment the user clicked Download. Priming anonymously means
-  // the cache this fills is the one `refreshYouTubeFormat` actually reuses.
-  await loadInfo(pageUrl, withoutCookie(headers))
+  // Prime the same public + account format list used by selection and refresh.
+  await loadInfo(pageUrl, headers)
 }
 
 export async function resolveYouTube(
   pageUrl: string,
   headers: RequestHeaders | undefined
 ): Promise<{ id: string; title: string; variants: MediaVariant[]; thumbnailUrl: string }> {
-  const info = await loadInfo(pageUrl, withoutCookie(headers))
+  const info = await loadInfo(pageUrl, headers)
   const formats = formatsFromYtDlp(Array.isArray(info.formats) ? info.formats : [])
   const variants = [...buildVariants(formats), ...buildAudioVariants(formats)]
 
@@ -184,6 +183,36 @@ export async function resolveMediaPage(
   // neither the extractor nor the generic HTML pass can see past the album
   // page's track links. Its own reader knows where the files actually are.
   if (isKhinsiderUrl(pageUrl)) return resolveKhinsider(pageUrl, headers)
+  if (isXPage(pageUrl)) {
+    const postUrl = xPostUrl(pageUrl)
+    if (!postUrl) {
+      throw new Error('Open a specific X post, or click Draco on the video in your X feed. The feed contains media from many posts.')
+    }
+    // Resolving via the Twitter syndication endpoint directly discovers full-resolution
+    // photos, galleries, animated GIFs, and videos without yt-dlp dependency.
+    const syndication = await resolveTwitterPost(postUrl, headers).catch(() => null)
+    if (syndication && syndication.variants.length > 0) {
+      return syndication
+    }
+
+    // Scanning the HTML of a status also collects replies and recommendations.
+    // The extractor resolves this one status and its available video formats.
+    const info = await loadInfo(postUrl, headers)
+    const rawFormats = Array.isArray(info.formats)
+      ? info.formats
+      : Array.isArray(info.entries)
+        ? info.entries.flatMap((entry: { formats?: YtDlpFormat[] }) => (Array.isArray(entry.formats) ? entry.formats : []))
+        : []
+    const formats = formatsFromYtDlp(rawFormats)
+    const variants = buildVariants(formats)
+    if (variants.length === 0) throw new Error('No downloadable video qualities were found for this X post.')
+    return {
+      id: info.id?.trim() || postUrl,
+      title: info.title?.trim() || 'X video',
+      variants,
+      thumbnailUrl: safeHttpsThumbnail(info.thumbnail)
+    }
+  }
   // Run both paths: an extractor understands embedded players, while the HTML
   // pass sees direct/lazy images and site-builder video attributes. Ordinary
   // pages often contain both, and returning only whichever completed first
@@ -254,28 +283,9 @@ export async function refreshYouTubeFormat(
   force = true,
   wanted?: WantedFormat
 ): Promise<string> {
-  // Forced only when the URL Draco holds has expired, because the cached lookup
-  // is where that expired URL came from. A download that is merely starting
-  // wants the cache: `primeYouTube` filled it while the window was open, and
-  // insisting on a fresh lookup there is six seconds spent to learn the same
-  // thing twice - once per stream, for a video and audio pair.
-  //
-  // The primary attempt goes out anonymously (same as `primeYouTube`) so a
-  // warm prime actually gets reused here instead of being thrown away - see
-  // the comment on `primeYouTube` for why cookies are not the default.
-  let info = await loadInfo(pageUrl, withoutCookie(headers), force)
-  // The same guard the ladder applies, repeated at the point of use: this is
-  // the only place a YouTube download URL comes from, and what reaches the
-  // engine must be a file it can fetch rather than an HLS or DASH manifest.
-  let format = selectDirectYtFormat(info.formats ?? [], formatId, wanted)
-  if (!format?.url && headers?.cookie) {
-    // The real fallback case now: a video that genuinely needs the signed-in
-    // session (age-gated, private, members-only) and only reveals this format
-    // to an authenticated request.
-    log.warn(`YouTube format ${formatId} was unavailable anonymously; retrying with the browser session`)
-    info = await loadInfo(pageUrl, headers, true)
-    format = selectDirectYtFormat(info.formats ?? [], formatId, wanted)
-  }
+  // Reuse the combined account/public lookup unless a download URL expired.
+  const info = await loadInfo(pageUrl, headers, force)
+  const format = selectDirectYtFormat(info.formats ?? [], formatId, wanted)
   if (!format?.url) {
     // Two very different failures used to share one message, and the one that
     // actually happens is the second: yt-dlp answering with a ladder that has
@@ -289,6 +299,28 @@ export async function refreshYouTubeFormat(
         : `YouTube no longer offers format ${formatId}, and nothing comparable was on offer either`
     )
   }
+  /*
+   * A substitution is only a substitution while it stays near the rung that was
+   * asked for. Below that it is a different download wearing the same filename,
+   * and it used to happen in silence - see `describeQualityShortfall`. One rung
+   * of slack, because the ladders of two YouTube clients genuinely disagree
+   * about which heights exist and refusing on that would break working videos.
+   */
+  if (wanted?.kind === 'video') {
+    const requestedHeight = wanted.height ?? null
+    const lost = rungsBelow(requestedHeight, format.height ?? null)
+    if (lost > 1) {
+      const tier = tierFor(requestedHeight)
+      throw new Error(
+        describeQualityShortfall({
+          wantedLabel: tier === null ? `${requestedHeight}p` : tierLabel(tier, null),
+          offeredLabels: offeredTiers(info.formats ?? []),
+          cookieBrowser: getSettings().cookiesFromBrowser
+        })
+      )
+    }
+  }
+
   if (format.format_id !== formatId) {
     log.warn(`YouTube format ${formatId} unavailable; substituting ${format.format_id}`)
   }
@@ -322,7 +354,16 @@ interface CachedInfo {
 const infoCache = new Map<string, CachedInfo>()
 /** Signed URLs outlive this comfortably, and the ladder does not change at all. */
 const INFO_TTL_MS = 5 * 60_000
-const INFO_CACHE_MAX = 8
+/**
+ * How many videos are remembered at once.
+ *
+ * Eight was sized for a person watching one video at a time. A playlist
+ * expansion resolves three concurrently and then starts each of them as its own
+ * download - which asks for the same lookup again - so eight entries thrashed
+ * and every task paid the six-second cost twice. The entries are small (a
+ * format ladder) and the TTL still bounds them.
+ */
+const INFO_CACHE_MAX = 64
 
 /**
  * Lightweight, synchronously-readable status for whatever `loadInfo` is doing
@@ -371,7 +412,12 @@ async function loadInfo(
   headers: RequestHeaders | undefined,
   force = false
 ): Promise<YtDlpInfo> {
-  const key = extractYouTubeId(pageUrl)
+  const videoId = extractYouTubeId(pageUrl)
+  const browser = getSettings().cookiesFromBrowser
+  // A public result must never satisfy a later lookup with captured cookies.
+  // Hash the context so credentials cannot appear in cache diagnostics.
+  const context = createHash('sha256').update(JSON.stringify(headers ?? {})).digest('hex')
+  const key = `${videoId}:${browser}:${context}`
   const now = Date.now()
 
   if (!force) {
@@ -383,24 +429,32 @@ async function loadInfo(
   }
 
   const startedAt = now
-  setPrimeStatus(key, { state: 'pending', startedAt })
+  setPrimeStatus(videoId, { state: 'pending', startedAt })
   log.info(`YouTube extraction started for ${key}${force ? ' (forced)' : ''}`)
 
   const promise = (async () => {
     const executable = await ensureYtDlp()
-    return dumpJson(executable, pageUrl, headers)
+    if (!isSupportedYouTubeUrl(pageUrl)) return dumpJson(executable, pageUrl, headers)
+
+    return loadYouTubeSessions(
+      () => dumpJson(executable, pageUrl, withoutCookie(headers), 'none'),
+      browser !== 'none' || headers?.cookie
+        ? () => dumpJson(executable, pageUrl, headers, browser)
+        : undefined,
+      (error) => log.warn('YouTube browser session failed; keeping public formats: ' + String(error))
+    )
   })()
 
   promise.then(
     () => {
       const tookMs = Date.now() - startedAt
-      setPrimeStatus(key, { state: 'ready', tookMs })
+      setPrimeStatus(videoId, { state: 'ready', tookMs })
       log.info(`YouTube extraction finished for ${key} in ${tookMs}ms`)
     },
     (err: unknown) => {
       const tookMs = Date.now() - startedAt
       const error = err instanceof Error ? err.message : String(err)
-      setPrimeStatus(key, { state: 'failed', tookMs, error })
+      setPrimeStatus(videoId, { state: 'failed', tookMs, error })
       log.warn(`YouTube extraction failed for ${key} after ${tookMs}ms: ${error}`)
     }
   )
@@ -452,10 +506,15 @@ export async function reinstallYtDlp(): Promise<string> {
 
 /** Where yt-dlp would come from right now, and whether Draco owns that copy. */
 export async function locateYtDlp(): Promise<{ path: string; managed: boolean } | null> {
-  const onPath = await findOnPath('yt-dlp.exe').catch(() => null)
-  if (onPath && (await usable(onPath))) return { path: onPath, managed: false }
+  // Same order as `provisionYtDlp`, and it has to be: this is what the tools
+  // dialog reports a version for, so reading a different copy than the one that
+  // actually runs is how "you are up to date" gets said about the wrong file.
   const target = getPaths().ytDlpExe
   if (await usable(target)) return { path: target, managed: true }
+  const bundled = getPaths().bundledYtDlpExe
+  if (await usable(bundled)) return { path: bundled, managed: true }
+  const onPath = await findOnPath('yt-dlp.exe').catch(() => null)
+  if (onPath && (await usable(onPath))) return { path: onPath, managed: false }
   return null
 }
 
@@ -470,13 +529,14 @@ export async function latestYtDlpVersion(): Promise<string | null> {
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), 20_000)
   try {
-    const res = await fetch(YTDLP_RELEASE_URL, {
+    const res = await fetchGuarded(YTDLP_RELEASE_URL, {
       headers: { accept: 'application/vnd.github+json', 'user-agent': 'Draco' },
-      redirect: 'follow',
-      signal: controller.signal
+      signal: controller.signal,
+      timeoutMs: 20_000,
+      requireHttps: true
     })
     if (!res.ok) return null
-    const body = JSON.parse((await res.text()).slice(0, 200_000)) as Record<string, unknown>
+    const body = JSON.parse(await readResponseText(res, 200_000)) as Record<string, unknown>
     return typeof body.tag_name === 'string' ? parseYtDlpVersion(body.tag_name) : null
   } catch {
     return null
@@ -486,31 +546,46 @@ export async function latestYtDlpVersion(): Promise<string | null> {
 }
 
 async function provisionYtDlp(): Promise<string> {
+  /*
+   * Draco's own copy first, and PATH only when there is none.
+   *
+   * This used to be the other way round, which quietly disabled the update
+   * button for anyone who already had yt-dlp installed: `reinstallYtDlp` writes
+   * to `%APPDATA%/Draco/bin`, and a stale `C:\...\yt-dlp.exe` on PATH went on
+   * winning every lookup afterwards. The symptom is the worst kind - updating
+   * appears to succeed, and YouTube keeps failing in exactly the same way.
+   *
+   * A copy on PATH is still used when Draco has none of its own, because that
+   * is somebody deliberately supplying one.
+   */
+  const target = getPaths().ytDlpExe
+  if (await usable(target)) return target
+  const bundled = getPaths().bundledYtDlpExe
+  if (await usable(bundled)) return bundled
+
   const existing = await findOnPath('yt-dlp.exe').catch(() => null)
   if (existing && await usable(existing)) {
     log.info(`using yt-dlp from PATH: ${existing}`)
     return existing
   }
 
-  const target = getPaths().ytDlpExe
-  if (await usable(target)) return target
-
   return downloadYtDlp(target)
 }
 
 async function downloadYtDlp(target: string): Promise<string> {
   await mkdir(dirname(target), { recursive: true })
-  const tmp = `${target}.download`
+  const tmp = `${target}.${randomUUID()}.download`
 
   try {
     const controller = new AbortController()
     const timer = setTimeout(() => controller.abort(), YTDLP_LOOKUP_TIMEOUT_MS)
     let res: Response
     try {
-      res = await fetch(YTDLP_URL, {
-        redirect: 'follow',
+      res = await fetchGuarded(YTDLP_URL, {
         headers: { 'user-agent': 'Draco/0.1' },
-        signal: controller.signal
+        signal: controller.signal,
+        timeoutMs: YTDLP_LOOKUP_TIMEOUT_MS,
+        requireHttps: true
       })
     } catch (err) {
       if (controller.signal.aborted) {
@@ -525,21 +600,16 @@ async function downloadYtDlp(target: string): Promise<string> {
       throw new Error(`HTTP ${res.status} while downloading yt-dlp`)
     }
 
-    const body = Buffer.from(await res.arrayBuffer())
+    const body = await readYtDlpBinary(res)
     if (body.length < MIN_YTDLP_BYTES) {
       throw new Error(`yt-dlp download was only ${body.length} bytes`)
     }
 
-    await verifyYtDlpDigest(body)
+    await verifyYtDlpDigest(body, YTDLP_SUMS_URL)
 
     await writeFile(tmp, body)
-    await rm(target, { force: true })
-    await rename(tmp, target)
-    await chmod(target, 0o755)
-
-    if (!(await usable(target))) {
-      throw new Error('Downloaded yt-dlp executable did not start')
-    }
+    await chmod(tmp, 0o755)
+    await replaceVerifiedExecutable(tmp, target, usable)
 
     log.info(`installed yt-dlp from ${YTDLP_URL}`)
     return target
@@ -548,46 +618,28 @@ async function downloadYtDlp(target: string): Promise<string> {
   }
 }
 
-/**
- * Checks the executable against the digest list published with the release.
- *
- * This binary is downloaded and then run, so "it came over HTTPS" is not the
- * whole story worth telling. An unreachable list is not fatal - it is a side
- * file, not part of the download - but a list that disagrees is.
- */
-async function verifyYtDlpDigest(body: Buffer): Promise<void> {
-  let expected: string | null = null
+const MAX_YTDLP_BYTES = 100 * 1024 * 1024
+
+async function readYtDlpBinary(response: Response): Promise<Buffer> {
+  const declared = Number(response.headers.get('content-length') ?? 0)
+  if (declared > MAX_YTDLP_BYTES) throw new Error('yt-dlp executable is unexpectedly large')
+  const reader = response.body?.getReader()
+  if (!reader) throw new Error('yt-dlp download has no body')
+  const chunks: Uint8Array[] = []
+  let size = 0
   try {
-    const controller = new AbortController()
-    const timer = setTimeout(() => controller.abort(), 20_000)
-    try {
-      const res = await fetch(YTDLP_SUMS_URL, {
-        redirect: 'follow',
-        headers: { 'user-agent': 'Draco' },
-        signal: controller.signal
-      })
-      if (res.ok) {
-        const text = (await res.text()).slice(0, 100_000)
-        const line = text.split('\n').find((entry) => /\syt-dlp\.exe\s*$/i.test(entry.trim()))
-        expected = line ? parseSha256(line) : null
-      }
-    } finally {
-      clearTimeout(timer)
+    for (;;) {
+      const { done, value } = await reader.read()
+      if (done) break
+      size += value.length
+      if (size > MAX_YTDLP_BYTES) throw new Error('yt-dlp executable is unexpectedly large')
+      chunks.push(value)
     }
-  } catch {
-    // Unverifiable, not wrong.
+  } finally {
+    await reader.cancel().catch(() => {})
+    reader.releaseLock()
   }
-
-  if (!expected) {
-    log.warn('no published digest for yt-dlp.exe; installing unverified')
-    return
-  }
-
-  const actual = createHash('sha256').update(body).digest('hex')
-  if (actual !== expected) {
-    throw new Error(`yt-dlp digest ${actual.slice(0, 16)}… does not match the published ${expected.slice(0, 16)}…`)
-  }
-  log.info('yt-dlp.exe matches its published sha256')
+  return Buffer.concat(chunks, size)
 }
 
 async function findOnPath(command: string): Promise<string | null> {
@@ -616,12 +668,12 @@ const PLAYLIST_LOOKUP_TIMEOUT_MS = 180_000
 async function dumpJson(
   executable: string,
   url: string,
-  headers?: RequestHeaders
+  headers?: RequestHeaders,
+  cookieBrowser = getSettings().cookiesFromBrowser
 ): Promise<YtDlpInfo> {
   // Borrowed from the browser when the user has chosen one. This is the only
   // way a members-only or age-gated page resolves at all, and it applies to
   // every extractor because every lookup comes through here.
-  const cookieBrowser = getSettings().cookiesFromBrowser
   const args = [
     '--dump-single-json',
     '--skip-download',
@@ -701,7 +753,7 @@ function run(
 
     let stderr = ''
     const timer = setTimeout(() => {
-      child.kill()
+      killTree(child)
       reject(new Error(`Command timed out after ${timeoutMs}ms`))
     }, timeoutMs)
 
@@ -743,7 +795,7 @@ function runCapture(
     const timer = setTimeout(() => {
       if (settled) return
       settled = true
-      child.kill()
+      killTree(child)
       reject(new Error(`yt-dlp timed out after ${timeoutMs}ms`))
     }, timeoutMs)
 

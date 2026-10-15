@@ -43,23 +43,30 @@ export function preparedYouTubeUrl(value: unknown, itag?: number): string | null
 }
 
 /**
- * The one answer to "is this a YouTube page we handle?".
- *
- * There used to be two, and they disagreed: the handoff path took `http:` but
- * refused `music.youtube.com`, while the priming path did the opposite - so a
- * video could be primed and then declined, or vice versa. Subdomains are in
- * (music, m, www), other protocols are not.
+ * Fixed YouTube media can be fetched in bounded requests even without an ETag.
+ * Require Google's signed URL to bind the object, format, revision and length.
+ * This permits chunks within one run, never journal resume or URL substitution.
  */
-export function isSupportedYouTubeUrl(value: unknown): boolean {
-  if (typeof value !== 'string') return false
-  try {
-    const url = new URL(value)
-    if (url.protocol !== 'https:') return false
-    return /(^|\.)youtube\.com$/i.test(url.hostname) || /(^|\.)youtu\.be$/i.test(url.hostname)
-  } catch {
-    return false
-  }
+export function isFixedYouTubeResource(value: string, size: number | null): boolean {
+  if (!preparedYouTubeUrl(value) || size === null || !Number.isSafeInteger(size) || size <= 0) return false
+  const params = new URL(value).searchParams
+  const signed = new Set((params.get('sparams') ?? '').split(','))
+  return params.get('source') === 'youtube' &&
+    Boolean(params.get('sig') || params.get('signature')) &&
+    ['id', 'itag', 'lmt', 'clen'].every((key) => signed.has(key) && Boolean(params.get(key))) &&
+    /^\d+$/.test(params.get('itag') ?? '') &&
+    /^\d+$/.test(params.get('lmt') ?? '') &&
+    params.get('clen') === String(size)
 }
+
+/*
+ * "Is this a YouTube page we handle?" now has exactly one implementation, in
+ * `shared/youtube-link.ts`, which the renderer reads too. Re-exported here so
+ * the callers in main did not all have to move, and imported with a relative
+ * `.ts` specifier because this module is on the engine's import graph and has
+ * to resolve under bare Node for `tools/dl.ts` and the engine tests.
+ */
+export { isSupportedYouTubeUrl } from '../shared/youtube-link.ts'
 
 export function variantsPreparedForStart(variants: MediaVariant[]): boolean {
   return variants.length > 0 && variants.every((variant) =>

@@ -1,7 +1,10 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { ColumnId, DownloadTask, TaskStatus } from '@shared/types'
+import { displaySource } from '@shared/display-source'
 import { formatBytes, formatEta, formatPercent, formatSpeed, formatWhen, percent } from '../lib/format'
-import { buildDisplayRows, type TaskGroup } from '@shared/groups'
+import type { DisplayRow, TaskGroup } from '@shared/groups'
+import { isQuotaHold } from '@shared/quota'
+import { moveQueueItem, orderedQueueIds } from '@shared/queue-order'
 import { useApp } from '../store/app'
 import { useT, type TKey } from '../i18n'
 import { reportError, toast } from '../store/toasts'
@@ -38,6 +41,8 @@ const STATUS_KEYS: Record<TaskStatus, TKey> = {
   queued: 'statusQueued',
   probing: 'statusProbing',
   downloading: 'statusDownloading',
+  processing: 'statusProcessing',
+  scanning: 'statusScanning',
   paused: 'statusPaused',
   done: 'statusDone',
   error: 'statusError',
@@ -48,6 +53,8 @@ const STATUS_COLOR: Record<TaskStatus, string> = {
   queued: 'var(--color-faint)',
   probing: 'var(--accent)',
   downloading: 'var(--accent)',
+  processing: 'var(--accent)',
+  scanning: 'var(--color-warn)',
   paused: 'var(--color-faint)',
   done: 'var(--color-ok)',
   error: 'var(--color-err)',
@@ -56,11 +63,18 @@ const STATUS_COLOR: Record<TaskStatus, string> = {
 
 export default function DownloadTable({
   rows,
+  display,
   onDetails,
   onGroupDetails,
   onDelete
 }: {
+  /** The flat task list, for selection ranges and keyboard commands. */
   rows: DownloadTask[]
+  /**
+   * The same list with groups collapsed, built once in `App` and shared with
+   * the status bar - which used to run its own identical grouping pass.
+   */
+  display: DisplayRow[]
   onDetails(id: string): void
   /** Opens the group's properties window - the batch equivalent of a torrent's. */
   onGroupDetails(groupId: string): void
@@ -69,6 +83,9 @@ export default function DownloadTable({
   const t = useT()
   const settings = useApp((s) => s.settings)
   const queues = useApp((s) => s.queues)
+  const sidebar = useApp((s) => s.sidebar)
+  const activeQueue = queues.find((queue) => sidebar === `queue:${queue.id}`)
+  const [dropTarget, setDropTarget] = useState<string | null>(null)
   const selection = useApp((s) => s.selection)
   const clickRow = useApp((s) => s.clickRow)
   const selectAll = useApp((s) => s.selectAll)
@@ -79,6 +96,7 @@ export default function DownloadTable({
 
   const [menu, setMenu] = useState<{ at: MenuPosition; items: MenuItem[] } | null>(null)
   const [viewport, setViewport] = useState({ scrollTop: 0, height: 0, width: 0 })
+  const [focusRow, setFocusRow] = useState<number | null>(null)
   const body = useRef<HTMLDivElement>(null)
   const rowsRef = useRef(rows)
   const selectionRef = useRef(selection)
@@ -113,11 +131,33 @@ export default function DownloadTable({
     () => new Map(queues.map((queue) => [queue.id, queue.name])),
     [queues]
   )
-  const display = useMemo(() => buildDisplayRows(rows), [rows])
   const firstVisible = Math.max(0, Math.floor(Math.max(0, viewport.scrollTop - 32) / ROW_HEIGHT) - OVERSCAN_ROWS)
   const visibleCount = Math.ceil(viewport.height / ROW_HEIGHT) + OVERSCAN_ROWS * 2
   const lastVisible = Math.min(display.length, firstVisible + visibleCount)
   const visibleRows = display.slice(firstVisible, lastVisible)
+
+  useEffect(() => {
+    if (focusRow === null) return
+    const target = body.current?.querySelector<HTMLElement>(`[data-row-index="${focusRow}"]`)
+    if (target) {
+      target.focus()
+      setFocusRow(null)
+    }
+  }, [focusRow, firstVisible, lastVisible])
+
+  const navigateRow = useCallback((index: number, key: string): void => {
+    const next = key === 'Home' ? 0 : key === 'End' ? display.length - 1
+      : Math.max(0, Math.min(display.length - 1, index + (key === 'ArrowDown' ? 1 : -1)))
+    const container = body.current
+    if (!container || next < 0) return
+    const rowTop = 32 + next * ROW_HEIGHT
+    if (rowTop < container.scrollTop + 32) container.scrollTop = Math.max(0, rowTop - 32)
+    else if (rowTop + ROW_HEIGHT > container.scrollTop + container.clientHeight) {
+      container.scrollTop = rowTop + ROW_HEIGHT - container.clientHeight
+    }
+    setViewport((current) => ({ ...current, scrollTop: container.scrollTop }))
+    setFocusRow(next)
+  }, [display.length])
 
   useEffect(() => {
     const element = body.current
@@ -169,6 +209,9 @@ export default function DownloadTable({
     const onKey = (event: KeyboardEvent): void => {
       const target = event.target as HTMLElement | null
       if (target && /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName)) return
+      // A modal dialog owns the keyboard: Delete or Ctrl+A acting on the table
+      // hidden behind it would remove rows the user cannot see.
+      if (document.querySelector('[role="dialog"]')) return
 
       if (event.key === 'a' && (event.ctrlKey || event.metaKey)) {
         event.preventDefault()
@@ -206,8 +249,8 @@ export default function DownloadTable({
     })
   }
 
-  const selectTask = useCallback((task: DownloadTask, event: React.MouseEvent): void => {
-    if (event.button === 2) return
+  const selectTask = useCallback((task: DownloadTask, event: React.MouseEvent | React.KeyboardEvent): void => {
+    if ('button' in event && event.button === 2) return
     clickRow(
       task.id,
       { ctrl: event.ctrlKey || event.metaKey, shift: event.shiftKey },
@@ -225,20 +268,55 @@ export default function DownloadTable({
    * drag rather than a drop of nothing.
    */
   const dragTask = useCallback((task: DownloadTask, event: React.DragEvent): void => {
+    if (activeQueue) {
+      event.stopPropagation()
+      event.dataTransfer.setData('application/x-draco-queue-task', task.id)
+      event.dataTransfer.effectAllowed = 'move'
+      return
+    }
     if (task.status !== 'done') return
     event.preventDefault()
     const selected = selectionRef.current
     window.api.startFileDrag(selected.includes(task.id) ? [...selected] : [task.id])
-  }, [])
+  }, [activeQueue])
+
+  const dropTask = useCallback((task: DownloadTask, event: React.DragEvent): void => {
+    if (!activeQueue) return
+    event.preventDefault()
+    event.stopPropagation()
+    setDropTarget(null)
+    const source = event.dataTransfer.getData('application/x-draco-queue-task')
+    const ids = orderedQueueIds(activeQueue.taskIds, useApp.getState().tasks.filter((item) => item.queueId === activeQueue.id).map((item) => item.id))
+    if (!ids.includes(source) || source === task.id) return
+    void window.api.reorderQueue(activeQueue.id, moveQueueItem(ids, source, task.id))
+      .catch((error) => reportError(t('queueSaveFailed'), error))
+  }, [activeQueue, t])
+
+  const handleDragOverRow = useCallback((taskId: string, event: React.DragEvent): void => {
+    if (!activeQueue || !event.dataTransfer.types.includes('application/x-draco-queue-task')) return
+    event.preventDefault()
+    event.stopPropagation()
+    event.dataTransfer.dropEffect = 'move'
+    setDropTarget(taskId)
+    const container = body.current
+    if (container) {
+      const bounds = container.getBoundingClientRect()
+      if (event.clientY < bounds.top + 50) container.scrollTop -= ROW_HEIGHT
+      else if (event.clientY > bounds.bottom - 50) container.scrollTop += ROW_HEIGHT
+    }
+  }, [activeQueue])
+
+  const handleDragEndRow = useCallback((): void => setDropTarget(null), [])
 
   const hoverRow = useCallback((task: DownloadTask, event: React.MouseEvent): void => {
+    if (activeQueue) return
     // Buttons === 1 means primary button is held down
     if (event.buttons === 1) {
       if (!selectionRef.current.includes(task.id)) {
         clickRow(task.id, { ctrl: true, shift: false }, rowsRef.current)
       }
     }
-  }, [clickRow])
+  }, [clickRow, activeQueue])
 
   const openTask = useCallback((task: DownloadTask): void => {
     if (task.status === 'done') {
@@ -254,8 +332,8 @@ export default function DownloadTable({
    * commands of its own. A modifier adds to or removes from the selection the
    * way it does for a single row.
    */
-  const selectGroup = useCallback((group: TaskGroup, event: React.MouseEvent): void => {
-    if (event.button === 2) return
+  const selectGroup = useCallback((group: TaskGroup, event: React.MouseEvent | React.KeyboardEvent): void => {
+    if ('button' in event && event.button === 2) return
     const ids = group.tasks.map((task) => task.id)
     const current = selectionRef.current
     if (event.ctrlKey || event.metaKey || event.shiftKey) {
@@ -276,22 +354,22 @@ export default function DownloadTable({
     event.preventDefault()
     const ids = group.tasks.map((task) => task.id)
     setSelection(ids)
-    const running = group.tasks.some((task) => task.status === 'downloading' || task.status === 'queued')
+    const running = group.tasks.some((task) => task.status === 'downloading' || task.status === 'probing' || task.status === 'queued' || task.status === 'processing' || task.status === 'scanning')
 
     const items: MenuItem[] = [
-      { label: `Properties… (${ids.length} files)`, onClick: () => onGroupDetailsRef.current(group.id) },
+      { label: t('propertiesCount', { count: ids.length }), onClick: () => onGroupDetailsRef.current(group.id) },
       {},
       {
-        label: running ? `Stop ${ids.length} downloads` : `Resume ${ids.length} downloads`,
+        label: running ? t('stopCount', { count: ids.length }) : t('resumeCount', { count: ids.length }),
         onClick: () => {
           const call = running ? window.api.pauseTasks(ids) : window.api.startTasks(ids)
-          void call.catch((err) => reportError('Command failed', err))
+          void call.catch((err) => reportError(t('commandFailed'), err))
         }
       },
       {
         label: t('openFolder'),
         onClick: () => void window.api.revealFile(group.tasks[0].id)
-          .catch((err) => reportError('Could not open the folder', err))
+          .catch((err) => reportError(t('openFolderFailed'), err))
       },
       {}
     ]
@@ -300,31 +378,31 @@ export default function DownloadTable({
       items.push({
         label: t('moveToQueue') + ': ' + queue.name,
         checked: group.tasks.every((task) => task.queueId === queue.id),
-        onClick: () => void patchQueue(ids, queue.id)
+        onClick: () => void patchQueue(ids, queue.id, t('queueMoveFailed'))
       })
     }
     if (queuesRef.current.length > 0) {
       items.push({
         label: t('noQueue'),
         disabled: group.tasks.every((task) => !task.queueId),
-        onClick: () => void patchQueue(ids, null)
+        onClick: () => void patchQueue(ids, null, t('queueMoveFailed'))
       })
       items.push({})
     }
 
     items.push({
-      label: `Export ${ids.length} downloads…`,
+      label: t('exportCount', { count: ids.length }),
       onClick: () => {
         void window.api
           .exportDownloads(ids)
           .then((count) => {
-            if (count > 0) toast('success', `Exported ${count} download${count === 1 ? '' : 's'}`)
+            if (count > 0) toast('success', t('exportedCount', { count }))
           })
-          .catch((err) => reportError('Could not export', err))
+          .catch((err) => reportError(t('exportFailed'), err))
       }
     })
     items.push({})
-    items.push({ label: `Delete ${ids.length} downloads`, danger: true, onClick: () => onDeleteRef.current(ids) })
+    items.push({ label: t('deleteCount', { count: ids.length }), danger: true, onClick: () => onDeleteRef.current(ids) })
 
     setMenu({ at: { x: event.clientX, y: event.clientY }, items })
   }, [setSelection, t])
@@ -341,37 +419,37 @@ export default function DownloadTable({
 
     const running = ids.some((id) => {
       const row = currentRows.find((r) => r.id === id)
-      return row?.status === 'downloading' || row?.status === 'queued'
+      return row?.status === 'downloading' || row?.status === 'probing' || row?.status === 'queued' || row?.status === 'processing' || row?.status === 'scanning'
     })
 
     const items: MenuItem[] = [
       {
-        label: running ? 'Stop download' : 'Resume download',
+        label: running ? t('stop') : t('resume'),
         disabled: task.status === 'done' && !running,
         onClick: () => {
           const call = running ? window.api.pauseTasks(ids) : window.api.startTasks(ids)
-          void call.catch((err) => reportError('Command failed', err))
+          void call.catch((err) => reportError(t('commandFailed'), err))
         }
       },
-      { label: t('redownload'), onClick: () => void window.api.redownload(task.id).catch((err) => reportError('Redownload failed', err)) },
+      { label: t('redownload'), onClick: () => void window.api.redownload(task.id).catch((err) => reportError(t('redownloadFailed'), err)) },
       {},
       {
         label: t('open'),
         disabled: task.status !== 'done',
-        onClick: () => void window.api.openFile(task.id).catch((err) => reportError('Could not open the file', err))
+        onClick: () => void window.api.openFile(task.id).catch((err) => reportError(t('openFileFailed'), err))
       },
       {
         label: t('openFolder'),
-        onClick: () => void window.api.revealFile(task.id).catch((err) => reportError('Could not open the folder', err))
+        onClick: () => void window.api.revealFile(task.id).catch((err) => reportError(t('openFolderFailed'), err))
       },
       {
         label: t('copyUrl'),
         onClick: () => {
           void window.api.copyToClipboard(task.url)
-          toast('info', 'URL copied')
+          toast('info', t('urlCopied'))
         }
       },
-      { label: 'Properties…', onClick: () => onDetailsRef.current(task.id) },
+      { label: t('properties'), onClick: () => onDetailsRef.current(task.id) },
       {}
     ]
 
@@ -379,12 +457,12 @@ export default function DownloadTable({
     // can still be uploading. `stopSeeding` reports whether it actually was.
     if (task.kind === 'torrent' && task.status === 'done') {
       items.splice(2, 0, {
-        label: 'Stop seeding',
+        label: t('stopSeeding'),
         onClick: () => {
           void window.api
             .stopSeeding(ids)
-            .then((stopped) => toast('info', stopped ? 'Seeding stopped' : 'Not seeding'))
-            .catch((err) => reportError('Could not stop seeding', err))
+            .then((stopped) => toast('info', stopped ? t('seedingStopped') : t('notSeeding')))
+            .catch((err) => reportError(t('stopSeedingFailed'), err))
         }
       })
     }
@@ -393,14 +471,14 @@ export default function DownloadTable({
       items.push({
         label: t('moveToQueue') + ': ' + queue.name,
         checked: ids.every((id) => currentRows.find((r) => r.id === id)?.queueId === queue.id),
-        onClick: () => void patchQueue(ids, queue.id)
+        onClick: () => void patchQueue(ids, queue.id, t('queueMoveFailed'))
       })
     }
     if (currentQueues.length > 0) {
       items.push({
         label: t('noQueue'),
         disabled: ids.every((id) => !currentRows.find((r) => r.id === id)?.queueId),
-        onClick: () => void patchQueue(ids, null)
+        onClick: () => void patchQueue(ids, null, t('queueMoveFailed'))
       })
       items.push({})
     }
@@ -410,30 +488,30 @@ export default function DownloadTable({
     // import never starts what it adds.
     items.push({})
     items.push({
-      label: ids.length > 1 ? `Export ${ids.length} downloads…` : 'Export this download…',
+      label: ids.length > 1 ? t('exportCount', { count: ids.length }) : t('exportOne'),
       onClick: () => {
         void window.api
           .exportDownloads(ids)
           .then((count) => {
-            if (count > 0) toast('success', `Exported ${count} download${count === 1 ? '' : 's'}`)
+            if (count > 0) toast('success', t('exportedCount', { count }))
           })
-          .catch((err) => reportError('Could not export', err))
+          .catch((err) => reportError(t('exportFailed'), err))
       }
     })
     items.push({
-      label: 'Import list…',
+      label: t('importList'),
       onClick: () => {
         void window.api
           .importDownloads()
           .then((count) => {
-            if (count > 0) toast('success', `Imported ${count} download${count === 1 ? '' : 's'} — none started`)
+            if (count > 0) toast('success', t('importedCount', { count }))
           })
-          .catch((err) => reportError('Could not import', err))
+          .catch((err) => reportError(t('importFailed'), err))
       }
     })
     items.push({})
 
-    items.push({ label: 'Delete', danger: true, onClick: () => onDeleteRef.current(ids) })
+    items.push({ label: t('delete'), danger: true, onClick: () => onDeleteRef.current(ids) })
 
     setMenu({ at: { x: event.clientX, y: event.clientY }, items })
   }, [setSelection, t])
@@ -477,18 +555,21 @@ export default function DownloadTable({
             onContextMenu={headerMenu}
           >
             {columns.map((column) => {
-              const sorted = settings.sortColumn === column.id
+              const sorted = !activeQueue && settings.sortColumn === column.id
               return (
-                <div
+                <button
                   key={column.id}
+                  type="button"
+                  aria-label={activeQueue ? t('queueOrderHint') : t('sortBy', { column: t(HEADING_KEYS[column.id]) })}
+                  aria-disabled={Boolean(activeQueue)}
                   className={
-                    'relative flex items-center gap-1.5 px-2.5 text-[11px] font-semibold uppercase ' +
+                    'download-header relative flex items-center gap-1.5 px-2.5 text-[11px] font-semibold uppercase ' +
                     'tracking-[0.4px] cursor-pointer transition-colors hover:text-ink ' +
                     (sorted ? 'text-ink' : 'text-faint') +
                     (RIGHT.has(column.id) ? ' justify-end' : '')
                   }
-                  onClick={() => setSort(column.id)}
-                  title={t('sortBy', { column: t(HEADING_KEYS[column.id]) })}
+                  onClick={() => { if (!activeQueue) setSort(column.id) }}
+                  title={activeQueue ? t('queueOrderHint') : t('sortBy', { column: t(HEADING_KEYS[column.id]) })}
                 >
                   <span className="truncate">{t(HEADING_KEYS[column.id])}</span>
                   {sorted && (
@@ -501,7 +582,7 @@ export default function DownloadTable({
                     onMouseDown={(event) => startResize(event, column.id, column.width)}
                     onClick={(event) => event.stopPropagation()}
                   />
-                </div>
+                </button>
               )
             })}
             <div />
@@ -517,13 +598,17 @@ export default function DownloadTable({
                   group={row.group}
                   columns={columnIds}
                   template={template}
+                  index={firstVisible + offset}
                   top={(firstVisible + offset) * ROW_HEIGHT}
                   selected={row.group.tasks.every((task) => selectedIds.has(task.id))}
                   queueLabel={row.group.summary.queueId ? queueLabels.get(row.group.summary.queueId) ?? '' : ''}
                   statusLabel={t(STATUS_KEYS[row.group.summary.status])}
+                  ariaLabel={t('groupRowLabel', { name: row.group.name, count: row.group.tasks.length, status: t(STATUS_KEYS[row.group.summary.status]) })}
+                  hint={t('groupRowHint')}
                   onSelect={selectGroup}
                   onOpen={openGroup}
                   onMenu={groupMenu}
+                  onNavigate={navigateRow}
                 />
               ) : (
                 <Row
@@ -531,15 +616,23 @@ export default function DownloadTable({
                   task={row.task}
                   columns={columnIds}
                   template={template}
+                  index={firstVisible + offset}
                   top={(firstVisible + offset) * ROW_HEIGHT}
                   selected={selectedIds.has(row.task.id)}
                   queueLabel={row.task.queueId ? queueLabels.get(row.task.queueId) ?? '' : ''}
                   statusLabel={t(STATUS_KEYS[row.task.status])}
+                  ariaLabel={t('taskRowLabel', { name: row.task.filename, status: t(STATUS_KEYS[row.task.status]) })}
                   onSelect={selectTask}
                   onDragStart={dragTask}
+                  reorderable={Boolean(activeQueue)}
+                  dropTarget={dropTarget === row.task.id}
+                  onDragOver={handleDragOverRow}
+                  onDrop={dropTask}
+                  onDragEnd={handleDragEndRow}
                   onMouseEnter={hoverRow}
                   onOpen={openTask}
                   onMenu={rowMenu}
+                  onNavigate={navigateRow}
                 />
               ))}
             </div>
@@ -556,28 +649,41 @@ const GroupRow = memo(function GroupRow({
   group,
   columns,
   template,
+  index,
   top,
   selected,
   queueLabel,
   statusLabel,
+  ariaLabel,
+  hint,
   onSelect,
   onOpen,
-  onMenu
+  onMenu,
+  onNavigate
 }: {
   group: TaskGroup
   columns: ColumnId[]
   template: string
+  index: number
   top: number
   selected: boolean
   queueLabel: string
   statusLabel: string
-  onSelect(group: TaskGroup, event: React.MouseEvent): void
+  ariaLabel: string
+  hint: string
+  onSelect(group: TaskGroup, event: React.MouseEvent | React.KeyboardEvent): void
   onOpen(group: TaskGroup): void
   onMenu(event: React.MouseEvent, group: TaskGroup): void
+  onNavigate(index: number, key: string): void
 }): React.ReactElement {
   return (
     <div
-      className="absolute left-0 right-0 h-[30px] border-b border-line grid select-none cursor-pointer"
+      className="download-row absolute left-0 right-0 h-[30px] border-b border-line grid select-none cursor-pointer"
+      role="button"
+      tabIndex={0}
+      aria-pressed={selected}
+      aria-label={ariaLabel}
+      data-row-index={index}
       style={{
         gridTemplateColumns: template,
         transform: `translateY(${top}px)`,
@@ -588,8 +694,15 @@ const GroupRow = memo(function GroupRow({
       onMouseDown={(event) => onSelect(group, event)}
       onDoubleClick={() => onOpen(group)}
       onContextMenu={(event) => onMenu(event, group)}
-      title={`${group.name} — ${group.tasks.length} files
-Double-click to see what is in it`}
+      onKeyDown={(event) => {
+        if (event.key === 'Enter') { event.preventDefault(); onOpen(group) }
+        else if (event.key === ' ') { event.preventDefault(); onSelect(group, event) }
+        else if (['ArrowUp', 'ArrowDown', 'Home', 'End'].includes(event.key)) {
+          event.preventDefault()
+          onNavigate(index, event.key)
+        }
+      }}
+      title={`${ariaLabel}\n${hint}`}
     >
       {columns.map((id) => id === 'name' ? (
         <div key={id} className="px-2.5 text-[12px] truncate min-w-0 flex items-center gap-2">
@@ -614,11 +727,11 @@ Double-click to see what is in it`}
   )
 })
 
-async function patchQueue(ids: string[], queueId: string | null): Promise<void> {
+async function patchQueue(ids: string[], queueId: string | null, errorMessage: string): Promise<void> {
   try {
     for (const id of ids) await window.api.updateTask(id, { queueId })
   } catch (err) {
-    reportError('Could not change the queue', err)
+    reportError(errorMessage, err)
   }
 }
 
@@ -626,44 +739,77 @@ const Row = memo(function Row({
   task,
   columns,
   template,
+  index,
   top,
   selected,
   queueLabel,
   statusLabel,
+  ariaLabel,
   onSelect,
   onDragStart,
+  reorderable,
+  dropTarget,
+  onDragOver,
+  onDrop,
+  onDragEnd,
   onMouseEnter,
   onOpen,
-  onMenu
+  onMenu,
+  onNavigate
 }: {
   task: DownloadTask
   columns: ColumnId[]
   template: string
+  index: number
   top: number
   selected: boolean
   queueLabel: string
   statusLabel: string
-  onSelect(task: DownloadTask, event: React.MouseEvent): void
+  ariaLabel: string
+  onSelect(task: DownloadTask, event: React.MouseEvent | React.KeyboardEvent): void
   onDragStart(task: DownloadTask, event: React.DragEvent): void
+  reorderable: boolean
+  dropTarget: boolean
+  onDragOver(taskId: string, event: React.DragEvent): void
+  onDrop(task: DownloadTask, event: React.DragEvent): void
+  onDragEnd(): void
   onMouseEnter(task: DownloadTask, event: React.MouseEvent): void
   onOpen(task: DownloadTask): void
   onMenu(event: React.MouseEvent, task: DownloadTask): void
+  onNavigate(index: number, key: string): void
 }): React.ReactElement {
   return (
     <div
-      className="absolute left-0 right-0 h-[30px] border-b border-line grid select-none"
+      className="download-row absolute left-0 right-0 h-[30px] border-b border-line grid select-none"
+      role="button"
+      tabIndex={0}
+      aria-pressed={selected}
+      aria-label={ariaLabel}
+      data-row-index={index}
       style={{
         gridTemplateColumns: template,
         transform: `translateY(${top}px)`,
         background: selected ? 'var(--accent-soft)' : undefined,
-        boxShadow: selected ? 'inset 2px 0 0 var(--accent)' : undefined
+        boxShadow: dropTarget ? 'inset 0 2px 0 var(--accent)' : selected ? 'inset 2px 0 0 var(--accent)' : undefined,
+        cursor: reorderable ? 'grab' : undefined
       }}
-      draggable={task.status === 'done'}
+      draggable={reorderable || task.status === 'done'}
+      onDragOver={(event) => onDragOver(task.id, event)}
+      onDrop={(event) => onDrop(task, event)}
+      onDragEnd={onDragEnd}
       onDragStart={(event) => onDragStart(task, event)}
       onMouseDown={(event) => onSelect(task, event)}
       onMouseEnter={(event) => onMouseEnter(task, event)}
       onDoubleClick={() => onOpen(task)}
       onContextMenu={(event) => onMenu(event, task)}
+      onKeyDown={(event) => {
+        if (event.key === 'Enter') { event.preventDefault(); onOpen(task) }
+        else if (event.key === ' ') { event.preventDefault(); onSelect(task, event) }
+        else if (['ArrowUp', 'ArrowDown', 'Home', 'End'].includes(event.key)) {
+          event.preventDefault()
+          onNavigate(index, event.key)
+        }
+      }}
     >
       {columns.map((id) => (
         <Cell
@@ -697,7 +843,7 @@ function Cell({
   switch (id) {
     case 'name':
       return (
-        <div className={base + ' flex items-center gap-2'} title={task.filename + '\n' + task.url}>
+        <div className={base + ' flex items-center gap-2'} title={task.filename + '\n' + displaySource(task.url)}>
           <span className="shrink-0 flex items-center gap-1.5">
             {task.kind === 'torrent' ? (
               <span className="text-[var(--accent)]" title="Torrent source">
@@ -731,7 +877,15 @@ function Cell({
         </div>
       )
 
-    case 'status':
+    case 'status': {
+      /*
+       * A task the transfer budget parked is `paused` with an explanatory
+       * detail, which is correct - but it drew the same grey dot as a pause
+       * somebody chose, so an overnight queue held by its own quota read as one
+       * the user had stopped. It is waiting on something, not idle, so it takes
+       * the warning colour.
+       */
+      const heldByQuota = isQuotaHold(task.status, task.detail)
       return (
         <div
           className={base + ' flex items-center gap-2'}
@@ -740,11 +894,18 @@ function Cell({
           <span
             className={
               'w-1.5 h-1.5 rounded-full shrink-0 ' +
-              (task.status === 'downloading' || task.status === 'probing' ? 'animate-pulse' : '')
+              (task.status === 'downloading' || task.status === 'probing' || task.status === 'processing' || task.status === 'scanning' ? 'animate-pulse' : '')
             }
-            style={{ background: STATUS_COLOR[task.status] }}
+            style={{ background: heldByQuota ? 'var(--color-warn)' : STATUS_COLOR[task.status] }}
           />
-          <span className="truncate" style={{ color: task.status === 'error' ? 'var(--color-err)' : undefined }}>
+          <span
+            className="truncate"
+            style={{
+              color: task.status === 'error'
+                ? 'var(--color-err)'
+                : heldByQuota ? 'var(--color-warn)' : undefined
+            }}
+          >
             {task.status === 'error' && task.error
               ? task.error
               : /* The detail says what a long stage is actually doing - fetching
@@ -754,6 +915,7 @@ function Cell({
           </span>
         </div>
       )
+    }
 
     /*
      * Both read the figure rather than the status label. A stream fetched as
@@ -822,12 +984,12 @@ function EmptyState(): React.ReactElement {
           void window.api
             .importDownloads()
             .then((count) => {
-              if (count > 0) toast('success', `Imported ${count} download${count === 1 ? '' : 's'} — none started`)
+              if (count > 0) toast('success', t('importedCount', { count }))
             })
-            .catch((err) => reportError('Could not import', err))
+            .catch((err) => reportError(t('importFailed'), err))
         }}
       >
-        Import a list of downloads
+        {t('importList')}
       </button>
     </div>
   )

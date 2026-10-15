@@ -10,6 +10,11 @@ import {
 import { normalizeDownloadDirectory, safeDownloadDirectory } from '../src/main/destination-path.ts'
 import { toFolderName } from '../src/main/store-sanitize-path.ts'
 
+it('escapes reserved Windows names before the first dot in category and group folders', () => {
+  strictEqual(toFolderName('CON.tar'), 'CON_.tar')
+  strictEqual(toFolderName('LPT³.backup'), 'LPT³_.backup')
+})
+
 /**
  * Path handling, which is both a correctness rule (one owner for every
  * intermediate) and a security boundary (a torrent names its own files, and a
@@ -40,6 +45,12 @@ describe('resolveTorrentItemPath', () => {
       '..\\..\\Windows\\System32\\drivers\\etc\\hosts'
     ]), null)
     strictEqual(resolveTorrentItemPath(root, 'show\\..\\..\\other.txt', ['show\\..\\..\\other.txt']), null)
+    strictEqual(resolveTorrentItemPath(root, '..\\outside.txt', ['..\\outside.txt']), null)
+  })
+
+  it('permits filenames starting with dots that are not directory traversal', () => {
+    const target = resolveTorrentItemPath(root, 'show\\..notes.txt', ['show\\..notes.txt'])
+    strictEqual(target, 'C:\\Downloads\\show\\show\\..notes.txt')
   })
 
   it('refuses an absolute path that escapes the root', () => {
@@ -60,9 +71,14 @@ describe('workspaceDir', () => {
     strictEqual(workspaceDir('C:\\Downloads'), 'C:\\Downloads', 'no temp dir means beside the file')
   })
 
-  it('puts the part file in the workspace, named after the download', () => {
-    strictEqual(partPathFor('C:\\Downloads', 'clip.mp4', 'C:\\Temp'), 'C:\\Temp\\clip.mp4.dracodl')
-    strictEqual(partPathFor('D:\\Downloads', 'clip.mp4', 'C:\\Temp'), 'D:\\Downloads\\clip.mp4.dracodl')
+  it('isolates equal filenames by task identity on the destination volume', () => {
+    const first = partPathFor('C:\\Downloads', 'clip.mp4', 'first', 'C:\\Temp')
+    const second = partPathFor('C:\\Downloads', 'clip.mp4', 'second', 'C:\\Temp')
+    ok(first.startsWith('C:\\Temp\\.draco-tasks\\'))
+    ok(second.startsWith('C:\\Temp\\.draco-tasks\\'))
+    ok(first.endsWith('\\clip.mp4.dracodl'))
+    ok(first !== second)
+    ok(partPathFor('D:\\Downloads', 'clip.mp4', 'first', 'C:\\Temp').startsWith('D:\\Downloads\\.draco-tasks\\'))
   })
 })
 
@@ -76,24 +92,32 @@ describe('isDracoIntermediate', () => {
 })
 
 describe('intermediatePathsFor', () => {
-  it('cleans both the workspace and the destination', () => {
-    // A task created by an older build kept its partial beside the finished
-    // file; removing the row has to clean that up too.
-    const { files } = intermediatePathsFor(
-      { dir: 'C:\\Downloads', filename: 'clip.mp4', audioUrl: null },
+  it('cleans only the task-owned workspace', () => {
+    const { files, dirs } = intermediatePathsFor(
+      { id: 'first', dir: 'C:\\Downloads', filename: 'clip.mp4', audioUrl: null },
       'C:\\Temp'
     )
-    ok(files.some((path) => path === 'C:\\Temp\\clip.mp4.dracodl'))
-    ok(files.some((path) => path === 'C:\\Downloads\\clip.mp4.dracodl'))
+    strictEqual(files.length, 0)
+    strictEqual(dirs.length, 1)
+    ok(dirs[0].startsWith('C:\\Temp\\.draco-tasks\\'))
   })
 
-  it('includes the muxed halves, each a download in its own right', () => {
-    const { files } = intermediatePathsFor(
-      { dir: 'C:\\Downloads', filename: 'clip.mp4', audioUrl: 'https://example.test/audio.m4a' },
+  it('does not remove another task sharing the final name', () => {
+    const first = intermediatePathsFor(
+      { id: 'first', dir: 'C:\\Downloads', filename: 'clip.mp4', audioUrl: 'https://example.test/audio.m4a' },
       'C:\\Temp'
     )
-    ok(files.some((path) => path.endsWith('clip.mp4.v.mp4.dracodl')), 'the video half')
-    ok(files.some((path) => path.endsWith('clip.mp4.a.m4a.dracodl')), 'the audio half')
+    const second = intermediatePathsFor(
+      {
+        id: 'second',
+        dir: 'C:\\Downloads',
+        filename: 'clip.mp4',
+        audioUrl: 'https://example.test/audio.m4a',
+        youtube: { videoFormatId: '137', audioFormatId: '140', pageUrl: 'https://youtube.com/watch?v=abc' }
+      },
+      'C:\\Temp'
+    )
+    ok(first.dirs[0] !== second.dirs[0])
   })
 })
 
@@ -109,6 +133,10 @@ describe('download directory safety', () => {
   it('refuses anything that is not an absolute path', () => {
     throws(() => normalizeDownloadDirectory('Downloads'))
     throws(() => normalizeDownloadDirectory('   '))
+    throws(() => normalizeDownloadDirectory('\\Downloads'))
+    throws(() => normalizeDownloadDirectory('/Downloads'))
+    throws(() => normalizeDownloadDirectory('D:Downloads'))
+    strictEqual(normalizeDownloadDirectory('\\\\server\\share\\Media'), '\\\\server\\share\\Media')
   })
 
   it('falls back rather than trusting a stored value that is not an absolute path', () => {
@@ -126,6 +154,9 @@ describe('toFolderName', () => {
     strictEqual(toFolderName('Season 1: "Pilot"/Extras'), 'Season 1 PilotExtras')
     strictEqual(toFolderName('   '), 'Untitled')
     strictEqual(toFolderName('nul'), 'nul_')
+    strictEqual(toFolderName('con.txt'), 'con_.txt', 'the device name must be escaped before the extension')
+    strictEqual(toFolderName('aux.backup'), 'aux_.backup')
     strictEqual(toFolderName('x'.repeat(200)).length, 60, 'capped so the full path stays openable')
+    strictEqual(toFolderName('x'.repeat(59) + '.continued'), 'x'.repeat(59), 'truncation must not leave a trailing dot')
   })
 })

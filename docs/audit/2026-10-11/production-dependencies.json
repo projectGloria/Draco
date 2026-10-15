@@ -1,0 +1,116 @@
+{
+  "auditReportVersion": 2,
+  "vulnerabilities": {
+    "bittorrent-tracker": {
+      "name": "bittorrent-tracker",
+      "severity": "high",
+      "isDirect": false,
+      "via": [
+        "ip"
+      ],
+      "effects": [
+        "torrent-discovery"
+      ],
+      "range": ">=1.0.0",
+      "nodes": [
+        "node_modules/bittorrent-tracker"
+      ],
+      "fixAvailable": {
+        "name": "webtorrent",
+        "version": "0.7.3",
+        "isSemVerMajor": true
+      }
+    },
+    "ip": {
+      "name": "ip",
+      "severity": "high",
+      "isDirect": false,
+      "via": [
+        {
+          "source": 1101851,
+          "name": "ip",
+          "dependency": "ip",
+          "title": "ip SSRF improper categorization in isPublic",
+          "url": "https://github.com/advisories/GHSA-2p57-rm9w-gvfp",
+          "severity": "high",
+          "cwe": [
+            "CWE-918"
+          ],
+          "cvss": {
+            "score": 8.1,
+            "vectorString": "CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:H/I:H/A:H"
+          },
+          "range": "<=2.0.1"
+        }
+      ],
+      "effects": [
+        "bittorrent-tracker"
+      ],
+      "range": "*",
+      "nodes": [
+        "node_modules/ip"
+      ],
+      "fixAvailable": {
+        "name": "webtorrent",
+        "version": "0.7.3",
+        "isSemVerMajor": true
+      }
+    },
+    "torrent-discovery": {
+      "name": "torrent-discovery",
+      "severity": "high",
+      "isDirect": false,
+      "via": [
+        "bittorrent-tracker"
+      ],
+      "effects": [
+        "webtorrent"
+      ],
+      "range": "*",
+      "nodes": [
+        "node_modules/torrent-discovery"
+      ],
+      "fixAvailable": {
+        "name": "webtorrent",
+        "version": "0.7.3",
+        "isSemVerMajor": true
+      }
+    },
+    "webtorrent": {
+      "name": "webtorrent",
+      "severity": "high",
+      "isDirect": true,
+      "via": [
+        "torrent-discovery"
+      ],
+      "effects": [],
+      "range": ">=0.8.0",
+      "nodes": [
+        "node_modules/webtorrent"
+      ],
+      "fixAvailable": {
+        "name": "webtorrent",
+        "version": "0.7.3",
+        "isSemVerMajor": true
+      }
+    }
+  },
+  "metadata": {
+    "vulnerabilities": {
+      "info": 0,
+      "low": 0,
+      "moderate": 0,
+      "high": 4,
+      "critical": 0,
+      "total": 4
+    },
+    "dependencies": {
+      "prod": 172,
+      "dev": 467,
+      "optional": 165,
+      "peer": 13,
+      "peerOptional": 0,
+      "total": 652
+    }
+  }
+}

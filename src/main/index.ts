@@ -5,22 +5,30 @@
 // their own load on top.
 process.env.UV_THREADPOOL_SIZE ??= '32'
 
-import { app, ipcMain, powerSaveBlocker, Notification } from 'electron'
+import { app, dialog, ipcMain, powerSaveBlocker, Notification } from 'electron'
 import { version } from '../../package.json'
 import { randomUUID } from 'node:crypto'
+import { mkdirSync } from 'node:fs'
+import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { resolve, sep, join } from 'node:path'
 import type {
   BootstrapState,
   BootstrapStep,
   BootstrapStepId,
   DownloadTask,
   HandoffRequest,
-  TaskStatus
+  TaskStatus,
+  Queue
 } from '@shared/types'
 import { ensureDirs, getPaths } from './bootstrap/paths.ts'
 import { loadCredentials, resolveCredentials } from './credentials.ts'
 import { ClipboardWatcher } from './clipboard.ts'
 import { ensureRegistered } from './bridge/integration.ts'
-import { PipeServer } from './bridge/pipe-server.ts'
+import { PipeServer, ensurePipeSecret } from './bridge/pipe-server.ts'
+import { batchHandoffId, commitBrowserTasks, committedBrowserTaskCount } from './bridge/admission.ts'
+import { BrowserHandoffInbox } from './bridge/handoff-inbox.ts'
+import { electronJsonCipher, ensureElectronJsonCipherReady } from './electron-json-cipher.ts'
 import type { HostMessage, HostReply } from './bridge/protocol.ts'
 import { validateUrl } from './engine/create.ts'
 import { setTorrentStoreDir } from './engine/torrent-store.ts'
@@ -28,8 +36,9 @@ import { closeDispatchers } from './engine/http.ts'
 import { DownloadManager } from './engine/manager.ts'
 import { MpdRunner } from './dash/runner.ts'
 import { HlsRunner } from './hls/runner.ts'
-import { handoffToTask, openShellTarget, prepareClipboardItem, pushPendingHandoff, recordMedia, refileTask, registerIpc, type AppContext } from './ipc.ts'
+import { announce, handoffToTask, openShellTarget, prepareClipboardItem, pushPendingHandoff, recordMedia, refileTask, registerIpc, type AppContext } from './ipc.ts'
 import { logger, setLogDirectory } from './log.ts'
+import { publicTasks } from './public-task.ts'
 import { Scheduler } from './queue/scheduler.ts'
 import { SiteProjectManager } from './site-grabber/projects.ts'
 import {
@@ -45,6 +54,8 @@ import {
   loadTasks,
   persistTasks,
   persistQuotaState,
+  setPersistenceErrorHandler,
+  saveSettings,
   saveQueues,
   saveSiteProjects
 } from './store.ts'
@@ -54,7 +65,9 @@ import { getToolStatus } from './tools.ts'
 import { checkForUpdates } from './update.ts'
 import {
   broadcast,
+  cancelQuit,
   closeSplash,
+  closeHandoffWindow,
   createHandoffWindow,
   createMainWindow,
   createSplashWindow,
@@ -70,12 +83,40 @@ import { DashRunner } from './hls/dash.ts'
 import {
   primeYouTube,
   refreshYouTubeFormat,
+  resolveMediaPage,
   resolveYouTube,
   resolveYouTubeInstant
 } from './youtube.ts'
 import { isSupportedYouTubeUrl, youtubeFormatId } from './youtube-url.ts'
+import { xPostUrl } from '../shared/x-post.ts'
 
 const log = logger('main')
+// Package smoke tests use disposable profiles. Reject a non-temporary target
+// so diagnostics cannot touch real download state.
+const verifyProfileRequested = process.argv.includes('--verify-profile')
+const smokeBridgeRequested = process.argv.includes('--smoke-bridge')
+const diagnosticRoot = verifyProfileRequested
+  ? process.env.DRACO_VERIFY_PROFILE_ROOT
+  : smokeBridgeRequested ? process.env.DRACO_SMOKE_PROFILE_ROOT : undefined
+if ((verifyProfileRequested || smokeBridgeRequested) && !diagnosticRoot) {
+  throw new Error('Disposable profile path is required for diagnostics')
+}
+if (diagnosticRoot) {
+  const root = resolve(diagnosticRoot)
+  if (!root.startsWith(resolve(tmpdir()) + sep)) {
+    throw new Error('Diagnostics require a temporary directory')
+  }
+  mkdirSync(root, { recursive: true })
+  app.setPath('userData', root)
+}
+const lastPersistenceNotice = new Map<string, number>()
+setPersistenceErrorHandler((scope, error) => {
+  log.error(`could not save ${scope}: ${String(error)}`)
+  const now = Date.now()
+  if (now - (lastPersistenceNotice.get(scope) ?? 0) < 30_000) return
+  lastPersistenceNotice.set(scope, now)
+  send('toast', { kind: 'error', message: `Could not save ${scope}. Check available disk space and permissions.` })
+})
 
 /**
  * Startup is a real sequence, not a delay: the splash goes up before any slow
@@ -87,13 +128,17 @@ const log = logger('main')
 
 const STEPS: Array<{ id: BootstrapStepId; label: string }> = [
   { id: 'appdata', label: 'Preparing app data' },
-  { id: 'settings', label: 'Loading settings' },
+  { id: 'settings', label: 'Preparing secure storage and settings' },
   { id: 'restore', label: 'Restoring downloads' },
   { id: 'bridge', label: 'Starting the browser bridge' },
   { id: 'integration', label: 'Registering browser integration' }
 ]
 
 let ctx: AppContext | null = null
+/** Restored dialogs appear only when a browser confirms it still owns the paused item. */
+const restoredHandoffsAwaitingStatus = new Set<string>()
+/** Shell targets arriving from a second instance before the manager exists. */
+const earlyShellTargets: ReturnType<typeof shellTargetsFromArgv> = []
 let clipboardWatcher: ClipboardWatcher | null = null
 
 export function updateClipboardWatcher(enabled: boolean) {
@@ -103,6 +148,7 @@ export function updateClipboardWatcher(enabled: boolean) {
 const state: BootstrapState = freshState()
 let finished = false
 let powerSaveBlockerId: number | null = null
+let initialRestoreDone = false
 const taskStatuses = new Map<string, TaskStatus>()
 
 /**
@@ -134,8 +180,14 @@ if (!app.requestSingleInstanceLock()) {
     // Double-clicking a `.torrent` while Draco is already running is a second
     // launch: Windows hands the path to the new process, which finds the lock
     // taken and forwards its whole command line here.
-    for (const target of shellTargetsFromArgv(argv)) {
-      if (ctx) void openShellTarget(ctx, target)
+    const targets = shellTargetsFromArgv(argv)
+    if (ctx) {
+      for (const target of targets) void openShellTarget(ctx, target)
+    } else {
+      // Still bootstrapping: `openShellTarget` needs the manager, which does
+      // not exist yet. Buffer the targets so `finish()` drains them instead of
+      // silently dropping a double-clicked torrent.
+      earlyShellTargets.push(...targets)
     }
     showMainWindow()
   })
@@ -169,7 +221,17 @@ async function main(): Promise<void> {
   await app.whenReady()
   app.setAppUserModelId('com.nihil.draco')
 
-  createSplashWindow()
+  if (verifyProfileRequested) {
+    await verifyDisposableProfile()
+    return
+  }
+
+  const splash = smokeBridgeRequested ? null : createSplashWindow()
+  // Bootstrap starts before the splash renderer has finished loading, so any
+  // state published in that gap would never be heard - worst case a startup
+  // error that leaves a spinner on screen with no Retry/Continue. Re-publish
+  // the current state the moment the splash can receive it.
+  splash?.webContents.on('did-finish-load', () => publish())
 
   /**
    * The scheduler owns the queues and is built after the manager, which needs
@@ -177,6 +239,7 @@ async function main(): Promise<void> {
    * still holds no queue list of its own.
    */
   let queueSpeedLimitLookup: (queueId: string) => number | null = () => null
+  let queuePolicyLookup: (queueId: string) => Queue | undefined = () => undefined
 
   const manager = new DownloadManager({
     /*
@@ -192,19 +255,21 @@ async function main(): Promise<void> {
       persistTasks(tasks)
       // Broadcast rather than sent: each open progress window is watching the
       // same feed for the one task it is about.
-      broadcast('tasks:changed', tasks)
+      broadcast('tasks:changed', publicTasks(tasks))
       updateOpenProgressWindows(tasks)
 
       let newlyDone = 0
+      let lastNewlyDoneName: string | null = null
       let hasActive = false
       const seen = new Set<string>()
       for (const t of tasks) {
         seen.add(t.id)
         if (t.status === 'done' && taskStatuses.get(t.id) !== 'done') {
           newlyDone++
+          lastNewlyDoneName = t.filename
         }
         taskStatuses.set(t.id, t.status)
-        if (t.status === 'downloading' || t.status === 'probing') {
+        if (t.status === 'downloading' || t.status === 'probing' || t.status === 'processing' || t.status === 'scanning') {
           hasActive = true
         }
       }
@@ -215,11 +280,22 @@ async function main(): Promise<void> {
         if (!seen.has(id)) taskStatuses.delete(id)
       }
 
-      if (newlyDone > 0) {
-        new Notification({
+      if (newlyDone > 0 && initialRestoreDone) {
+        if (getSettings().completionSound) send('download:complete', null)
+        const notification = new Notification({
+          silent: true,
           title: newlyDone === 1 ? 'Download Complete' : `${newlyDone} Downloads Complete`,
-          body: newlyDone === 1 ? tasks.find(t => t.status === 'done')?.filename : 'Your files have finished downloading.',
-        }).show()
+          body: newlyDone === 1
+            ? lastNewlyDoneName ?? 'Your download has finished.'
+            : 'Your files have finished downloading.',
+        })
+        let dismissTimer: ReturnType<typeof setTimeout> | undefined
+        notification.once('show', () => {
+          dismissTimer = setTimeout(() => notification.close(), 5000)
+          dismissTimer.unref()
+        })
+        notification.once('close', () => clearTimeout(dismissTimer))
+        notification.show()
       }
 
       if (hasActive && powerSaveBlockerId === null) {
@@ -229,6 +305,7 @@ async function main(): Promise<void> {
         powerSaveBlockerId = null
       }
     },
+    onFinalizationStage: flushTasks,
     onProgress: (updates) => {
       broadcast('tasks:progress', updates)
       for (const update of updates) {
@@ -265,6 +342,7 @@ async function main(): Promise<void> {
     // Queues belong to the scheduler, so the manager asks rather than owning a
     // second copy of the list. Assigned after the scheduler exists, below.
     queueSpeedLimit: (queueId) => queueSpeedLimitLookup(queueId),
+    queuePolicy: (queueId) => queuePolicyLookup(queueId),
     createDashRunner: (task, context) => new DashRunner(task, context),
     refreshYouTube: async (task, force) => {
       if (!task.youtube) throw new Error('Missing YouTube source metadata')
@@ -292,6 +370,7 @@ async function main(): Promise<void> {
 
   queueSpeedLimitLookup = (queueId) =>
     scheduler.list().find((queue) => queue.id === queueId)?.speedLimit ?? null
+  queuePolicyLookup = (queueId) => scheduler.list().find((queue) => queue.id === queueId)
 
   const siteProjects = new SiteProjectManager({
     manager,
@@ -318,6 +397,8 @@ async function main(): Promise<void> {
     pipe,
     media: [],
     pendingHandoffs: [],
+    browserInbox: new BrowserHandoffInbox(getPaths().browserHandoffsFile, electronJsonCipher),
+    handoffCommits: new Map(),
     pendingOpens: [],
     clipboardItems: [],
     lastHandoffAt: null,
@@ -327,14 +408,114 @@ async function main(): Promise<void> {
 
   registerIpc(ctx)
   ipcMain.handle('bootstrap:retry', () => void runBootstrap())
-  ipcMain.handle('bootstrap:continue', () => finish())
+  ipcMain.handle('bootstrap:continue', () => {
+    if (state.error?.canContinue) finish()
+  })
 
   await runBootstrap()
 }
 
+/** Runs the real packaged state loaders and recovery without registering browsers. */
+async function verifyDisposableProfile(): Promise<void> {
+  const paths = ensureDirs()
+  const reportPath = join(paths.root, 'profile-verification.json')
+  try {
+    await ensureElectronJsonCipherReady(paths.root)
+    await loadSettings()
+    const originalSettings = getSettings()
+    const chosenTheme = originalSettings.theme === 'dark' ? 'light' : 'dark'
+    const chosenLanguage = originalSettings.language === 'tr' ? 'en' : 'tr'
+    await Promise.all([
+      saveSettings({ theme: chosenTheme }),
+      saveSettings({ language: chosenLanguage })
+    ])
+    if (getSettings().theme !== chosenTheme || getSettings().language !== chosenLanguage) {
+      throw new Error('Concurrent settings patches did not both commit')
+    }
+    const savedSettings = JSON.parse(await readFile(paths.settingsFile, 'utf8'))
+    if (savedSettings.theme !== chosenTheme || savedSettings.language !== chosenLanguage) {
+      throw new Error('Concurrent settings patches were not durable')
+    }
+    const heldSettings = paths.settingsFile + '.smoke-held'
+    await rename(paths.settingsFile, heldSettings)
+    try {
+      await mkdir(paths.settingsFile)
+      try {
+        await saveSettings({ theme: originalSettings.theme })
+        throw new Error('Blocked settings write unexpectedly succeeded')
+      } catch (error) {
+        if (String(error).includes('unexpectedly succeeded')) throw error
+      }
+      if (getSettings().theme !== chosenTheme) {
+        throw new Error('Failed settings write changed the live settings')
+      }
+    } finally {
+      await rm(paths.settingsFile, { recursive: true, force: true })
+      await rename(heldSettings, paths.settingsFile)
+    }
+    await saveSettings({ theme: originalSettings.theme })
+    const settingsCommitPassed = getSettings().theme === originalSettings.theme
+    const tasks = await loadTasks()
+    const manager = new DownloadManager({
+      getSettings: () => ({ ...getSettings(), tempDir: paths.tempDir }),
+      onTasks: persistTasks,
+      onProgress() {}
+    })
+    let writeRetryPassed = false
+    if (process.env.DRACO_VERIFY_FAIL_FIRST_WRITE === '1') {
+      // The profile is already constrained to a disposable temp directory.
+      // Block the primary rename once, then confirm a second flush keeps the
+      // restored task snapshot instead of silently losing it.
+      const held = paths.tasksFile + '.smoke-held'
+      await rename(paths.tasksFile, held)
+      try {
+        await mkdir(paths.tasksFile)
+        await manager.load(tasks)
+        try {
+          await flushTasks()
+          throw new Error('Blocked task write unexpectedly succeeded')
+        } catch (error) {
+          if (String(error).includes('unexpectedly succeeded')) throw error
+        }
+      } finally {
+        await rm(paths.tasksFile, { recursive: true, force: true })
+        await rename(held, paths.tasksFile)
+      }
+      await flushTasks()
+      writeRetryPassed = true
+    } else {
+      await manager.load(tasks)
+      await flushTasks()
+    }
+    const inbox = new BrowserHandoffInbox(paths.browserHandoffsFile, electronJsonCipher)
+    const handoffs = await inbox.load()
+    await writeFile(reportPath, JSON.stringify({
+      tasks: manager.list().map((task) => ({
+        id: task.id, handoffId: task.handoffId, status: task.status, received: task.received
+      })),
+      writeRetryPassed,
+      settingsCommitPassed,
+      handoffIds: handoffs.map((item) => item.id)
+    }), 'utf8')
+    manager.dispose()
+    app.exit(0)
+  } catch (error) {
+    await writeFile(reportPath, JSON.stringify({ error: String(error) }), 'utf8').catch(() => {})
+    app.exit(1)
+  }
+}
+
 /** The retryable half. A step that already succeeded is not run again. */
-async function runBootstrap(): Promise<void> {
+let bootstrapWork: Promise<void> | null = null
+function runBootstrap(): Promise<void> {
+  if (bootstrapWork) return bootstrapWork
+  bootstrapWork = runBootstrapOnce().finally(() => { bootstrapWork = null })
+  return bootstrapWork
+}
+
+async function runBootstrapOnce(): Promise<void> {
   if (!ctx) return
+  if (finished) return
   state.error = null
 
   await runStep('appdata', async () => {
@@ -342,8 +523,10 @@ async function runBootstrap(): Promise<void> {
     setLogDirectory(paths.logs)
     setTorrentStoreDir(paths.torrents)
   })
+  if (state.error) return
 
   await runStep('settings', async () => {
+    await ensureElectronJsonCipherReady(getPaths().root)
     await loadSettings()
     // Before any task can run, so the first protected download of the session
     // is answered from the store rather than failing while it loads.
@@ -351,6 +534,7 @@ async function runBootstrap(): Promise<void> {
     ctx!.manager.restoreQuota(await loadQuotaState())
     await loadCategories()
   })
+  if (state.error) return
 
   await runStep('restore', async () => {
     const [tasks, queues, clipboardItems] = await Promise.all([
@@ -359,6 +543,23 @@ async function runBootstrap(): Promise<void> {
       loadClipboardItems()
     ])
     await ctx!.manager.load(tasks)
+    // A failed restore step can be retried from the splash. Rebuild this view
+    // from disk instead of appending the same confirmation a second time.
+    ctx!.pendingHandoffs = ctx!.pendingHandoffs.filter((request) => request.kind !== 'file')
+    restoredHandoffsAwaitingStatus.clear()
+    const restoredHandoffs = await ctx!.browserInbox.load()
+    const acceptedHandoffs = new Set(tasks.map((task) => task.handoffId).filter(Boolean))
+    for (const request of restoredHandoffs) {
+      if (acceptedHandoffs.has(request.id)) {
+        await ctx!.browserInbox.remove(request.id).catch((error) =>
+          log.warn(`could not clear already accepted browser confirmation ${request.id}: ${String(error)}`)
+        )
+      } else {
+        ctx!.pendingHandoffs.push(request)
+        restoredHandoffsAwaitingStatus.add(request.id)
+      }
+    }
+    initialRestoreDone = true
     ctx!.scheduler.load(queues)
     await ctx!.siteProjects.start()
     ctx!.media = []
@@ -366,12 +567,18 @@ async function runBootstrap(): Promise<void> {
       ? { ...item, status: 'error', error: 'Preparation was interrupted when Draco closed.' }
       : item)
   })
+  if (state.error) return
 
   await runStep('bridge', async () => {
-    await ctx!.pipe.start()
+    // The host authenticates with this before it may send anything, so the
+    // secret has to exist before the pipe accepts its first connection.
+    const secret = await ensurePipeSecret()
+    await ctx!.pipe.start(secret)
   })
+  if (state.error) return
 
   await runStep('integration', async () => {
+    if (smokeBridgeRequested) return
     // The installer already claims `.torrent` and `magnet:`, but a dev run and
     // a portable copy have no installer, and another client may have taken
     // them since. Best-effort, like the browser registration below it.
@@ -404,6 +611,11 @@ function finish(): void {
   if (!ctx || finished) return
   finished = true
 
+  if (smokeBridgeRequested) {
+    log.info('disposable browser bridge ready')
+    return
+  }
+
   // What this launch was asked to open, if it was started by a double-clicked
   // torrent or a magnet link rather than by the user.
   const shellTargets = shellTargetsFromArgv(process.argv)
@@ -413,13 +625,30 @@ function finish(): void {
   // first place; the window must not open minimised on top of it. The same
   // goes for a torrent the shell handed us.
   createMainWindow(
-    getSettings().startMinimized && ctx.pendingHandoffs.length === 0 && shellTargets.length === 0
+    getSettings().startMinimized &&
+    ctx.pendingHandoffs.every((request) => restoredHandoffsAwaitingStatus.has(request.id)) &&
+    shellTargets.length === 0
   )
   createTray({
     onShow: showMainWindow,
-    onPauseAll: () => void ctx!.manager.pauseAll(),
+    onPauseAll: () => void ctx!.manager.pauseAll(true),
     onQuit: quit
   })
+
+  const expiryTimer = setInterval(() => {
+    if (!ctx) return
+    void ctx.browserInbox.prune(Date.now(), (id) => ctx?.handoffCommits.has(id) ?? false)
+      .then((expired) => {
+        for (const id of expired) {
+          restoredHandoffsAwaitingStatus.delete(id)
+          const at = ctx?.pendingHandoffs.findIndex((request) => request.id === id) ?? -1
+          if (at >= 0) ctx?.pendingHandoffs.splice(at, 1)
+          closeHandoffWindow(id)
+        }
+      })
+      .catch((error) => log.error(`could not expire browser confirmations: ${String(error)}`))
+  }, 10_000)
+  expiryTimer.unref?.()
 
   ctx.scheduler.start()
   clipboardWatcher?.start()
@@ -440,8 +669,11 @@ function finish(): void {
 
   // After the window exists, so the Add-torrent dialog has somewhere to open.
   // The queue in `ctx.pendingOpens` is what the renderer actually drains, so
-  // this cannot race the first paint.
-  for (const target of shellTargets) void openShellTarget(ctx, target)
+  // this cannot race the first paint. Shell targets forwarded by a second
+  // instance while bootstrap was still running are drained here too.
+  for (const target of [...earlyShellTargets.splice(0), ...shellTargets]) {
+    void openShellTarget(ctx, target)
+  }
 
   log.info('ready')
 }
@@ -505,12 +737,12 @@ async function runStep(id: BootstrapStepId, work: () => Promise<void>): Promise<
   } catch (err) {
     step.status = 'failed'
     step.detail = err instanceof Error ? err.message : String(err)
-    // Only the first two steps are load-bearing; the rest degrade gracefully,
-    // so the splash offers "Continue anyway" rather than a dead end.
+    // Restoring saved state is load-bearing too: continuing with an empty
+    // manager could overwrite downloads that failed to load.
     state.error = {
       step: id,
       message: step.detail,
-      canContinue: id !== 'appdata' && id !== 'settings'
+      canContinue: id === 'bridge' || id === 'integration'
     }
     log.error(`bootstrap step ${id} failed`, err)
   }
@@ -530,6 +762,7 @@ function publish(): void {
 
 const hostReplyCache = new Map<string, { expiresAt: number; reply: HostReply }>()
 const hostReplyInFlight = new Map<string, Promise<HostReply>>()
+const cancelledHandoffs = new Map<string, number>()
 const HOST_REPLY_TTL_MS = 5 * 60_000
 const HOST_REPLY_CACHE_MAX = 512
 
@@ -538,6 +771,9 @@ function hostMessageCanMutate(type: HostMessage['type']): boolean {
 }
 
 function pruneHostReplyCache(now: number): void {
+  for (const [id, expiresAt] of cancelledHandoffs) {
+    if (expiresAt <= now) cancelledHandoffs.delete(id)
+  }
   for (const [key, entry] of hostReplyCache) {
     if (entry.expiresAt <= now) hostReplyCache.delete(key)
   }
@@ -559,7 +795,11 @@ async function handleHostMessage(message: HostMessage): Promise<HostReply> {
   pruneHostReplyCache(now)
   const requestId = message.requestId
   if (requestId && hostMessageCanMutate(message.type)) {
-    const cached = hostReplyCache.get(requestId)
+    // Download replies are reconstructed from durable task/inbox state below.
+    // A cached `taken` after the user removes a task could cancel a browser
+    // replay even though no recoverable Draco task exists any more.
+    const cached = message.type === 'download' || message.type === 'downloadBatch'
+      ? undefined : hostReplyCache.get(requestId)
     if (cached && cached.expiresAt > now) return cached.reply
 
     const existing = hostReplyInFlight.get(requestId)
@@ -567,8 +807,10 @@ async function handleHostMessage(message: HostMessage): Promise<HostReply> {
 
     const work = (async () => {
       const reply = await handleHostMessageOnce(app, message)
-      hostReplyCache.set(requestId, { expiresAt: Date.now() + HOST_REPLY_TTL_MS, reply })
-      pruneHostReplyCache(Date.now())
+      if (message.type !== 'download' && message.type !== 'downloadBatch') {
+        hostReplyCache.set(requestId, { expiresAt: Date.now() + HOST_REPLY_TTL_MS, reply })
+        pruneHostReplyCache(Date.now())
+      }
       return reply
     })()
 
@@ -603,7 +845,49 @@ async function handleHostMessageOnce(ctx: AppContext, message: HostMessage): Pro
       }
     }
 
+    case 'handoffStatus':
+    case 'handoffCancel': {
+      const commit = ctx.handoffCommits.get(message.handoffId)
+      if (message.type === 'handoffStatus' && commit) return { ok: true, pending: true }
+      if (commit) await commit.catch(() => {})
+      const accepted = committedBrowserTaskCount(ctx.manager, message.handoffId) > 0
+      if (accepted) return { ok: true, taken: true }
+      if (message.type === 'handoffCancel') {
+        cancelledHandoffs.set(message.handoffId, Date.now() + HOST_REPLY_TTL_MS)
+        try {
+          await ctx.browserInbox.remove(message.handoffId)
+        } catch (error) {
+          return { ok: false, pending: true, error: `Could not clear browser confirmation: ${String(error)}` }
+        }
+        const at = ctx.pendingHandoffs.findIndex((request) => request.id === message.handoffId)
+        if (at >= 0) ctx.pendingHandoffs.splice(at, 1)
+        restoredHandoffsAwaitingStatus.delete(message.handoffId)
+        closeHandoffWindow(message.handoffId)
+        return { ok: true, taken: false }
+      }
+      const request = ctx.pendingHandoffs.find((entry) => entry.id === message.handoffId)
+      if (request?.expiresAt && request.expiresAt <= Date.now()) {
+        await ctx.browserInbox.remove(request.id)
+        ctx.pendingHandoffs.splice(ctx.pendingHandoffs.indexOf(request), 1)
+        restoredHandoffsAwaitingStatus.delete(request.id)
+        closeHandoffWindow(request.id)
+        return { ok: true, pending: false }
+      }
+      const pending = Boolean(request)
+      if (!pending) restoredHandoffsAwaitingStatus.delete(message.handoffId)
+      if (pending && restoredHandoffsAwaitingStatus.delete(message.handoffId)) {
+        createHandoffWindow(message.handoffId)
+      }
+      return { ok: true, pending }
+    }
+
     case 'download': {
+      if (committedBrowserTaskCount(ctx.manager, message.requestId) > 0) {
+        return { ok: true, taken: true }
+      }
+      if (message.requestId && cancelledHandoffs.has(message.requestId)) {
+        return { ok: true, taken: false }
+      }
       const settings = getSettings()
       if (!settings.takeoverEnabled) return { ok: true, taken: false }
 
@@ -626,8 +910,14 @@ async function handleHostMessageOnce(ctx: AppContext, message: HostMessage): Pro
          * dialogs.
          */
         if (settings.confirmHandoff && !message.bulk) {
+          const handoffId = message.requestId ?? randomUUID()
+          if (ctx.pendingHandoffs.some((request) => request.id === handoffId)) {
+            return { ok: true, pending: true, handoffId }
+          }
+          if (ctx.pendingHandoffs.length >= 12) return { ok: true, taken: false }
           const request: HandoffRequest = {
-            id: randomUUID(),
+            id: handoffId,
+            expiresAt: message.handoffExpiresAt ?? Date.now() + 5 * 60_000,
             kind: 'file',
             url,
             filename: message.filename,
@@ -641,17 +931,26 @@ async function handleHostMessageOnce(ctx: AppContext, message: HostMessage): Pro
             pageUrl: message.referer
           }
 
-          pushPendingHandoff(ctx, request)
+          await ctx.browserInbox.offer(request)
+          try {
+            pushPendingHandoff(ctx, request)
+          } catch (error) {
+            await ctx.browserInbox.remove(request.id)
+            throw error
+          }
 
           log.info(`asking about ${message.filename ?? url}`)
           // Its own small window, in front of the browser. The main window is
           // deliberately left where it was: the question was asked in the
           // browser and the answer belongs there too.
           createHandoffWindow(request.id)
-          return { ok: true, taken: true }
+          return { ok: true, pending: true, handoffId }
         }
 
-        const task = handoffToTask(ctx, message)
+        const task = handoffToTask(ctx, message, false)
+        task.handoffId = message.requestId
+        await commitBrowserTasks(ctx.manager, [task.id], flushTasks)
+        announce(task)
         log.info(`took over ${task.filename}`)
         showMainWindow()
         return { ok: true, taken: true }
@@ -667,19 +966,27 @@ async function handleHostMessageOnce(ctx: AppContext, message: HostMessage): Pro
       // A bulk action never asks. That is the whole reason it is a bulk action,
       // and it is why these skip the confirm window and the progress windows
       // that a single click would open.
-      let queued = 0
-      for (const item of message.items) {
+      const accepted: string[] = []
+      let alreadyQueued = 0
+      const existingReceipts = new Set(ctx.manager.list().map((task) => task.handoffId))
+      for (const [index, item] of message.items.entries()) {
+        const receiptId = batchHandoffId(message.requestId, index)
+        if (receiptId && existingReceipts.has(receiptId)) {
+          alreadyQueued++
+          continue
+        }
         try {
           const url = validateUrl(item.url, { allowPrivate: false })
-          handoffToTask(ctx, {
+          const task = handoffToTask(ctx, {
             url,
             filename: item.filename,
             referer: message.referer,
             cookie: item.cookie,
             userAgent: message.userAgent,
             bulk: true
-          })
-          queued++
+          }, false)
+          task.handoffId = receiptId
+          accepted.push(task.id)
         } catch (err) {
           // One bad link in a page's worth of them is not a reason to drop the
           // rest; the count tells the extension how many actually landed.
@@ -687,8 +994,16 @@ async function handleHostMessageOnce(ctx: AppContext, message: HostMessage): Pro
         }
       }
 
+      if (accepted.length > 0) {
+        try {
+          await commitBrowserTasks(ctx.manager, accepted, flushTasks)
+        } catch (error) {
+          return { ok: false, queued: 0, error: `Could not save accepted downloads: ${String(error)}` }
+        }
+        showMainWindow()
+      }
+      const queued = alreadyQueued + accepted.length
       log.info(`took over ${queued} of ${message.items.length} bulk link(s)`)
-      if (queued > 0) showMainWindow()
       return { ok: true, queued }
     }
 
@@ -806,7 +1121,23 @@ async function handleHostMessageOnce(ctx: AppContext, message: HostMessage): Pro
         for (const relatedUrl of message.relatedMediaUrls ?? []) {
           validateUrl(relatedUrl, { allowPrivate: false })
         }
-        const candidate = recordMedia(ctx, message)
+        const postUrl = message.mediaUrl === message.pageUrl ? xPostUrl(message.pageUrl) : null
+        const post = postUrl ? await resolveMediaPage(postUrl, {
+          referer: postUrl,
+          cookie: message.cookie,
+          userAgent: message.userAgent
+        }) : null
+        const candidate = postUrl
+          ? recordMedia(ctx, {
+              ...message,
+              pageUrl: postUrl,
+              mediaUrl: postUrl,
+              pageTitle: post!.title,
+              variants: post!.variants,
+              kind: 'file' as const,
+              relatedMediaUrls: []
+            })
+          : recordMedia(ctx, message)
 
         // A media message only ever arrives because someone pressed the button
         // on a video, so it gets the same window an ordinary download gets -
@@ -855,20 +1186,37 @@ app.on('before-quit', (event) => {
   // therefore asynchronous: hold the quit, drain, then exit for real.
   shutdownStarted = true
   event.preventDefault()
-  void shutdown().finally(() => app.exit(0))
+  void shutdown().then(() => {
+    destroyTray()
+    app.exit(0)
+  }).catch((error) => {
+    shutdownStarted = false
+    cancelQuit()
+    log.error(`shutdown could not save state: ${String(error)}`)
+    showMainWindow()
+    dialog.showErrorBox('Draco could not quit safely',
+      `One or more downloads could not stop or their latest state could not be saved. Draco remains open. Check disk space and folder permissions, then try Quit again.\n\n${String(error)}`)
+  })
 })
 
 async function shutdown(): Promise<void> {
   log.info('shutting down')
-  destroyTray()
   clipboardWatcher?.stop()
   ctx?.scheduler.stop()
   ctx?.siteProjects.dispose()
-  await ctx?.manager.shutdown()
-  await ctx?.pipe.stop()
-  await flushTasks()
-  await flushQuotaState()
-  await closeDispatchers()
+  let managerError: unknown = null
+  try {
+    await ctx?.manager.shutdown()
+  } catch (error) {
+    managerError = error
+    log.error('manager shutdown encountered an error', error)
+  }
+  await ctx?.pipe.stop().catch((error) => log.error('pipe server stop failed', error))
+  const flushes = await Promise.allSettled([flushTasks(), flushQuotaState()])
+  const failures = flushes.filter((result): result is PromiseRejectedResult => result.status === 'rejected')
+  await closeDispatchers().catch(() => {})
+  if (managerError) throw managerError
+  if (failures.length > 0) throw new AggregateError(failures.map((result) => result.reason), 'State flush failed')
 }
 
 app.on('window-all-closed', () => {

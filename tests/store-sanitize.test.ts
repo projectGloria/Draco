@@ -46,6 +46,12 @@ describe('sanitizeTasks', () => {
     strictEqual(row.received, 400)
   })
 
+  it('retains bounded browser receipts needed to deduplicate after restart', () => {
+    const receipt = 'batch:' + 'a'.repeat(64) + ':199'
+    strictEqual(sanitizeTasks([task({ handoffId: receipt })], DEFAULT_DIR)[0].handoffId, receipt)
+    strictEqual(sanitizeTasks([task({ handoffId: 'x'.repeat(129) })], DEFAULT_DIR)[0].handoffId, undefined)
+  })
+
   it('returns nothing for input that is not a list', () => {
     strictEqual(sanitizeTasks(null, DEFAULT_DIR).length, 0)
     strictEqual(sanitizeTasks({ id: 'x' }, DEFAULT_DIR).length, 0)

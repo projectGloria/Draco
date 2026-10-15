@@ -1,0 +1,1122 @@
+
+> draco@0.1.2 test
+> node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON --test "tests/**/*.test.ts"
+
+✔ requires a matching publisher digest before an executable archive can be installed (88.3693ms)
+[manager] Added task 9006ea2c-d4cf-40ff-9c7f-fb18945be263 (no-password.bin) - autoStart: true
+[manager] Launching task 9006ea2c-d4cf-40ff-9c7f-fb18945be263 (no-password.bin)
+[manager] Start requested for 1 tasks
+[manager] Task 9006ea2c-d4cf-40ff-9c7f-fb18945be263 (no-password.bin) failed: HttpStatusError: HTTP 401 Unauthorized
+    at probeUrl (file:///C:/Users/Nihil/Desktop/Github%20Repos/Draco/src/main/engine/probe.ts:264:13)
+    at process.processTicksAndRejections (node:internal/process/task_queues:104:5)
+    at async TaskRunner.run (file:///C:/Users/Nihil/Desktop/Github%20Repos/Draco/src/main/engine/task.ts:462:15)
+    at async TaskRunner.runLifecycle (file:///C:/Users/Nihil/Desktop/Github%20Repos/Draco/src/main/engine/task.ts:254:9)
+    at async TaskRunner.start (file:///C:/Users/Nihil/Desktop/Github%20Repos/Draco/src/main/engine/task.ts:241:7)
+[manager] Added task f5b75cf1-5ab5-43aa-907e-5caa2410f7b5 (protected.bin) - autoStart: true
+[manager] Launching task f5b75cf1-5ab5-43aa-907e-5caa2410f7b5 (protected.bin)
+[manager] Start requested for 1 tasks
+▶ downloading a password-protected file
+  ✔ fails with an actionable message when no password is saved (179.1711ms)
+[task] protected.bin: reserved 524288 bytes (sparse)
+[manager] Task f5b75cf1-5ab5-43aa-907e-5caa2410f7b5 (protected.bin) finished successfully
+[manager] Added task e3e3e359-9209-42f3-bd21-cde2c21ac03e (wrong.bin) - autoStart: true
+[manager] Launching task e3e3e359-9209-42f3-bd21-cde2c21ac03e (wrong.bin)
+[manager] Start requested for 1 tasks
+  ✔ downloads the whole file over several authenticated connections (933.7882ms)
+[manager] Task e3e3e359-9209-42f3-bd21-cde2c21ac03e (wrong.bin) failed: HttpStatusError: HTTP 401 Unauthorized
+    at probeUrl (file:///C:/Users/Nihil/Desktop/Github%20Repos/Draco/src/main/engine/probe.ts:264:13)
+    at process.processTicksAndRejections (node:internal/process/task_queues:104:5)
+    at async TaskRunner.run (file:///C:/Users/Nihil/Desktop/Github%20Repos/Draco/src/main/engine/task.ts:462:15)
+    at async TaskRunner.runLifecycle (file:///C:/Users/Nihil/Desktop/Github%20Repos/Draco/src/main/engine/task.ts:254:9)
+    at async TaskRunner.start (file:///C:/Users/Nihil/Desktop/Github%20Repos/Draco/src/main/engine/task.ts:241:7)
+  ✔ reports a rejected password once instead of retrying it (78.9452ms)
+✔ downloading a password-protected file (1214.9957ms)
+▶ probing a protected file
+  ✔ fails with 401 when nothing can answer the challenge (90.0673ms)
+  ✔ gets through Digest and reads the real file details (35.6281ms)
+  ✔ gets through Basic on a local server (26.3658ms)
+  ✔ fails once on a wrong password rather than hammering the server (21.8912ms)
+  ✔ authenticates every later request without being challenged again (27.3564ms)
+  ✔ sends a fresh nonce count per request, which the server checks (77.1252ms)
+  ✔ leaves an unprotected file alone (11.6983ms)
+✔ probing a protected file (320.8232ms)
+▶ the client the server sees
+  ✔ never sends a password to a server that did not ask (21.9617ms)
+  ✔ generates a client nonce that is not guessable (1.7856ms)
+✔ the client the server sees (25.0517ms)
+▶ parseChallenges
+  ✔ reads a plain Basic challenge (2.7012ms)
+  ✔ reads a Digest challenge with all its parameters (0.6082ms)
+  ✔ splits several challenges offered in one header (0.4517ms)
+  ✔ joins the repeated header form undici hands over (0.3986ms)
+  ✔ reads the stale flag, which is not a rejection (0.3215ms)
+  ✔ unescapes a quoted realm (0.4306ms)
+  ✔ ignores schemes it cannot answer, and junk (0.3866ms)
+✔ parseChallenges (9.5961ms)
+▶ chooseChallenge
+  ✔ prefers Digest over Basic, and SHA-256 over MD5 (1.522ms)
+  ✔ skips a Digest challenge with no nonce, which cannot be answered (0.4774ms)
+  ✔ has nothing to choose from an empty list (0.3561ms)
+  ✔ skips algorithms and qop modes it cannot compute rather than choosing them over Basic (0.3416ms)
+✔ chooseChallenge (4.3377ms)
+▶ basicAuthHeader
+  ✔ matches the example every RFC uses (0.556ms)
+  ✔ encodes a non-ASCII password as UTF-8 (0.3198ms)
+✔ basicAuthHeader (1.5019ms)
+▶ digestAuthHeader
+  ✔ computes the response RFC 2617 documents (5.1615ms)
+  ✔ answers auth when the server offers auth-int as well (0.6035ms)
+  ✔ drops qop, nc and cnonce for a server that offered no qop (2.4235ms)
+  ✔ hashes with SHA-256 when the server asks for it (0.6686ms)
+  ✔ folds the client nonce into HA1 for a -sess algorithm (0.6423ms)
+  ✔ escapes quotes so a hostile realm cannot forge header parameters (2.1181ms)
+✔ digestAuthHeader (12.33ms)
+▶ digestUri
+  ✔ is the path and query, never the host (0.493ms)
+✔ digestUri (0.7408ms)
+▶ HttpAuthenticator
+  ✔ sends nothing until a server has asked (0.9592ms)
+  ✔ resolves new credentials when a different realm challenges on the same origin (4.5192ms)
+  ✔ arms itself from a challenge and answers every later request (0.6086ms)
+  ✔ never sends an armed password to another origin (0.4487ms)
+  ✔ gives every Digest request its own count and client nonce (6.4516ms)
+  ✔ computes the response over the URL being requested (0.5773ms)
+  ✔ does not retry when nobody has a password for the realm (0.2664ms)
+  ✔ remembers the realm even when it could not answer for it (0.1965ms)
+  ✔ does not retry a challenge it cannot answer (0.178ms)
+  ✔ refuses Basic over plain http, where the password is the wire (0.2659ms)
+  ✔ still answers Digest over plain http, which never sends the password (0.3192ms)
+  ✔ stops after the same nonce is refused - the password is wrong (0.4159ms)
+  ✔ answers again when the server says only that the nonce went stale (0.6218ms)
+  ✔ answers a genuinely new nonce, counting from one again (2.6383ms)
+  ✔ asks for the password once and keeps it (0.4826ms)
+✔ HttpAuthenticator (20.6121ms)
+(node:13136) ExperimentalWarning: stripTypeScriptTypes is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+✔ does not restore or start integration after secure settings fail (17.5578ms)
+✔ does not allow an empty manager to replace tasks after restoration fails (12.6692ms)
+✔ shares concurrent retries instead of loading state twice (6.1864ms)
+✔ starts accepted browser tasks only after their snapshot is durable (4.1043ms)
+✔ returns ownership to the browser when the snapshot cannot be saved (1.7864ms)
+✔ finds a committed single handoff after the reply is lost and the app restarts (0.7277ms)
+✔ finds a whole bulk handoff without confusing it with a single request (1.3698ms)
+Downloading http://127.0.0.1:53395/tool.exe
+Downloading http://127.0.0.1:53395/tool.exe
+✔ verifies compressed build downloads, reuses verified files and preserves them on a bad update (547.6761ms)
+(node:1892) ExperimentalWarning: stripTypeScriptTypes is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+✔ changes live categories only after successful persistence, and recovers from failure (13.6764ms)
+✔ verifies the complete final file with each accepted checksum algorithm (189.0099ms)
+✔ failed concurrent work waits for active writes and stops taking new jobs (11.051ms)
+✔ concurrent work preserves order and rejects invalid worker counts (1.4075ms)
+▶ IPC surface parity
+  ✔ scanned the expected number of channels (1.689ms)
+  ✔ every preload call has a main handler (1.5389ms)
+  ✔ every main handler has a preload call (0.424ms)
+  ✔ every preload subscription has a main emitter (0.3576ms)
+  ✔ every main emitter has a preload subscription (0.5735ms)
+✔ IPC surface parity (7.3803ms)
+▶ i18n dictionary parity
+  ✔ en has no duplicate keys (0.559ms)
+  ✔ tr has no duplicate keys (0.4447ms)
+  ✔ tr covers exactly the keys en has (0.8452ms)
+✔ i18n dictionary parity (2.796ms)
+▶ splitConnectionBudget
+  ✔ gives the video half the larger share (2.6474ms)
+  ✔ leaves the ramp somewhere to climb to (0.3994ms)
+  ✔ never hands out fewer than one connection (0.3939ms)
+  ✔ treats a ceiling below the configured maximum as no ceiling (2.3061ms)
+  ✔ produces a ramp that is actually able to move (1.1307ms)
+✔ splitConnectionBudget (17.6933ms)
+✔ does not display URL credentials, paths, or signed query values (1.9553ms)
+▶ buildDisplayRows
+  ✔ shows a group as a single row, whatever its size (6.3635ms)
+  ✔ never lists the members of a group in the table (0.5807ms)
+  ✔ takes the position of its first member, wherever sorting put it (1.0127ms)
+  ✔ keeps every member on the group row, however sorting scattered them (0.4745ms)
+  ✔ leaves a group of one as an ordinary row (0.3618ms)
+✔ buildDisplayRows (11.7802ms)
+▶ the row standing in for a closed group
+  ✔ adds up size, progress and speed (0.9056ms)
+  ✔ totals what is known while other members are still being probed (0.4598ms)
+  ✔ counts the size the page advertised until the probe confirms one (0.5961ms)
+  ✔ prefers the confirmed size over the advertised one (0.4313ms)
+  ✔ does not let the total climb as members are probed (0.535ms)
+  ✔ reports whatever is still moving ahead of whatever has finished (0.4507ms)
+  ✔ does not let forty-eight successes hide one failure (0.3133ms)
+  ✔ says how many files are done, since one bar cannot (0.7656ms)
+  ✔ is finished only when every member is (0.3297ms)
+  ✔ rejects an empty task list rather than throwing TypeError on index 0 (1.1277ms)
+✔ the row standing in for a closed group (7.3441ms)
+▶ comparableUrl
+  ✔ ignores what never reaches the server (2.6115ms)
+  ✔ ignores a default port (0.6547ms)
+  ✔ keeps the query, which is often the identity of the file (0.4107ms)
+  ✔ reduces a magnet link to its info hash (0.755ms)
+  ✔ has no answer for something that is not a URL (0.3922ms)
+✔ comparableUrl (8.6332ms)
+▶ findDuplicate
+  ✔ finds nothing in an empty list (0.971ms)
+  ✔ matches the same URL (0.6014ms)
+  ✔ reports an unfinished duplicate too - it is already in the list (0.9002ms)
+  ✔ matches a signed media URL by the page it came from (0.7027ms)
+  ✔ matches a finished download by where it landed (0.4935ms)
+  ✔ prefers a URL match over a destination match (0.6639ms)
+  ✔ does not match an unfinished download by destination (0.4345ms)
+  ✔ ignores the task being re-examined (0.2991ms)
+✔ findDuplicate (6.2791ms)
+▶ transfer lists
+  ✔ round-trips Draco's own format with the decisions intact (1.275ms)
+  ✔ never starts an imported download by itself (0.4179ms)
+  ✔ exports the page URL of a signed download, which still resolves tomorrow (0.4124ms)
+  ✔ writes a plain list without repeats (0.5078ms)
+  ✔ reads a plain list, skipping comments and noise (0.6836ms)
+  ✔ reads a file that claims to be JSON but is not, as a list (1.2672ms)
+  ✔ refuses schemes that are not downloads (0.3559ms)
+  ✔ has nothing to say about an empty file (0.2445ms)
+  ✔ ignores JSON of some other shape (0.3076ms)
+✔ transfer lists (6.4062ms)
+✔ reports a declined or invalid popup URL instead of clearing it as sent (4.0274ms)
+✔ preserves complete captured cookie headers within the bridge limit (3.531ms)
+✔ recognizes YouTube privacy-enhanced embeds for the native extractor (2.4022ms)
+▶ browser extension startup
+  ✔ requests UI control only in Chromium (12.7309ms)
+  ✔ registers and answers messages in Chromium (14.5302ms)
+  ✔ registers and answers messages in Firefox (11.7668ms)
+  ✔ keeps Firefox files derived from the shared extension without stale copies (10.1902ms)
+✔ browser extension startup (52.8912ms)
+▶ confirmation ownership
+  ✔ releases filename selection once on timeout or storage failure (7.2893ms)
+  ✔ records a browser item before pausing so a worker crash can release it (35.7237ms)
+Draco could not track browser download: Error: storage unavailable
+    at api.storage.local.set (file:///C:/Users/Nihil/Desktop/Github%20Repos/Draco/tests/extensions.test.ts:227:49)
+    at takeOverDownload (evalmachine.<anonymous>:552:32)
+  ✔ accepted confirmation cancels the browser item (286.2442ms)
+  ✔ dismissed confirmation resumes the browser item (297.9593ms)
+  ✔ releases an expired paused item after the extension worker restarts (10.0955ms)
+✔ confirmation ownership (639.0326ms)
+✔ strips credentials of any casing across origins but preserves them on same-origin hops (15.959ms)
+✔ rejects a public redirect into localhost before connecting or forwarding credentials (2.2141ms)
+✔ rejects non-HTTP redirects before connecting (0.7624ms)
+✔ rejects HTTPS downgrades before connecting when required (0.656ms)
+✔ follows a real same-origin redirect with the shared dispatcher (103.7364ms)
+✔ streams an undici request across origins without forwarding captured secrets (84.2637ms)
+✔ follows a redirect without waiting for an unending redirect body (60.5457ms)
+[manager] Added task 654b74ef-3a32-461d-9b27-5479a8a45846 (video.mp4) - autoStart: true
+[manager] Launching task 654b74ef-3a32-461d-9b27-5479a8a45846 (video.mp4)
+[manager] Task 654b74ef-3a32-461d-9b27-5479a8a45846 (video.mp4) finished successfully
+✔ announces completion only after a configured scanner succeeds (443.9207ms)
+[manager] Added task 9f617183-4db4-4cb4-ad18-982b69f7373a (video.mp4) - autoStart: true
+[manager] Launching task 9f617183-4db4-4cb4-ad18-982b69f7373a (video.mp4)
+[manager] Task 9f617183-4db4-4cb4-ad18-982b69f7373a (video.mp4) finished successfully
+✔ commits the scanning stage before launching the scanner (258.7231ms)
+[manager] Added task fa04f890-dcb3-46d1-8b1e-ecc817d90eed (first.mp4) - autoStart: true
+[manager] Launching task fa04f890-dcb3-46d1-8b1e-ecc817d90eed (first.mp4)
+[manager] Added task 9cc21db0-a2a4-4d96-969a-88e7c18d3e13 (second.mp4) - autoStart: true
+[manager] Launching task 9cc21db0-a2a4-4d96-969a-88e7c18d3e13 (second.mp4)
+[manager] Added task e7f57ec8-ed2f-423b-ba40-c6623f317f6f (third.mp4) - autoStart: true
+[manager] Launching task e7f57ec8-ed2f-423b-ba40-c6623f317f6f (third.mp4)
+[manager] Added task d71f2871-cb58-4eeb-b48a-15217434615a (fourth.mp4) - autoStart: true
+[manager] Launching task d71f2871-cb58-4eeb-b48a-15217434615a (fourth.mp4)
+[manager] Pause requested for 1 tasks
+[manager] third.mp4: Final checks were interrupted before they could start; the downloaded file remains on disk.
+[manager] Task e7f57ec8-ed2f-423b-ba40-c6623f317f6f (third.mp4) failed: Error: Final checks were interrupted before they could start; the downloaded file remains on disk.
+    at DownloadManager.onFinished (file:///C:/Users/Nihil/Desktop/Github%20Repos/Draco/src/main/engine/manager.ts:1156:71)
+[manager] Task 9cc21db0-a2a4-4d96-969a-88e7c18d3e13 (second.mp4) finished successfully
+[manager] Task fa04f890-dcb3-46d1-8b1e-ecc817d90eed (first.mp4) finished successfully
+[manager] Task d71f2871-cb58-4eeb-b48a-15217434615a (fourth.mp4) finished successfully
+✔ runs at most two final checks and Stop removes a waiting scan (1909.8332ms)
+[manager] three.mp4: Final checks were interrupted before they could start; the downloaded file remains on disk.
+[manager] Task 172c9bd8-77ac-4f1f-a037-b4407f51e975 (three.mp4) failed: Error: Final checks were interrupted before they could start; the downloaded file remains on disk.
+    at DownloadManager.onFinished (file:///C:/Users/Nihil/Desktop/Github%20Repos/Draco/src/main/engine/manager.ts:1156:71)
+[manager] Added task ee0a4901-1101-48ac-977b-7bf97d73a3da (one.mp4) - autoStart: true
+[manager] Launching task ee0a4901-1101-48ac-977b-7bf97d73a3da (one.mp4)
+[manager] Added task 19a336fc-f742-4773-a875-f46bbfdd8f15 (two.mp4) - autoStart: true
+[manager] Launching task 19a336fc-f742-4773-a875-f46bbfdd8f15 (two.mp4)
+[manager] Added task 172c9bd8-77ac-4f1f-a037-b4407f51e975 (three.mp4) - autoStart: true
+[manager] Launching task 172c9bd8-77ac-4f1f-a037-b4407f51e975 (three.mp4)
+[manager] Task 19a336fc-f742-4773-a875-f46bbfdd8f15 (two.mp4) finished successfully
+[manager] Task ee0a4901-1101-48ac-977b-7bf97d73a3da (one.mp4) finished successfully
+✔ quit finishes active scans but cancels checks waiting for a slot (1062.1508ms)
+[manager] Added task ef7f98fa-01a0-4bf6-9d80-f2aaa443f16a (video.mp4) - autoStart: true
+[manager] Launching task ef7f98fa-01a0-4bf6-9d80-f2aaa443f16a (video.mp4)
+[manager] Pause requested for 1 tasks
+[manager] video.mp4: Final checks were interrupted before they could start; the downloaded file remains on disk.
+[manager] Task ef7f98fa-01a0-4bf6-9d80-f2aaa443f16a (video.mp4) failed: Error: Final checks were interrupted before they could start; the downloaded file remains on disk.
+    at DownloadManager.onFinished (file:///C:/Users/Nihil/Desktop/Github%20Repos/Draco/src/main/engine/manager.ts:1156:71)
+✔ stops a scan cancelled while its stage is being saved (48.3521ms)
+[manager] Added task 2eee11a0-03b0-4e7a-9cd4-ae2f97a7ce09 (video.mp4) - autoStart: true
+[manager] Launching task 2eee11a0-03b0-4e7a-9cd4-ae2f97a7ce09 (video.mp4)
+[manager] video.mp4: Final checks were interrupted before they could start; the downloaded file remains on disk.
+[manager] Task 2eee11a0-03b0-4e7a-9cd4-ae2f97a7ce09 (video.mp4) failed: Error: Final checks were interrupted before they could start; the downloaded file remains on disk.
+    at DownloadManager.onFinished (file:///C:/Users/Nihil/Desktop/Github%20Repos/Draco/src/main/engine/manager.ts:1156:71)
+✔ quit does not launch a scan whose stage write is still pending (70.2017ms)
+[manager] Added task db407c15-97fd-4f52-a55e-a23057e05f32 (video.mp4) - autoStart: true
+[manager] Launching task db407c15-97fd-4f52-a55e-a23057e05f32 (video.mp4)
+✔ leaves the file unscanned when its scanning stage cannot be saved (18.1759ms)
+[manager] Added task 03413c9b-9a9c-42ad-a07b-da190ce8829a (video.mp4) - autoStart: true
+[manager] Launching task 03413c9b-9a9c-42ad-a07b-da190ce8829a (video.mp4)
+[manager] Task 03413c9b-9a9c-42ad-a07b-da190ce8829a (video.mp4) finished successfully
+✔ keeps a captioned download processing until the sidecar is saved (60.3348ms)
+[manager] Added task 52d39203-a350-420e-b1c3-7230e580f1d6 (video.mp4) - autoStart: true
+[manager] Launching task 52d39203-a350-420e-b1c3-7230e580f1d6 (video.mp4)
+[manager] French: HTTP 404
+[manager] video.mp4: 1 subtitle track(s) failed: French: HTTP 404. The downloaded file remains on disk.
+[manager] Task 52d39203-a350-420e-b1c3-7230e580f1d6 (video.mp4) failed: Error: 1 subtitle track(s) failed: French: HTTP 404. The downloaded file remains on disk.
+    at DownloadManager.onFinished (file:///C:/Users/Nihil/Desktop/Github%20Repos/Draco/src/main/engine/manager.ts:1156:71)
+[manager] Start requested for 1 tasks
+[manager] Task 52d39203-a350-420e-b1c3-7230e580f1d6 (video.mp4) finished successfully
+✔ retries failed captions without downloading the media again (58.2913ms)
+[manager] Added task 62842f3f-1c80-4cb5-8028-28cf7835a2dd (video.mp4) - autoStart: true
+[manager] Launching task 62842f3f-1c80-4cb5-8028-28cf7835a2dd (video.mp4)
+[manager] video.mp4: Security scan failed: scanner exited with 9: . The file was quarantined as video.mp4 (1).quarantine
+[manager] Task 62842f3f-1c80-4cb5-8028-28cf7835a2dd (video.mp4) failed: Error: Security scan failed: scanner exited with 9: . The file was quarantined as video.mp4 (1).quarantine
+    at DownloadManager.onFinished (file:///C:/Users/Nihil/Desktop/Github%20Repos/Draco/src/main/engine/manager.ts:1156:71)
+✔ quarantines a scanner failure without ever reporting completion (171.8367ms)
+[manager] Added task f5691f8c-6750-4c98-9696-5fadbf3afb65 (video.mp4) - autoStart: true
+[manager] Launching task f5691f8c-6750-4c98-9696-5fadbf3afb65 (video.mp4)
+[manager] video.mp4: Security scan failed: scanner exited with 9: . Could not quarantine the file: ENOENT: no such file or directory, open 'C:\Users\Nihil\AppData\Local\Temp\draco-finalization-test-71o52g\video.mp4.quarantine'
+[manager] Task f5691f8c-6750-4c98-9696-5fadbf3afb65 (video.mp4) failed: Error: Security scan failed: scanner exited with 9: . Could not quarantine the file: ENOENT: no such file or directory, open 'C:\Users\Nihil\AppData\Local\Temp\draco-finalization-test-71o52g\video.mp4.quarantine'
+    at DownloadManager.onFinished (file:///C:/Users/Nihil/Desktop/Github%20Repos/Draco/src/main/engine/manager.ts:1156:71)
+✔ ends in error if a scanner fails after the destination disappears (284.4052ms)
+[manager] Added task 240b47d5-53d5-4a92-8b08-4af2eaae698f (video.mp4) - autoStart: true
+[manager] Launching task 240b47d5-53d5-4a92-8b08-4af2eaae698f (video.mp4)
+[manager] Pause requested for 1 tasks
+[manager] video.mp4: Security scan was interrupted; the downloaded file remains on disk but has not been verified.
+[manager] Task 240b47d5-53d5-4a92-8b08-4af2eaae698f (video.mp4) failed: Error: Security scan was interrupted; the downloaded file remains on disk but has not been verified.
+    at DownloadManager.onFinished (file:///C:/Users/Nihil/Desktop/Github%20Repos/Draco/src/main/engine/manager.ts:1156:71)
+    at process.processTicksAndRejections (node:internal/process/task_queues:104:5)
+[manager] Pause requested for 1 tasks
+✔ waits for a cancelled scan before leaving the task stopped (293.6641ms)
+[manager] Added task 7098d4fe-ec41-484f-b8e3-6a024ef53ff8 (video.mp4) - autoStart: true
+[manager] Launching task 7098d4fe-ec41-484f-b8e3-6a024ef53ff8 (video.mp4)
+[manager] Pause requested for 1 tasks
+[manager] video.mp4: Security scan was interrupted; the downloaded file remains on disk but has not been verified.
+[manager] Task 7098d4fe-ec41-484f-b8e3-6a024ef53ff8 (video.mp4) failed: Error: Security scan was interrupted; the downloaded file remains on disk but has not been verified.
+    at DownloadManager.onFinished (file:///C:/Users/Nihil/Desktop/Github%20Repos/Draco/src/main/engine/manager.ts:1156:71)
+    at process.processTicksAndRejections (node:internal/process/task_queues:104:5)
+[manager] Start requested for 1 tasks
+[manager] Task 7098d4fe-ec41-484f-b8e3-6a024ef53ff8 (video.mp4) finished successfully
+✔ retries an interrupted scan without relaunching the media runner (431.2675ms)
+[manager] Start requested for 1 tasks
+[manager] video.mp4: The configured security scanner is no longer available; choose one before retrying final checks.
+[manager] Task 1df5f580-7f5c-468e-95ef-9bfa1b74cc9a (video.mp4) failed: Error: The configured security scanner is no longer available; choose one before retrying final checks.
+    at DownloadManager.onFinished (file:///C:/Users/Nihil/Desktop/Github%20Repos/Draco/src/main/engine/manager.ts:1156:71)
+✔ marks an interrupted finalization as needing recovery on restart (29.9298ms)
+[manager] Start requested for 1 tasks
+[manager] video.mp4: The completed media file is missing. Final checks cannot be retried; inspect the destination.
+[manager] Task b8864f64-e0c4-4f8f-891d-7a48a5e435c8 (video.mp4) failed: Error: The completed media file is missing. Final checks cannot be retried; inspect the destination.
+    at DownloadManager.onFinished (file:///C:/Users/Nihil/Desktop/Github%20Repos/Draco/src/main/engine/manager.ts:1156:71)
+✔ does not start a media transfer when the pending finalization file is missing (30.7498ms)
+[manager] Start requested for 1 tasks
+[manager] Task ff436f35-a41a-4400-8050-4c24a3aeb93b (video.mp4) finished successfully
+✔ restores a pending scan and retries it from the completed file (127.9126ms)
+[manager] Start requested for 1 tasks
+[manager] Task 72dedcbe-4c61-4d98-adf9-91282e369217 (video.mp4) finished successfully
+✔ reuses a durable empty caption reservation after a crash (33.3818ms)
+[manager] Start requested for 1 tasks
+[manager] English: saved caption changed on disk; inspect it before retrying
+[manager] video.mp4: 1 subtitle track(s) failed: English: saved caption changed on disk; inspect it before retrying. The downloaded file remains on disk.
+[manager] Task d8bcafaa-41c2-4919-94aa-34902c0db608 (video.mp4) failed: Error: 1 subtitle track(s) failed: English: saved caption changed on disk; inspect it before retrying. The downloaded file remains on disk.
+    at DownloadManager.onFinished (file:///C:/Users/Nihil/Desktop/Github%20Repos/Draco/src/main/engine/manager.ts:1156:71)
+✔ refuses a changed sidecar without fetching or overwriting it (31.1597ms)
+[manager] Start requested for 1 tasks
+[manager] Task c9f6221e-8dc7-4596-996e-285097bddeed (video.mp4) finished successfully
+✔ validates a legacy sidecar against its source before adopting a digest (30.4209ms)
+▶ durable browser confirmation inbox
+  ✔ restores an offered request after restart and removes it durably (273.0064ms)
+  ✔ deduplicates identities and rejects a thirteenth pending dialog (839.3992ms)
+  ✔ prunes expired requests from disk on restart (193.6461ms)
+  ✔ keeps an expiring request while acceptance is committing (190.2837ms)
+  ✔ does not acknowledge a request when the inbox cannot be written (50.6071ms)
+  ✔ migrates old readable inbox and backup without keeping the cookie in either (151.5972ms)
+✔ durable browser confirmation inbox (1707.1906ms)
+▶ confirmation status protocol
+  ✔ accepts bounded handoff identities for status and cancellation (2.6118ms)
+  ✔ rejects malformed handoff identities (1.2187ms)
+  ✔ carries a bounded browser deadline into a download handoff (0.7546ms)
+✔ confirmation status protocol (8.5171ms)
+✔ encrypted HLS buffering stops at 32 MiB and releases bytes on retry (24.1566ms)
+✔ encrypted HLS buffers share a four-segment process cap (8.0048ms)
+✔ cancelled encrypted segment waits leave the permit queue (6.934ms)
+[task] file.bin: reserved 65536 bytes (sparse)
+[task] file.bin: resume checkpoint write failed: Could not save the resume checkpoint: EPERM: operation not permitted, rename 'C:\Users\Nihil\AppData\Local\Temp\draco-checkpoint-failure-o8Xhg3\.draco-tasks\139073e5075a72ee625a8867a117373c9067b80e06f44eb2ae48a3eeaac746bb\file.bin.dracodl.json.54549a15-432d-408e-8587-470236f938e1.tmp' -> 'C:\Users\Nihil\AppData\Local\Temp\draco-checkpoint-failure-o8Xhg3\.draco-tasks\139073e5075a72ee625a8867a117373c9067b80e06f44eb2ae48a3eeaac746bb\file.bin.dracodl.json'
+[task] file.bin: reserved 65536 bytes (sparse)
+✔ a failed forced checkpoint blocks Pause and leaves the partial recoverable (907.1831ms)
+✔ timeout changes retire old pools while frequently used pools remain cached (5.0059ms)
+✔ shutdown releases pools even when a response never finishes (66.6571ms)
+[task] no-ranges.bin: reserved 4096 bytes (sparse)
+✔ downloads a file whose server forbids Range requests (639.9117ms)
+[task] range-only-no-validator.bin: reserved 4096 bytes (sparse)
+✔ downloads a range-only resource without an ETag in one complete response (253.966ms)
+[task] empty-user-file.bin: reserved 4096 bytes (sparse)
+✔ preserves an existing empty user file when the final name collides (286.5179ms)
+[task] changing.bin: discarded a partial download that could not be verified
+[task] changing.bin: reserved 4096 bytes (sparse)
+✔ refreshes cached validators before adopting a partial download (290.4466ms)
+[task] truncated.bin: discarded a partial download that could not be verified
+[task] truncated.bin: reserved 4096 bytes (sparse)
+✔ restarts when the part file is shorter than the bytes claimed by its journal (251.5957ms)
+✔ still reuses a valid partial file after fresh validation (134.4712ms)
+[task] unvalidated.bin: discarded a partial download that could not be verified
+[task] unvalidated.bin: reserved 4096 bytes (sparse)
+[manager] Added task 612f4adf-3a81-4a68-8bbe-4a6ec4ea084b (omit-on-transfer.bin) - autoStart: false
+[manager] Start requested for 1 tasks
+[manager] Queued task 612f4adf-3a81-4a68-8bbe-4a6ec4ea084b (omit-on-transfer.bin)
+[manager] Launching task 612f4adf-3a81-4a68-8bbe-4a6ec4ea084b (omit-on-transfer.bin)
+✔ restarts a same-size partial when the server has no strong validator (390.4709ms)
+[task] omit-on-transfer.bin: reserved 4096 bytes (sparse)
+[manager] Task 612f4adf-3a81-4a68-8bbe-4a6ec4ea084b (omit-on-transfer.bin) failed: NotResumableError: Server omitted the ETag on a ranged response
+    at attemptSegment (file:///C:/Users/Nihil/Desktop/Github%20Repos/Draco/src/main/engine/worker.ts:299:15)
+    at process.processTicksAndRejections (node:internal/process/task_queues:104:5)
+    at async runSegment (file:///C:/Users/Nihil/Desktop/Github%20Repos/Draco/src/main/engine/worker.ts:141:7)
+[manager] Task 612f4adf-3a81-4a68-8bbe-4a6ec4ea084b (omit-on-transfer.bin) restarting cleanly due to resumability failure
+[manager] Launching task 612f4adf-3a81-4a68-8bbe-4a6ec4ea084b (omit-on-transfer.bin)
+[task] omit-on-transfer.bin: reserved 4096 bytes (sparse)
+[manager] Task 612f4adf-3a81-4a68-8bbe-4a6ec4ea084b (omit-on-transfer.bin) finished successfully
+✔ falls back cleanly when ranged responses omit the probed strong ETag (716.2278ms)
+[task] mid-transfer.bin: reserved 4096 bytes (sparse)
+✔ rejects a changed ETag between probe and transfer (304.8028ms)
+[task] fallback.bin: reserved 4096 bytes (sparse)
+✔ keeps compatibility mode after a probe advertises range support (303.2607ms)
+✔ honors cancellation even when a probe result is cached (27.9434ms)
+✔ a large network chunk cannot overwrite a tail handed to another worker (171.0136ms)
+✔ checkpoints exclude writes completed during the disk barrier (112.7912ms)
+(node:12420) ExperimentalWarning: stripTypeScriptTypes is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+✔ rejects an invalid later batch item without adding its valid prefix (57.2646ms)
+✔ keeps a media confirmation available when its destination is invalid (18.085ms)
+✔ redownloads a grouped file into its original custom destination (37.428ms)
+✔ retains the original redownload row if constructing its replacement fails (27.9207ms)
+✔ does not admit playlist resolutions that finish after cancellation (50.8408ms)
+✔ prepares raw YouTube input before adding a file task (48.6298ms)
+✔ requires the playlist dialog instead of adding playlist HTML (16.1107ms)
+✔ rejects torrent rename before applying another metadata edit (12.5452ms)
+✔ treats an unchanged filename as metadata-only for active and completed tasks (49.4657ms)
+✔ rejects active renames without applying their description patch (20.7722ms)
+▶ journal storage
+  ✔ round-trips through a temp file and a rename (85.2459ms)
+  ✔ reads a missing, unparseable or foreign-version journal as no journal (75.7484ms)
+  ✔ rejects parseable journals with invalid metadata or segment shapes (99.9479ms)
+  ✔ sweeps temp files a crash left under names nobody knows (74.4891ms)
+  ✔ clears active flags on the way out - nothing is running after a restart (1.0382ms)
+✔ journal storage (362.0817ms)
+▶ journalMatches
+  ✔ accepts a strong ETag match (10.3126ms)
+  ✔ rejects a changed size outright (0.4412ms)
+  ✔ rejects a changed strong ETag even when everything else agrees (0.3481ms)
+  ✔ refuses weak validators - equivalent is not byte-identical (0.3671ms)
+  ✔ refuses a moved redirect target even when the ETag text matches (0.3548ms)
+  ✔ does not trust Last-Modified or size alone for byte identity (1.5677ms)
+✔ journalMatches (14.6631ms)
+▶ journalSegmentsValid
+  ✔ accepts a snapshot that tiles the file (0.6728ms)
+  ✔ rejects a hole between segments (0.2757ms)
+  ✔ rejects overlap, a late start, and a short tail (0.2402ms)
+  ✔ rejects positions and totals that cannot be true (0.2382ms)
+  ✔ accepts an open-ended range only when the length is unknown (0.1661ms)
+  ✔ correctly persists and reads itag-specific DASH half journals (26.8599ms)
+✔ journalSegmentsValid (29.5833ms)
+✔ commits concurrent saves to one file in call order (1384.5399ms)
+✔ captures a snapshot before awaiting earlier writes (95.3706ms)
+✔ reports a failed write and allows a later save to recover (255.3519ms)
+✔ recovers the last backed-up state when the primary JSON is corrupt (199.6087ms)
+✔ reports corruption when neither primary nor backup can be read (45.0713ms)
+▶ isKhinsiderUrl
+  ✔ accepts album and track pages on any khinsider host (2.9608ms)
+  ✔ rejects other pages and other sites (0.5043ms)
+✔ isKhinsiderUrl (6.18ms)
+▶ parseAlbumPage
+  ✔ lists every track page once, in album order (2.1019ms)
+  ✔ leaves the album sub-pages and neighbouring albums out (0.3763ms)
+  ✔ takes the full-size artwork the thumbnail links to, not the thumbnail (0.6546ms)
+  ✔ reads the album name from the heading (0.3367ms)
+✔ parseAlbumPage (4.6927ms)
+▶ parseTrackPage
+  ✔ finds every published format, lossless first (0.7916ms)
+  ✔ keeps the printed file sizes (0.4134ms)
+  ✔ never mistakes the album page for a media file (0.4734ms)
+  ✔ names the track from the page rather than the URL (0.379ms)
+✔ parseTrackPage (3.1877ms)
+▶ parseClock
+  ✔ reads a time as minutes since midnight (1.828ms)
+  ✔ has no answer for something that is not a time (0.4693ms)
+✔ parseClock (4.8349ms)
+▶ withinWindow
+  ✔ opens on the start minute and closes on the stop minute (5.1146ms)
+  ✔ carries a window across midnight (0.4248ms)
+  ✔ reads an empty window as never, not always (0.2899ms)
+  ✔ is closed when the times are not times (0.2793ms)
+✔ withinWindow (6.9735ms)
+▶ effectiveSpeedLimit
+  ✔ is the ordinary limit with nothing scheduled (0.6201ms)
+  ✔ replaces the ordinary limit while the window is open (0.3941ms)
+  ✔ hands back the ordinary limit once the window closes (14.0161ms)
+  ✔ ignores a scheduled limit of zero, which means no limit at all (4.0949ms)
+✔ effectiveSpeedLimit (20.2879ms)
+▶ RateLimiter rate
+  ✔ is unlimited until given a limit (2.2356ms)
+  ✔ treats zero, null and negatives as no limit (0.4107ms)
+  ✔ makes an over-budget read wait for the bucket to refill (519.8864ms)
+  ✔ ignores an empty read (0.5631ms)
+  ✔ abandons a wait the moment the task is stopped (2.4953ms)
+✔ RateLimiter rate (529.3027ms)
+▶ RateLimiter quota
+  ✔ counts written bytes even when paused during a speed-limit wait (1.4156ms)
+  ✔ exposes active parent and child policies to engines that cannot enforce them (1.6248ms)
+  ✔ reports nothing to spend when no quota is set (1.1589ms)
+  ✔ counts down and then refuses (3.1187ms)
+  ✔ names the moment the budget comes back (0.8812ms)
+  ✔ rolls the window over rather than sliding it (92.4483ms)
+  ✔ charges a child limiter against the app-wide budget (0.6379ms)
+  ✔ cannot spend past the parent rate, however wide its own is (513.4734ms)
+  ✔ charges the parent quota exactly once (0.841ms)
+  ✔ does not charge itself for bytes the parent refused (0.4585ms)
+  ✔ restores a saved window, and refuses one that cannot be true (0.3857ms)
+  ✔ starts a fresh window when the quota is changed (0.2422ms)
+✔ RateLimiter quota (619.2537ms)
+[manager] Added task c53b515c-5c76-4fc9-b2ec-306397539787 (0.bin) - autoStart: false
+[manager] Added task 595134ca-4465-4063-9d38-901cd0ed822f (1.bin) - autoStart: false
+[manager] Pause requested for 2 tasks
+[manager] Pause requested for 1 tasks
+[manager] Added task 99a60ed2-351c-42b2-91e6-423e2594635d (0.bin) - autoStart: false
+[manager] Added task ff24e365-6081-4ca5-85bf-d7ba3022b97b (1.bin) - autoStart: false
+[manager] Added task 70e25574-6342-404e-8b42-5507d9c2df1f (0.bin) - autoStart: false
+[manager] Added task cbd44a6a-ea0d-4342-ae6d-c2100ec72072 (1.bin) - autoStart: false
+[manager] Pause requested for 1 tasks
+[manager] Start requested for 1 tasks
+✔ waits for all pauses and refuses removal if one runner cannot stop (40.7932ms)
+✔ blocks shutdown if any runner fails to pause (2.5133ms)
+[manager] Added task e752db9e-f8cc-472f-af5d-4a375d8b3dfa (0.bin) - autoStart: false
+[manager] Added task c639e7ff-e887-4f74-a2e8-f768e375f3d6 (1.bin) - autoStart: false
+[manager] Pause requested for 1 tasks
+[manager] Start requested for 1 tasks
+[manager] Start requested for 1 tasks
+[manager] Queued task e752db9e-f8cc-472f-af5d-4a375d8b3dfa (0.bin)
+✔ does not restart a task while its removal is waiting for the old runner (17.8693ms)
+✔ honors Resume pressed while Pause is still flushing the old runner (1.9087ms)
+✔ playlist and MPD requests abort while their bodies are stalled (193.6128ms)
+✔ starting an HLS runner need not sample every rendition before selecting quality (23.3622ms)
+✔ pausing a composite during file adoption waits for cleanup and starts no HTTP children (293.7266ms)
+✔ modern X snowflake IDs reach the photo resolver without forwarding X cookies (20.0278ms)
+✔ HLS audio renditions accept TYPE at any attribute position (5.4817ms)
+✔ Suno share redirects resolve the canonical song ID before using the audio fallback (3.106ms)
+✔ HLS parsing refuses documents and unsafe resource addresses before fetching (4.6284ms)
+✔ manifest resources receive captured credentials only on their original origin (4.4979ms)
+✔ rejected caption bodies are canceled and foreign caption servers receive no session secrets (14.2844ms)
+✔ a failed media process finishes output cleanup before reporting its failure (76.0974ms)
+[credentials] saved credentials for media.test:8443
+[credentials] saved credentials for one.test
+[credentials] saved credentials for two.test
+✔ credential changes commit after persistence and remain isolated by server port (217.1944ms)
+[credentials] saved credentials for media.test
+[credentials] 1 saved site credential(s)
+✔ credentials recover a synced backup and refuse to replace unreadable saved passwords (151.4669ms)
+✔ FFmpeg archive disk failures reject through the pipeline (242.8914ms)
+[mux] muxed C:\Users\Nihil\AppData\Local\Temp\draco-fmp4-audit-hyayPC\missing\film.draco-mux-temp.mp4
+[mux] muxed C:\Users\Nihil\AppData\Local\Temp\draco-fmp4-audit-hyayPC\corrupt\film.draco-mux-temp.mp4
+[mux] muxed C:\Users\Nihil\AppData\Local\Temp\draco-fmp4-audit-hyayPC\encrypted\film.draco-mux-temp.mp4
+✔ fragmented MP4 HLS preserves every frame and never adopts pieces without a valid identity (2481.0289ms)
+✔ Best available DASH saves the highest rendition as one video track (515.3623ms)
+✔ DASH media socket stalls end in error within the configured network timeout (352.211ms)
+✔ rejects MPD when global or queue limits would otherwise be bypassed (2.1324ms)
+▶ sanitizeFilename
+  ✔ strips the characters NTFS refuses (2.2458ms)
+  ✔ drops control characters, which are written by escape so this file stays text (0.4517ms)
+  ✔ escapes reserved device names, which fail at open() rather than at write (0.4642ms)
+  ✔ removes the trailing dots and spaces Windows would silently eat (0.3399ms)
+  ✔ caps the stem, never the extension (0.6161ms)
+  ✔ falls back when nothing usable is left (0.3482ms)
+  ✔ keeps non-ASCII names intact (1.1022ms)
+✔ sanitizeFilename (13.1433ms)
+▶ extensionOf
+  ✔ lowercases and drops the dot (0.7169ms)
+✔ extensionOf (1.2626ms)
+▶ filenameFromDisposition
+  ✔ prefers RFC 5987 over the plain form (0.7226ms)
+  ✔ falls back to the plain form when the extended one is malformed (0.6025ms)
+  ✔ reads quoted and bare values (0.2665ms)
+✔ filenameFromDisposition (2.0264ms)
+▶ decodeHeaderText
+  ✔ repairs UTF-8 bytes that were decoded as Latin-1 (0.815ms)
+  ✔ leaves a genuinely Latin-1 name alone (0.7273ms)
+  ✔ leaves plain ASCII and real Unicode alone (0.2943ms)
+✔ decodeHeaderText (3.3971ms)
+▶ filenameFromUrl
+  ✔ takes the last segment, percent-decoded, without query or fragment (0.4621ms)
+  ✔ survives a broken percent-escape (0.2339ms)
+✔ filenameFromUrl (0.9736ms)
+▶ uniquePath
+  ✔ fails when it cannot reserve a name (22.201ms)
+  ✔ reserves the name it returns, so two downloads cannot be handed the same one (72.2895ms)
+  ✔ numbers before the extension, and handles names without one (9.0541ms)
+  ✔ hands back a name it reserved but nothing was written to (19.7257ms)
+  ✔ never deletes a file that has content (20.917ms)
+  ✔ discards a stranded 0-byte reservation before reserving so retries get the original name (67.8742ms)
+✔ uniquePath (213.8779ms)
+▶ moveFile
+  ✔ moves within a volume and leaves nothing behind (15.1557ms)
+✔ moveFile (15.76ms)
+✔ refuses to package missing or changed standalone tools (145.9866ms)
+✔ escapes reserved Windows names before the first dot in category and group folders (2.982ms)
+▶ resolveTorrentItemPath
+  ✔ resolves a listed item beneath the root (0.7973ms)
+  ✔ resolves a nested listed item (0.8071ms)
+  ✔ refuses a path the metadata never listed (0.4935ms)
+  ✔ refuses traversal even when the torrent lists it (1.3662ms)
+  ✔ permits filenames starting with dots that are not directory traversal (1.0557ms)
+  ✔ refuses an absolute path that escapes the root (0.4027ms)
+  ✔ refuses the root itself (0.3442ms)
+✔ resolveTorrentItemPath (7.2985ms)
+▶ workspaceDir
+  ✔ uses the shared temp dir only when it shares a volume with the destination (1.3547ms)
+  ✔ isolates equal filenames by task identity on the destination volume (9.226ms)
+✔ workspaceDir (12.0311ms)
+▶ isDracoIntermediate
+  ✔ claims only Draco's own leftovers (1.522ms)
+✔ isDracoIntermediate (1.7946ms)
+▶ intermediatePathsFor
+  ✔ cleans only the task-owned workspace (0.5838ms)
+  ✔ does not remove another task sharing the final name (0.6121ms)
+✔ intermediatePathsFor (1.5309ms)
+▶ download directory safety
+  ✔ converts a picked path into an unambiguous Windows one (0.7006ms)
+  ✔ refuses anything that is not an absolute path (0.8102ms)
+  ✔ falls back rather than trusting a stored value that is not an absolute path (0.3882ms)
+✔ download directory safety (2.7729ms)
+▶ toFolderName
+  ✔ produces a Windows-safe subfolder from an arbitrary title (0.4696ms)
+✔ toFolderName (0.6523ms)
+▶ TaskRunner pause contract
+  ✔ stays paused when a YouTube probe refresh finishes after pause (108.2602ms)
+[task] refresh-transfer.bin: reserved 4 bytes (sparse)
+[task] refresh-transfer.bin: media URL expired mid-transfer; refreshing
+  ✔ stays paused when a YouTube transfer refresh finishes after pause (393.0494ms)
+[task] stall.bin: reserved 1048576 bytes (sparse)
+  ✔ pause() during a live transfer reaches onFinished exactly once (527.0768ms)
+  ✔ stays paused when probing finishes after Stop was requested (15.4834ms)
+[task] stall-2.bin: reserved 1048576 bytes (sparse)
+  ✔ pause() twice does not emit a second onFinished (508.3957ms)
+✔ TaskRunner pause contract (1595.615ms)
+✔ downloads the complete chunked GET when HEAD describes another representation (plain fallback: false) (367.1325ms)
+✔ downloads the complete chunked GET when HEAD describes another representation (plain fallback: true) (183.0545ms)
+✔ probe authenticates a redirected origin without forwarding captured headers (165.3132ms)
+✔ does not send request headers in task snapshots or mutate runner state (3.5473ms)
+[manager] Added task 68ba7ac3-1168-4e53-b850-4712b229516e (0.mp4) - autoStart: false
+[manager] Added task 48060288-9606-497b-94d4-f72a4c11014f (1.mp4) - autoStart: false
+[manager] Added task b5e6b04c-315d-4c0b-8a9c-f9b0bbbfe6ee (2.mp4) - autoStart: false
+[manager] Added task 4b219bcb-8f53-42ac-a8f2-37553ec85d3d (3.mp4) - autoStart: false
+[manager] Added task 94c41ac7-9c42-4a06-bf44-f496d7b560c1 (4.mp4) - autoStart: false
+[scheduler] scheduled exit in 60s
+[manager] Added task a8482e91-b7a3-4158-a949-c4eff70fc4fb (0.mp4) - autoStart: false
+[manager] Added task af02c5fb-80ea-4ef8-b468-35e3e8acc166 (1.mp4) - autoStart: false
+[manager] Added task 579330d7-2b78-44c6-b13e-8439d6fd9bb5 (2.mp4) - autoStart: false
+[manager] Added task 9dc1c29a-c5a9-45e6-b649-d795862c6cfc (3.mp4) - autoStart: false
+[manager] Added task 8fe3d3cc-2694-4d86-9cf0-890727d22a3f (4.mp4) - autoStart: false
+[scheduler] scheduled exit in 60s
+[manager] Added task 73f8af4d-2c2b-4ca7-960b-1873952086b7 (0.mp4) - autoStart: false
+[manager] Added task ef6cef2e-2afd-48f9-884d-c2f87e92f76c (1.mp4) - autoStart: false
+[manager] Added task ab32815b-ae17-4116-9c40-fc0b8eb6878a (2.mp4) - autoStart: false
+[manager] Added task 69541e8b-5c6c-43d2-ada3-df41f45fdf35 (3.mp4) - autoStart: false
+[manager] Added task 49da76a8-ccc3-414e-8176-13ccba9f0226 (4.mp4) - autoStart: false
+[manager] Added task 689e2944-4b81-4683-a690-3c3b02cc50ee (0.mp4) - autoStart: false
+[manager] Added task 508f676f-fccd-4de5-b033-b78c90e6dc01 (1.mp4) - autoStart: false
+[manager] Added task 87837ee6-1ad1-43cc-92c6-4571b4905015 (2.mp4) - autoStart: false
+[manager] Added task 74578500-aafc-4f55-b550-f94cc6072411 (3.mp4) - autoStart: false
+[manager] Added task 27e8b958-3648-4398-a209-5036e2eb6844 (4.mp4) - autoStart: false
+[scheduler] scheduled exit in 60s
+[manager] Added task 19e8e2bd-307a-43bf-b1f7-15c52776b67e (next.mp4) - autoStart: false
+[manager] Added task 9722c003-fcee-473d-909f-6654719ca162 (0.mp4) - autoStart: false
+[manager] Added task c8b38e7e-8ed8-459a-96bd-ceae6354e6d7 (1.mp4) - autoStart: false
+[manager] Added task 7f70ac87-8c55-471e-8070-1005b8058007 (2.mp4) - autoStart: false
+[manager] Added task 83977d80-0c4e-40a7-9982-494d43450249 (3.mp4) - autoStart: false
+[manager] Added task 8c15cedf-306d-4beb-96ad-7cc6a6beb3b3 (4.mp4) - autoStart: false
+[manager] Start requested for 5 tasks
+[manager] Queued task 9722c003-fcee-473d-909f-6654719ca162 (0.mp4)
+[manager] Queued task c8b38e7e-8ed8-459a-96bd-ceae6354e6d7 (1.mp4)
+[manager] Queued task 7f70ac87-8c55-471e-8070-1005b8058007 (2.mp4)
+[manager] Queued task 83977d80-0c4e-40a7-9982-494d43450249 (3.mp4)
+[manager] Queued task 8c15cedf-306d-4beb-96ad-7cc6a6beb3b3 (4.mp4)
+[manager] Launching task 9722c003-fcee-473d-909f-6654719ca162 (0.mp4)
+[manager] Task 9722c003-fcee-473d-909f-6654719ca162 (0.mp4) finished successfully
+[manager] Launching task c8b38e7e-8ed8-459a-96bd-ceae6354e6d7 (1.mp4)
+[manager] Task c8b38e7e-8ed8-459a-96bd-ceae6354e6d7 (1.mp4) stopped. Status: paused
+[manager] Added task 0cd677e6-db8f-412b-a32c-2ce32fdf5eb5 (0.mp4) - autoStart: false
+[manager] Added task 3841ffdf-1e03-4fe3-a25b-23849c794578 (1.mp4) - autoStart: false
+[manager] Added task c9c991ee-3957-496b-be15-1de67e28fbbe (2.mp4) - autoStart: false
+[manager] Added task c47987f7-3a0c-49f5-98ee-78c290912154 (3.mp4) - autoStart: false
+[manager] Added task a3996ab0-757e-42da-be33-d823679db502 (4.mp4) - autoStart: false
+[manager] Start requested for 5 tasks
+[manager] Queued task 0cd677e6-db8f-412b-a32c-2ce32fdf5eb5 (0.mp4)
+[manager] Queued task 3841ffdf-1e03-4fe3-a25b-23849c794578 (1.mp4)
+[manager] Queued task c9c991ee-3957-496b-be15-1de67e28fbbe (2.mp4)
+[manager] Queued task c47987f7-3a0c-49f5-98ee-78c290912154 (3.mp4)
+[manager] Queued task a3996ab0-757e-42da-be33-d823679db502 (4.mp4)
+[manager] Launching task 0cd677e6-db8f-412b-a32c-2ce32fdf5eb5 (0.mp4)
+[manager] Task 0cd677e6-db8f-412b-a32c-2ce32fdf5eb5 (0.mp4) finished successfully
+[manager] Launching task a3996ab0-757e-42da-be33-d823679db502 (4.mp4)
+[manager] Task a3996ab0-757e-42da-be33-d823679db502 (4.mp4) stopped. Status: paused
+[manager] Added task dbc5a313-4e1a-46a8-8149-1787bf93a72c (0.mp4) - autoStart: false
+[manager] Added task 19b40ead-3bfc-442e-a3d2-7776e5a19422 (1.mp4) - autoStart: false
+[manager] Added task 047ffc7b-5c79-4b3b-a6e9-5114ef9fc204 (2.mp4) - autoStart: false
+[manager] Added task 883b1090-2b02-457f-a052-78bc6788272c (3.mp4) - autoStart: false
+[manager] Added task f2ef0fbf-1e65-43e7-a001-fb4bbc2f1fe3 (4.mp4) - autoStart: false
+[manager] Start requested for 5 tasks
+[manager] Queued task dbc5a313-4e1a-46a8-8149-1787bf93a72c (0.mp4)
+[manager] Queued task 19b40ead-3bfc-442e-a3d2-7776e5a19422 (1.mp4)
+[manager] Queued task 047ffc7b-5c79-4b3b-a6e9-5114ef9fc204 (2.mp4)
+[manager] Queued task 883b1090-2b02-457f-a052-78bc6788272c (3.mp4)
+[manager] Queued task f2ef0fbf-1e65-43e7-a001-fb4bbc2f1fe3 (4.mp4)
+[manager] Launching task dbc5a313-4e1a-46a8-8149-1787bf93a72c (0.mp4)
+[manager] Launching task 19b40ead-3bfc-442e-a3d2-7776e5a19422 (1.mp4)
+[manager] Task dbc5a313-4e1a-46a8-8149-1787bf93a72c (0.mp4) finished successfully
+[manager] Launching task 047ffc7b-5c79-4b3b-a6e9-5114ef9fc204 (2.mp4)
+[manager] Added task c61c444c-05bd-477b-b875-d7f9bee7a2e7 (0.mp4) - autoStart: false
+[manager] Added task 81dc67d1-63b7-4f23-ac0d-572d032a5027 (1.mp4) - autoStart: false
+[manager] Added task bb54ba1c-7f26-4f55-853e-c5d80f38fb31 (2.mp4) - autoStart: false
+[manager] Added task 64e59f25-ec84-499b-ae9b-0a886e53e9c2 (3.mp4) - autoStart: false
+[manager] Added task bf44fde2-8db3-4c3c-9ae9-451d6301806d (4.mp4) - autoStart: false
+[manager] Start requested for 5 tasks
+[manager] Queued task c61c444c-05bd-477b-b875-d7f9bee7a2e7 (0.mp4)
+[manager] Queued task 81dc67d1-63b7-4f23-ac0d-572d032a5027 (1.mp4)
+[manager] Queued task bb54ba1c-7f26-4f55-853e-c5d80f38fb31 (2.mp4)
+[manager] Queued task 64e59f25-ec84-499b-ae9b-0a886e53e9c2 (3.mp4)
+[manager] Queued task bf44fde2-8db3-4c3c-9ae9-451d6301806d (4.mp4)
+[manager] Launching task c61c444c-05bd-477b-b875-d7f9bee7a2e7 (0.mp4)
+[manager] Launching task 81dc67d1-63b7-4f23-ac0d-572d032a5027 (1.mp4)
+[manager] Task 19b40ead-3bfc-442e-a3d2-7776e5a19422 (1.mp4) stopped. Status: paused
+[manager] Task 047ffc7b-5c79-4b3b-a6e9-5114ef9fc204 (2.mp4) stopped. Status: paused
+[manager] Task c61c444c-05bd-477b-b875-d7f9bee7a2e7 (0.mp4) stopped. Status: paused
+[manager] Task 81dc67d1-63b7-4f23-ac0d-572d032a5027 (1.mp4) stopped. Status: paused
+[manager] Added task f53a2e30-59c3-403e-8965-3b86812d2710 (0.mp4) - autoStart: false
+[manager] Added task 15e0c8a4-2591-4820-9f18-c82cb7bbea3a (1.mp4) - autoStart: false
+[manager] Added task 7b22137d-2560-4ea9-8e74-de57acd31017 (2.mp4) - autoStart: false
+[manager] Added task d0d67407-5fa8-43f1-a3e3-89191e800610 (3.mp4) - autoStart: false
+[manager] Added task 1297f35e-43dc-4c20-a0cb-9ae5ff603b5a (4.mp4) - autoStart: false
+[manager] Start requested for 5 tasks
+[manager] Queued task f53a2e30-59c3-403e-8965-3b86812d2710 (0.mp4)
+[manager] Queued task 15e0c8a4-2591-4820-9f18-c82cb7bbea3a (1.mp4)
+[manager] Queued task 7b22137d-2560-4ea9-8e74-de57acd31017 (2.mp4)
+[manager] Queued task d0d67407-5fa8-43f1-a3e3-89191e800610 (3.mp4)
+[manager] Queued task 1297f35e-43dc-4c20-a0cb-9ae5ff603b5a (4.mp4)
+[manager] Launching task f53a2e30-59c3-403e-8965-3b86812d2710 (0.mp4)
+[manager] Launching task 15e0c8a4-2591-4820-9f18-c82cb7bbea3a (1.mp4)
+[manager] Launching task 7b22137d-2560-4ea9-8e74-de57acd31017 (2.mp4)
+[manager] Pause requested for 2 tasks
+[manager] Task 15e0c8a4-2591-4820-9f18-c82cb7bbea3a (1.mp4) stopped. Status: paused
+[manager] Task 7b22137d-2560-4ea9-8e74-de57acd31017 (2.mp4) stopped. Status: paused
+[manager] Start requested for 2 tasks
+[manager] Queued task 15e0c8a4-2591-4820-9f18-c82cb7bbea3a (1.mp4)
+[manager] Queued task 7b22137d-2560-4ea9-8e74-de57acd31017 (2.mp4)
+[manager] Task f53a2e30-59c3-403e-8965-3b86812d2710 (0.mp4) finished successfully
+[manager] Launching task 15e0c8a4-2591-4820-9f18-c82cb7bbea3a (1.mp4)
+[manager] Task 15e0c8a4-2591-4820-9f18-c82cb7bbea3a (1.mp4) stopped. Status: paused
+[manager] Added task aec585b6-e8de-4781-a835-91c6109b418c (0.mp4) - autoStart: false
+[manager] Added task 3bf410e8-7559-4a61-90fd-c23d4b9e7b13 (1.mp4) - autoStart: false
+[manager] Added task 76363305-98b8-48d8-9921-c507cbae20ae (2.mp4) - autoStart: false
+[manager] Added task c2cf54ca-e3cb-4b8c-973d-4cd8425a72a9 (3.mp4) - autoStart: false
+[manager] Added task b1938751-86c8-46eb-a87d-027c7c2dba1f (4.mp4) - autoStart: false
+[manager] Start requested for 5 tasks
+[manager] Queued task aec585b6-e8de-4781-a835-91c6109b418c (0.mp4)
+[manager] Queued task 3bf410e8-7559-4a61-90fd-c23d4b9e7b13 (1.mp4)
+[manager] Queued task 76363305-98b8-48d8-9921-c507cbae20ae (2.mp4)
+[manager] Queued task c2cf54ca-e3cb-4b8c-973d-4cd8425a72a9 (3.mp4)
+[manager] Queued task b1938751-86c8-46eb-a87d-027c7c2dba1f (4.mp4)
+[manager] Launching task aec585b6-e8de-4781-a835-91c6109b418c (0.mp4)
+[manager] Launching task 3bf410e8-7559-4a61-90fd-c23d4b9e7b13 (1.mp4)
+[manager] Task aec585b6-e8de-4781-a835-91c6109b418c (0.mp4) stopped. Status: paused
+[manager] Task 3bf410e8-7559-4a61-90fd-c23d4b9e7b13 (1.mp4) stopped. Status: paused
+[manager] Added task 0f1ae673-107e-4d7e-b7b2-5b98a6c17638 (0.mp4) - autoStart: false
+[manager] Added task 9dcf455f-8964-4735-bf2a-48870ea011ab (1.mp4) - autoStart: false
+[manager] Added task f1ff67e4-f3b2-4fc9-88b3-a822995b64f2 (2.mp4) - autoStart: false
+[manager] Added task 68412738-e7b1-4dd9-981e-a4a0b27f8b15 (3.mp4) - autoStart: false
+[manager] Added task ed32efcd-17a7-49f1-a825-b75848150caa (4.mp4) - autoStart: false
+[manager] Start requested for 5 tasks
+[manager] Queued task 0f1ae673-107e-4d7e-b7b2-5b98a6c17638 (0.mp4)
+[manager] Queued task 9dcf455f-8964-4735-bf2a-48870ea011ab (1.mp4)
+[manager] Queued task f1ff67e4-f3b2-4fc9-88b3-a822995b64f2 (2.mp4)
+[manager] Queued task 68412738-e7b1-4dd9-981e-a4a0b27f8b15 (3.mp4)
+[manager] Queued task ed32efcd-17a7-49f1-a825-b75848150caa (4.mp4)
+[manager] Launching task 0f1ae673-107e-4d7e-b7b2-5b98a6c17638 (0.mp4)
+[manager] Launching task 9dcf455f-8964-4735-bf2a-48870ea011ab (1.mp4)
+[manager] Pause requested for 5 tasks
+[manager] Task 0f1ae673-107e-4d7e-b7b2-5b98a6c17638 (0.mp4) stopped. Status: paused
+[manager] Task 9dcf455f-8964-4735-bf2a-48870ea011ab (1.mp4) stopped. Status: paused
+[manager] Added task f9841897-9237-4c48-8a01-6e9b936efec8 (0.mp4) - autoStart: false
+[manager] Added task 5bcd29f4-5de4-4d5f-b7e0-5f05daf50576 (1.mp4) - autoStart: false
+[manager] Added task 04b8fc5e-84bb-4aba-8d88-5e64c391600a (2.mp4) - autoStart: false
+[manager] Added task e838351c-cbe3-4ff9-92bd-35202e81461c (3.mp4) - autoStart: false
+[manager] Added task c9a5fdfa-91b1-4cb2-afe5-4526de959851 (4.mp4) - autoStart: false
+▶ queue execution
+  ✔ keeps one completion action armed when manually paused members are settled (21.8782ms)
+  ✔ cancels pending machine actions when the scheduler stops (5.935ms)
+  ✔ does not retry a finalization error that requires an explicit user action (1.6108ms)
+  ✔ cancels a completion action when a stopped manual queue gains work (7.7367ms)
+  ✔ enforces serial execution even when Start marks every task queued (6.9448ms)
+  ✔ moves fifth to second and uses that order for the next launch (2.6948ms)
+  ✔ honors configured parallelism and the global cap (3.4035ms)
+  ✔ applies a reduced parallel limit without starting more work around it (4.2937ms)
+  ✔ shares one limiter and applies adding/removing a cap to running downloads (2.4939ms)
+  ✔ stops queued and active tasks without launching a replacement (2.1106ms)
+  ✔ persists icon, speed and chosen parallelism across sanitization (1.1482ms)
+  ✔ reconciles order with membership, dropping foreign/duplicate IDs (0.3314ms)
+✔ queue execution (65.585ms)
+▶ ConnectionRamp
+  ✔ starts clamped to target and reports cap (1.9059ms)
+  ✔ marks ramp settled immediately if start is already at target (0.3516ms)
+  ✔ climbs by doubling when speed increases beyond minGain (0.5633ms)
+  ✔ steps back down when a rung does not pay for itself (0.3816ms)
+  ✔ stops immediately when told the server refused (0.3463ms)
+✔ ConnectionRamp (6.2134ms)
+▶ Learned Host Connection Caps
+  ✔ returns null for an unmeasured host (1.0726ms)
+  ✔ records and retrieves learned cap case-insensitively (0.6149ms)
+  ✔ expires learned caps after TTL (0.5231ms)
+  ✔ clearLearnedHostCaps purges all entries (0.4641ms)
+✔ Learned Host Connection Caps (3.5468ms)
+▶ http connection pool scaling
+  ✔ creates dispatchers and allows resizing pool connections (2.4503ms)
+✔ http connection pool scaling (2.8403ms)
+✔ offers the action that matches a recoverable task failure (2.8808ms)
+✔ category saves publish main-process normalization and failed saves preserve current categories (281.1665ms)
+✔ Save As accepts only one pending file or media batch and permits retry after rejection (321.4245ms)
+✔ group Properties stops connecting, processing, and scanning tasks (178.7133ms)
+✔ progress-window Pause reports failure and keeps the window available to retry (165.6702ms)
+✔ task Properties follows a late probe name while preserving fields the user edited (196.6938ms)
+✔ mixed URL batches queue video and playlist pickers while adding direct files once (391.849ms)
+✔ torrent Save As locks the metadata name and omits a custom filename from admission (177.039ms)
+✔ appearance follows the system theme and removes its listener after an explicit theme is selected (119.2332ms)
+✔ update Check is unavailable while its feed is an unsaved Options draft (254.8835ms)
+✔ torrent checkboxes use committed selections before the next diagnostics poll (173.8333ms)
+✔ settings saves preserve newer edits and roll back a failed latest edit (213.9633ms)
+✔ name sorting keeps numeric order and a stable creation-time tie (200.9744ms)
+✔ unknown ETAs remain last in both sort directions (137.712ms)
+✔ failed renderer initialization remains retryable and keeps newer events (186.0971ms)
+✔ progress received before the initial task snapshot is retained (91.1206ms)
+✔ preserves a working executable when its staged replacement fails validation (112.5644ms)
+✔ bounded response reading cancels an oversized body before buffering it all (102.4927ms)
+✔ media inspection keeps only the requested prefix when a server ignores Range (2.0519ms)
+▶ connectionsForUrl
+  ✔ falls back when no rule matches (3.6492ms)
+  ✔ applies a rule to the host and to its subdomains (0.3759ms)
+  ✔ prefers the most specific rule (0.3341ms)
+  ✔ does not match a host that merely ends in the same letters (0.3044ms)
+  ✔ is case-insensitive about hostnames (0.279ms)
+  ✔ never raises the budget above the global one, and never drops below one (0.3027ms)
+  ✔ falls back on a URL it cannot parse (0.2776ms)
+✔ connectionsForUrl (8.6694ms)
+▶ isEmptyRangeResponse
+  ✔ recognises the one 416 that means the file is empty, not that we asked wrongly (0.514ms)
+✔ isEmptyRangeResponse (0.9003ms)
+▶ compareVersions
+  ✔ orders releases numerically, not as text (0.9949ms)
+  ✔ treats missing parts as zero and ignores build metadata (0.9095ms)
+  ✔ orders prerelease identifiers using semantic version precedence (0.6147ms)
+✔ compareVersions (3.0067ms)
+▶ media page URLs
+  ✔ resolves only one X status, never a feed or unrelated status link (1.5914ms)
+  ✔ accepts only pages that could hold a video (0.8071ms)
+  ✔ sends a SoundCloud track through yt-dlp, but not a browsing page (0.444ms)
+  ✔ recognises a Suno song page on either domain (0.6468ms)
+  ✔ claims nothing else (0.3195ms)
+✔ media page URLs (4.3675ms)
+▶ YouTube URLs
+  ✔ accepts the youtube hosts over https and nothing else (1.1702ms)
+  ✔ accepts a prepared media URL only from the media CDN, and only for the itag asked for (0.5694ms)
+  ✔ resolves the format id from the half of the download that is asking (0.228ms)
+✔ YouTube URLs (2.2938ms)
+▶ isPrivateHost
+  ✔ blocks localhost, .localhost, and .local (0.557ms)
+  ✔ blocks IPv4 loopback, private, and link-local ranges (1.183ms)
+  ✔ blocks IPv6 loopback, unique-local, and link-local (0.2039ms)
+  ✔ blocks IPv4-mapped IPv6 in both hex and dotted forms (0.2792ms)
+  ✔ allows public hosts (0.1808ms)
+✔ isPrivateHost (2.8084ms)
+▶ validateUrl SSRF guard
+  ✔ allows private hosts when allowPrivate is default or true (0.4564ms)
+  ✔ rejects private hosts when allowPrivate is false (0.2182ms)
+✔ validateUrl SSRF guard (0.8726ms)
+▶ Runner.pause releases the manager slot
+  ✔ TorrentRunner.pause calls onFinished (9.8943ms)
+  ✔ is a no-op when the runner was not running (3.8285ms)
+✔ Runner.pause releases the manager slot (16.6699ms)
+[task] plain.bin: reserved 4096 bytes (sparse)
+▶ learned host caps are only written by downloads that measured one
+  ✔ a non-resumable download does not pin the host to one connection (650.5868ms)
+[task] ranged.bin: reserved 4096 bytes (sparse)
+  ✔ a resumable download still records what it settled on (239.7627ms)
+✔ learned host caps are only written by downloads that measured one (940.8044ms)
+▶ clearSparseFlag across a restart
+  ✔ clears the flag on a resumed download, where preallocate never ran (1.5325ms)
+  ✔ skips a volume that has refused the sparse flag (0.6562ms)
+  ✔ skips a volume where setvaliddata worked (0.4407ms)
+✔ clearSparseFlag across a restart (3.2894ms)
+[task] yt-video.mp4: reserved 4096 bytes (sparse)
+[task] yt-video.mp4: media URL expired mid-transfer; refreshing
+[task] yt-video.mp4: discarded a partial download that could not be verified
+[task] yt-video.mp4: reserved 4096 bytes (sparse)
+▶ YouTube token refresh never splices bytes from two URLs
+  ✔ restarts at zero when a signed URL changes despite an identical ETag (463.8022ms)
+[task] yt-probe-failed.mp4: reserved 4096 bytes (sparse)
+[task] yt-probe-failed.mp4: media URL expired mid-transfer; refreshing
+  ✔ keeps the old journal identity if probing the refreshed URL fails (109.0835ms)
+✔ YouTube token refresh never splices bytes from two URLs (585.8851ms)
+▶ TaskRunner post-processing aborts cleanly on cancellation
+  ✔ aborts post-processing if cancelled and marks status paused (2.6016ms)
+✔ TaskRunner post-processing aborts cleanly on cancellation (9.5472ms)
+▶ Runner HTTP Integration & Error Contracts
+  ✔ correctly probes a resumable range-supporting file (97.4371ms)
+  ✔ parses retry-after headers in delay seconds and http dates (1.2642ms)
+  ✔ instantiates ServerBusyError with status code and retryAfterMs (0.4834ms)
+  ✔ instantiates NotResumableError (0.4458ms)
+✔ Runner HTTP Integration & Error Contracts (132.3516ms)
+▶ isInQueueWindow
+  ✔ is closed when no start time was ever set (5.5646ms)
+  ✔ is closed when the times are not times (1.4224ms)
+  ✔ opens at the start minute and closes at the stop minute (0.5971ms)
+  ✔ stays open indefinitely when there is a start but no stop (21.7581ms)
+  ✔ carries a window across midnight (0.6668ms)
+  ✔ honours the weekday list of a periodic queue (0.4772ms)
+  ✔ judges the morning half of an overnight window by the day it started (1.1003ms)
+  ✔ ignores the weekday list unless the queue is periodic (0.3436ms)
+✔ isInQueueWindow (36.5392ms)
+✔ round trips protected JSON and rejects an unreadable payload (4.1311ms)
+✔ replaces a readable legacy primary and backup during migration (203.0855ms)
+▶ seedTargetReached
+  ✔ seeds indefinitely when neither target is set (1.9179ms)
+  ✔ stops at the ratio target, and not before (0.4084ms)
+  ✔ stops at the time target, and not before (0.3324ms)
+  ✔ stops at whichever target comes first (1.0595ms)
+  ✔ ignores a target of zero or less rather than stopping immediately (0.3944ms)
+  ✔ treats a start time in the future as just begun (0.4694ms)
+✔ seedTargetReached (9.6011ms)
+▶ describeSeeding
+  ✔ always reports the ratio, because that is what a tracker judges (0.8693ms)
+  ✔ names the ratio target when there is one (1.6228ms)
+  ✔ counts down when the target is a clock (0.3742ms)
+✔ describeSeeding (3.5431ms)
+▶ isSeedingDetail
+  ✔ recognises its own lines, so a restored row stops claiming to seed (0.6654ms)
+  ✔ leaves any other detail line alone (0.2197ms)
+✔ isSeedingDetail (1.371ms)
+▶ Segmenter
+  ✔ starts as one range over the whole file (3.53ms)
+  ✔ halves the remaining bytes while nothing has been measured (0.838ms)
+  ✔ splits from the current position, never from the start (0.3785ms)
+  ✔ refuses to cut a segment that cannot yield two viable halves (0.3255ms)
+  ✔ cannot split an unknown length (0.2871ms)
+  ✔ takes a length learned mid-download, but only once (0.3448ms)
+  ✔ cuts the segment that would finish last, not the one holding the most (0.5608ms)
+  ✔ counts only what each segment has written (0.3715ms)
+  ✔ is complete only when every segment has passed its own end (0.3789ms)
+  ✔ treats a zero-length file as already complete (0.379ms)
+  ✔ restores from a journal with nothing marked active (0.5612ms)
+  ✔ restores an empty snapshot as a fresh whole-file range (0.2651ms)
+  ✔ offers no idle segment once every range is finished (0.1743ms)
+✔ Segmenter (11.9345ms)
+▶ offline site paths
+  ✔ escapes Windows devices in every downloaded path component (3.3971ms)
+  ✔ does not introduce an invalid trailing dot by truncating a long pathname (0.7474ms)
+  ✔ keeps external origins separate when they serve the same pathname (1.5487ms)
+  ✔ preserves local and cross-page fragment navigation (1.2949ms)
+  ✔ encodes filename URL syntax and quotes in rewritten attributes (0.5588ms)
+✔ offline site paths (10.6668ms)
+✔ refuses to initialize empty state when the primary and backup cannot even be inspected (132.5518ms)
+✔ permits first-run initialization when both saved-state files are absent (104.458ms)
+▶ clamp
+  ✔ keeps a value in range and falls back on nonsense (1.6981ms)
+✔ clamp (5.1946ms)
+▶ sanitizeTasks
+  ✔ accepts a plain, valid row (4.2462ms)
+  ✔ retains bounded browser receipts needed to deduplicate after restart (5.276ms)
+  ✔ returns nothing for input that is not a list (0.4802ms)
+  ✔ drops rows with no id or no usable URL, and keeps the rest (18.6025ms)
+  ✔ refuses a URL scheme the engine would never fetch (0.6859ms)
+  ✔ keeps only the first row of a duplicated id (0.7349ms)
+  ✔ sanitizes the filename rather than trusting it (0.7207ms)
+  ✔ replaces a destination that is not an absolute path (0.7478ms)
+  ✔ never reports more received than the file holds (0.7662ms)
+  ✔ falls back to paused for a status it does not know (0.3908ms)
+  ✔ falls back to a plain file for a kind it does not know (0.4097ms)
+  ✔ discards a segment snapshot whose ranges overlap or cannot be true (0.968ms)
+  ✔ nothing here is what resume trusts - a gap survives sanitizing (0.6432ms)
+  ✔ sorts the snapshot, so a shuffled file still reads in order (0.3999ms)
+  ✔ names a file for a row that never had one (0.4313ms)
+✔ sanitizeTasks (37.8902ms)
+▶ sanitizeQueues
+  ✔ clamps and defaults a hand-edited queue (2.6721ms)
+  ✔ gives an id to a queue that lost one, rather than losing the queue (0.4542ms)
+  ✔ re-ids a duplicate so two queues can never share one (0.6083ms)
+  ✔ never restores a queue as already running (0.3585ms)
+  ✔ rejects a non-list (0.8253ms)
+✔ sanitizeQueues (5.9188ms)
+✔ failed conversion preserves the complete source in its workspace and publishes no raw file (696.4514ms)
+✔ publishes a playable converted file while preserving an existing destination and removing the source (421.0986ms)
+✔ conversion abort waits for the child to exit and release its output (122.4327ms)
+✔ thumbnail memory is bounded by bytes, including replaced and missing images (2.9151ms)
+✔ thumbnail eviction preserves recently viewed images and caps negative entries (0.4122ms)
+✔ reports the bundled FFmpeg snapshot without treating it as a numbered release (4.5147ms)
+✔ torrent metadata owns the actual root name and completion waits for file-store teardown (13.1136ms)
+[manager] Added task 97b4d57a-be10-48ea-995f-fadf16b4635c (folder) - autoStart: false
+[manager] Pause requested for 1 tasks
+✔ deleting a torrent removes metadata-listed payloads while preserving unrelated files in its folder (65.0814ms)
+[manager] Added task f1e86d05-d962-4568-91f1-59670b52c3be (video.mp4) - autoStart: false
+[manager] seeding video.mp4
+[manager] Pause requested for 1 tasks
+✔ waits for a stopped seed to release its store before deleting its files (89.9583ms)
+✔ selects torrent files after metadata arrives (all files) (8.6488ms)
+✔ selects torrent files after metadata arrives (chosen files) (0.8114ms)
+✔ every torrent pause waits for pending piece-store teardown (9.2082ms)
+✔ rejects a torrent before starting WebTorrent under a transfer quota (1.4629ms)
+✔ stops an active torrent when a quota is enabled later (1.2024ms)
+▶ torrent contents tree
+  ✔ preserves the root and nested folders, showing only each leaf name (3.648ms)
+  ✔ selects an entire folder without changing unrelated selections or original paths (1.3804ms)
+  ✔ retains search ancestors and complete folder selection even when siblings are hidden (2.2155ms)
+  ✔ sorts sizes within each folder without flattening the hierarchy (1.0019ms)
+  ✔ supports Windows separators, repeated leaf names, and single-file torrents (0.5503ms)
+✔ torrent contents tree (13.1979ms)
+✔ imports the original file URL and description when its source is an article (10.7352ms)
+✔ exports stable YouTube pages instead of temporary signed CDN URLs (1.0715ms)
+(node:12616) ExperimentalWarning: stripTypeScriptTypes is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+▶ reopening Draco from the tray
+  ✔ restores and focuses the existing hidden/minimized window (24.3392ms)
+  ✔ keeps native Close in the tray and can reopen it (5.7867ms)
+  ✔ recreates a destroyed main window without restarting the app (6.1492ms)
+  ✔ ignores late events from an old destroyed window (6.2056ms)
+  ✔ does not minimize again when a tray click beats ready-to-show (29.7409ms)
+  ✔ preserves start-minimized when there was no open request (14.7826ms)
+  ✔ shows the splash rather than opening the main UI before bootstrap (5.9288ms)
+  ✔ honors native Close when close-to-tray is disabled (8.49ms)
+  ✔ allows quitting and never recreates a window during shutdown (5.1699ms)
+✔ reopening Draco from the tray (113.1747ms)
+✔ tray single-click, double-click and Open Draco all request the UI (5.3945ms)
+✔ range worker authenticates a redirect destination without leaking source headers (169.2945ms)
+✔ adopts a uniquely owned legacy part and journal and remains idempotent (126.2438ms)
+✔ preserves a legacy partial claimed by two tasks and isolates their new workspaces (121.7736ms)
+✔ rejects a legacy journal for a different source (63.7492ms)
+✔ migrates separate video and audio journals into their child workspaces (182.8929ms)
+✔ keeps an existing destination fixed when restoring a task from an older version (3.0534ms)
+✔ only fixed signed YouTube resources qualify for chunks without an ETag (6.0353ms)
+✔ bounded media requests: complete (428.78ms)
+✔ bounded media requests: changed-size (109.9331ms)
+✔ bounded media requests: redirect (105.8231ms)
+✔ bounded media requests: ordinary (63.6142ms)
+▶ isPlaylistUrl
+  ✔ recognises a playlist link (2.1602ms)
+  ✔ treats a watch link carrying a list as the playlist the user pasted (0.6193ms)
+  ✔ refuses an endless mix, which has no last entry (0.566ms)
+  ✔ accepts the finite prefixes that used to be lumped in with mixes (0.5694ms)
+  ✔ recognises the channel forms (2.8779ms)
+  ✔ leaves a plain video alone (0.8181ms)
+  ✔ claims nothing that is not YouTube (0.4991ms)
+✔ isPlaylistUrl (11.4999ms)
+▶ playlistIdOf
+  ✔ is the list id, or nothing (0.551ms)
+✔ playlistIdOf (1.0441ms)
+▶ singleVideoUrl
+  ✔ offers the one video the same link could have meant (0.7451ms)
+  ✔ has nothing to offer for a link that names no video (0.5476ms)
+✔ singleVideoUrl (1.8995ms)
+▶ parseFlatPlaylist
+  ✔ builds a watch URL per entry from its id (5.4749ms)
+  ✔ prefers the id over the entry URL, which can carry the playlist along (0.2991ms)
+  ✔ keeps a full URL from an extractor that gives no usable id (0.2814ms)
+  ✔ drops entries with nothing to download - a deleted or private video (0.3164ms)
+  ✔ names an untitled entry rather than dropping it (0.2468ms)
+  ✔ caps a channel that lists thousands, and says that it did (6.4473ms)
+  ✔ survives junk where a listing was expected (0.5858ms)
+  ✔ does not call a listing truncated because some of it was unusable (0.3491ms)
+  ✔ walks into a channel listing, which is a playlist of tabs (0.3207ms)
+  ✔ refuses a channel tab that yt-dlp did not expand (0.4538ms)
+✔ parseFlatPlaylist (15.883ms)
+▶ normalizeLinkInput
+  ✔ adds the scheme a pasted address left off (0.4671ms)
+  ✔ leaves anything that already names a protocol exactly as it was (0.2125ms)
+  ✔ does not turn a phrase, a path or a filename into a URL (0.1617ms)
+  ✔ still refuses a private address it was asked to normalise (2.6857ms)
+✔ normalizeLinkInput (4.0279ms)
+▶ cookieArgs
+  ✔ names the browser yt-dlp should read (0.333ms)
+  ✔ sends nothing for none, and nothing for anything unrecognised (0.2137ms)
+  ✔ agrees with its own type guard (0.1549ms)
+✔ cookieArgs (1.0084ms)
+▶ explainCookieFailure
+  ✔ recognises the locked-database case, which is the common one on Windows (0.4606ms)
+  ✔ recognises a profile whose cookies cannot be decrypted (0.1586ms)
+  ✔ stays quiet about failures that have nothing to do with cookies (0.1307ms)
+✔ explainCookieFailure (1.1714ms)
+▶ tierFor
+  ✔ names an ordinary landscape frame after its height (3.6376ms)
+  ✔ names a portrait frame after its short side, which is the width (1.8329ms)
+  ✔ does not demote letterboxed widescreen a rung (0.4338ms)
+  ✔ leaves 4:3 material named after its own height (0.3346ms)
+  ✔ still snaps an odd height when no width is known (0.357ms)
+✔ tierFor (10.4457ms)
+▶ buildVariants on letterboxed video
+  ✔ offers 1080p for a 2.40:1 film rather than calling it 720p (1.8381ms)
+  ✔ preserves video-only / GIF formats without dropping them when no audio exists (0.5464ms)
+✔ buildVariants on letterboxed video (3.0189ms)
+▶ halfSuffix
+  ✔ keeps two qualities of the same download apart on disk (0.6215ms)
+  ✔ keeps a multi-language audio itag intact, since those are real (0.2926ms)
+  ✔ falls back to the original name when there is no format id (0.3916ms)
+  ✔ strips anything that would escape the filename (0.2701ms)
+✔ halfSuffix (2.2579ms)
+▶ rungsBelow
+  ✔ measures the drop that used to happen silently (0.4829ms)
+  ✔ is zero for the same rung, and for a better one (0.1716ms)
+  ✔ allows a single rung, which is where the two ladders genuinely disagree (0.1337ms)
+  ✔ snaps odd heights to their rung before comparing (0.1372ms)
+  ✔ claims no shortfall when a height is unknown, rather than guessing at one (0.1232ms)
+✔ rungsBelow (1.4575ms)
+▶ offeredTiers
+  ✔ lists the rungs the engine could actually fetch, highest first (2.1764ms)
+  ✔ leaves out the HLS renditions, whose URL is a playlist rather than media (0.2121ms)
+  ✔ leaves out audio-only formats, which have no rung (0.1728ms)
+✔ offeredTiers (2.8666ms)
+▶ describeQualityShortfall
+  ✔ names the rung, what was on offer, the cause and the fix (0.5178ms)
+  ✔ does not misdiagnose a limited browser lookup as signed out (0.1886ms)
+  ✔ says so plainly when nothing at all was downloadable (0.1563ms)
+✔ describeQualityShortfall (1.1994ms)
+▶ normalizeYtDlpError
+  ✔ rewrites the extractor KeyError into something actionable (1.1344ms)
+  ✔ leaves a non-YouTube extractor error alone, having nothing to add (0.4431ms)
+✔ normalizeYtDlpError (1.815ms)
+▶ cookie check reporting
+  ✔ prefers a public 4K ladder when valid browser cookies leave only 360p (0.7638ms)
+  ✔ compares only URLs the file runner can fetch (0.2566ms)
+  ✔ reads the cookie count out of yt-dlp own commentary (0.3183ms)
+  ✔ recognises a downgraded player without treating it as proof of sign-out (0.2351ms)
+  ✔ turns the stage lines into progress, and ignores everything else (0.5709ms)
+  ✔ never lets the bar run backwards (0.2355ms)
+  ✔ calls a session working only when something above 360p came back (0.3752ms)
+  ✔ separates "no cookies" from "cookies that YouTube would not accept" (0.1757ms)
+  ✔ explains a locked cookie database rather than repeating yt-dlp at the user (1.719ms)
+✔ cookie check reporting (5.4601ms)
+▶ thumbnails
+  ✔ reads the video id out of every link shape (1.0005ms)
+  ✔ refuses anything that is not an id, since it is pasted into a URL (1.3376ms)
+  ✔ builds hqdefault, which every video has, rather than maxres, which many do not (0.9599ms)
+✔ thumbnails (3.7463ms)
+▶ parseFlatPlaylist thumbnails
+  ✔ derives a poster from the entry id when the listing carries none (3.1075ms)
+  ✔ prefers the largest thumbnail the listing gave, which is the last one (0.4599ms)
+  ✔ ignores a plaintext thumbnail, which main would then fetch over http (0.3177ms)
+  ✔ leaves an entry with no id and no thumbnail without one (0.2828ms)
+✔ parseFlatPlaylist thumbnails (4.6336ms)
+✔ checks the account even with public 4K and exposes its Premium audio (4.6035ms)
+✔ prefers the account URL for a duplicate downloadable format (0.7566ms)
+✔ preserves public formats on cookie failure and account formats for private videos (1.4461ms)
+✔ runs only the public lookup when no session is provided (0.8693ms)
+✔ yt-dlp installation requires a matching published checksum (15.1532ms)
+ℹ tests 577
+ℹ suites 91
+ℹ pass 577
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 7252.1261

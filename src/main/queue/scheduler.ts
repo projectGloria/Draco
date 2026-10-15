@@ -4,6 +4,8 @@ import type { PendingAction, Queue, QueueCompletionAction } from '@shared/types'
 import type { DownloadManager } from '../engine/manager.ts'
 import { isInQueueWindow } from './scheduler-window.ts'
 import { logger } from '../log.ts'
+import { orderedQueueIds, queueIcon } from '../../shared/queue-order.ts'
+import { isQuotaHold } from '../../shared/quota.ts'
 
 const log = logger('scheduler')
 
@@ -57,6 +59,10 @@ export class Scheduler {
     return this.queues
   }
 
+  refresh(): void {
+    this.tick()
+  }
+
   start(): void {
     if (this.timer) return
     this.timer = setInterval(() => this.tick(), TICK_MS)
@@ -67,6 +73,7 @@ export class Scheduler {
   stop(): void {
     if (this.timer) clearInterval(this.timer)
     this.timer = null
+    this.cancelPending()
   }
 
   /* ---------------------------------------------------------------- */
@@ -84,6 +91,10 @@ export class Scheduler {
     }
     const normalized: Queue = {
       ...queue,
+      parallelismConfigured: true,
+      icon: queueIcon(queue.icon),
+      speedLimit: typeof queue.speedLimit === 'number' && Number.isFinite(queue.speedLimit) && queue.speedLimit > 0
+        ? Math.floor(queue.speedLimit) : null,
       id: typeof queue.id === 'string' && queue.id ? queue.id.slice(0, 128) : randomUUID(),
       name: typeof queue.name === 'string' ? queue.name.trim().slice(0, 60) || 'Queue' : 'Queue',
       maxConcurrent: Math.min(20, Math.max(1, Math.round(Number(queue.maxConcurrent)) || 1)),
@@ -110,9 +121,25 @@ export class Scheduler {
         : 'idle'
     }
 
+    if (this.pending?.queueId === normalized.id) this.cancelPending()
+
     const index = this.queues.findIndex((q) => q.id === normalized.id)
-    if (index >= 0) this.queues[index] = normalized
+    if (index >= 0) {
+      const current = this.queues[index]
+      if (current.retryLimit !== normalized.retryLimit) {
+        this.drained.delete(normalized.id)
+      }
+      normalized.running = current.running
+      normalized.oneTimeCompleted = current.oneTimeCompleted
+      normalized.lastResult = current.lastResult
+      this.queues[index] = normalized
+    }
     else this.queues.push(normalized)
+
+    const active = this.tasksOf(normalized).filter((task) => task.status === 'downloading' || task.status === 'probing')
+    if (active.length > normalized.maxConcurrent) {
+      await this.deps.manager.pause(active.slice(normalized.maxConcurrent).map((task) => task.id))
+    }
 
     await this.persist()
     this.tick()
@@ -136,6 +163,15 @@ export class Scheduler {
   }
 
   /** Keeps queue ordering in step when a task is moved from the main table. */
+  async reorder(id: string, ids: string[]): Promise<void> {
+    const queue = this.queues.find((item) => item.id === id)
+    if (!queue) throw new Error('That queue no longer exists')
+    if (!Array.isArray(ids) || ids.some((value) => typeof value !== 'string')) throw new Error('Invalid queue order')
+    queue.taskIds = orderedQueueIds(ids, this.tasksOf(queue).map((task) => task.id))
+    await this.persist()
+    this.deps.manager.applySettings()
+  }
+
   async syncTaskQueue(taskId: string, previousQueueId: string | null, nextQueueId: string | null): Promise<void> {
     if (nextQueueId && !this.queues.some((queue) => queue.id === nextQueueId)) {
       throw new Error('That queue no longer exists')
@@ -192,6 +228,7 @@ export class Scheduler {
     const before = this.fingerprint()
     this.synchronizeMembership()
     this.releaseDrainedWithWork()
+    if (this.pending && !this.drained.has(this.pending.queueId)) this.cancelPending()
     const now = new Date()
 
     for (const queue of this.queues) {
@@ -216,34 +253,28 @@ export class Scheduler {
 
     if (this.fingerprint() !== before) void this.persist()
     else this.deps.onQueues(this.queues)
+    this.deps.manager.applySettings()
   }
 
-  /** Promotes this queue's tasks in order, up to its own concurrency limit. */
+  /** Mark eligible work queued; the manager enforces order and actual slots. */
   private feed(queue: Queue): void {
     if (this.drained.has(queue.id)) return
     if (queue.mode === 'onetime' && queue.oneTimeCompleted) return
 
     const tasks = this.tasksOf(queue)
     const existingPending = this.pending?.queueId === queue.id
-    const active = tasks.filter(
-      (t) => t.status === 'downloading' || t.status === 'probing' || t.status === 'queued'
-    ).length
-
-    let room = queue.maxConcurrent - active
     const startable: string[] = []
     let retryMetadataChanged = false
 
     const now = Date.now()
     for (const task of tasks) {
-      if (room <= 0) break
       if (task.status === 'paused') {
         // Someone pressed Stop on this row. The queue owns the order, not the
         // user's hand: starting it again here is what made an individual pause
         // impossible for anything inside a running queue.
-        if (task.manualPause) continue
+        if (task.manualPause || isQuotaHold(task.status, task.detail)) continue
         startable.push(task.id)
-        room--
-      } else if (task.status === 'error' && task.queueRetryCount < queue.retryLimit) {
+      } else if (task.status === 'error' && !task.manualPause && task.queueRetryCount < queue.retryLimit) {
         if (task.nextQueueAttemptAt === null) {
           task.nextQueueAttemptAt = now + queue.retryDelaySeconds * 1000
           retryMetadataChanged = true
@@ -253,7 +284,6 @@ export class Scheduler {
           task.nextQueueAttemptAt = null
           retryMetadataChanged = true
           startable.push(task.id)
-          room--
         }
       }
     }
@@ -264,9 +294,12 @@ export class Scheduler {
     // Drained: everything in the queue reached a terminal state. A pending
     // action is cancelled automatically when the queue is no longer drained,
     // e.g. when the user resumes/adds work during the grace period.
-    const exhausted = (task: (typeof tasks)[number]): boolean =>
-      task.status === 'error' && task.queueRetryCount >= queue.retryLimit
-    const finished = tasks.length > 0 && tasks.every((t) => t.status === 'done' || exhausted(t))
+    // `missing` is terminal - the file is gone and nothing will ever run for
+    // it again - and a task the user paused by hand will not move until they
+    // resume it. Neither may block the drain, or a queue configured to shut
+    // the machine down hangs "running" forever; resuming or re-adding work
+    // releases the latch below, so treating them as terminal is recoverable.
+    const finished = tasks.length > 0 && tasks.every((task) => this.isSettled(queue, task))
     if (!finished && existingPending) this.cancelPending()
     if (finished) {
       // Latched for *every* mode, not just one-time. A periodic queue is still
@@ -282,7 +315,8 @@ export class Scheduler {
       this.drained.add(queue.id)
       if (queue.mode === 'onetime') queue.oneTimeCompleted = true
       queue.running = false
-      queue.lastResult = tasks.some(exhausted) ? 'completed-with-errors' : 'completed'
+      queue.lastResult = tasks.some((task) => task.status === 'error' || task.status === 'missing')
+        ? 'completed-with-errors' : 'completed'
       if (queue.onComplete !== 'none') this.scheduleAction(queue)
     }
   }
@@ -311,6 +345,12 @@ export class Scheduler {
     return ordered
   }
 
+  private isSettled(queue: Queue, task: ReturnType<DownloadManager['list']>[number]): boolean {
+    return task.status === 'done' || task.status === 'missing' ||
+      (task.status === 'error' && (task.manualPause || task.queueRetryCount >= queue.retryLimit)) ||
+      (task.status === 'paused' && task.manualPause)
+  }
+
   private synchronizeMembership(): void {
     const tasks = this.deps.manager.list()
     const byId = new Map(tasks.map((task) => [task.id, task]))
@@ -337,9 +377,7 @@ export class Scheduler {
     if (this.drained.size === 0) return
     for (const queue of this.queues) {
       if (!this.drained.has(queue.id)) continue
-      const hasWork = this.tasksOf(queue).some(
-        (task) => task.status !== 'done' && task.status !== 'error' && task.status !== 'missing'
-      )
+      const hasWork = this.tasksOf(queue).some((task) => !this.isSettled(queue, task))
       if (hasWork) this.drained.delete(queue.id)
     }
   }
@@ -383,7 +421,14 @@ export class Scheduler {
       const fired = this.pending
       this.pending = null
       this.deps.onPending(null)
-      if (fired) runAction(fired.action, this.deps.onExitRequested, queue.completionProgram, queue.completionArgs)
+      if (!fired) return
+      const current = this.queues.find((item) => item.id === fired.queueId)
+      // A new task can arrive between scheduler ticks, including at the very
+      // end of the grace period. Never execute a stale machine-level action.
+      if (!current || !this.drained.has(current.id) || this.tasksOf(current).some(
+        (task) => !this.isSettled(current, task)
+      )) return
+      runAction(fired.action, this.deps.onExitRequested, current.completionProgram, current.completionArgs)
     }, ACTION_DELAY_MS)
   }
 
@@ -404,37 +449,35 @@ function runAction(
   completionProgram: string | null,
   completionArgs: string[]
 ): void {
+  const launch = (program: string, args: string[]): void => {
+    const child = spawn(program, args, {
+      shell: false, detached: true, windowsHide: true, stdio: 'ignore'
+    })
+    child.on('error', (error) => log.error(`could not run queue completion action ${action}`, error))
+    child.unref()
+  }
   switch (action) {
     case 'run':
       if (completionProgram) {
-        spawn(completionProgram, completionArgs, {
-          shell: false,
-          detached: true,
-          windowsHide: true,
-          stdio: 'ignore'
-        }).unref()
+        launch(completionProgram, completionArgs)
       }
       break
     case 'shutdown':
-      spawn('shutdown', ['/s', '/t', '0'], { shell: false, detached: true }).unref()
+      launch('shutdown', ['/s', '/t', '0'])
       break
     case 'hibernate':
-      spawn('shutdown', ['/h'], { shell: false, detached: true }).unref()
+      launch('shutdown', ['/h'])
       break
     case 'sleep':
       // Windows rundll32 powrprof.dll passes an HWND that SetSuspendState treats as
       // bHibernate=true, causing unwanted hibernation. Using PowerShell .NET
       // SetSuspendState correctly invokes Sleep/Suspend without hibernating.
-      spawn('powershell', [
+      launch('powershell', [
         '-NoProfile',
         '-NonInteractive',
         '-Command',
         'Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.Application]::SetSuspendState([System.Windows.Forms.PowerState]::Suspend, $false, $false)'
-      ], {
-        shell: false,
-        detached: true,
-        windowsHide: true
-      }).unref()
+      ])
       break
     case 'exit':
       onExitRequested()

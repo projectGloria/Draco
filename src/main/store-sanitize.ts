@@ -1,3 +1,5 @@
+import { queueIcon } from '../shared/queue-order.ts'
+import { basename } from 'node:path'
 import type {
   Category,
   ColumnId,
@@ -25,7 +27,7 @@ import { safeDownloadDirectory } from './destination-path.ts'
 export const COLUMN_IDS: ColumnId[] = [
   'name', 'size', 'progress', 'status', 'eta', 'speed', 'queue', 'added', 'description'
 ]
-export const TASK_STATUSES: TaskStatus[] = ['queued', 'probing', 'downloading', 'paused', 'done', 'error', 'missing']
+export const TASK_STATUSES: TaskStatus[] = ['queued', 'probing', 'downloading', 'processing', 'scanning', 'paused', 'done', 'error', 'missing']
 export const QUEUE_MODES: QueueMode[] = ['manual', 'onetime', 'periodic']
 export const QUEUE_ACTIONS: QueueCompletionAction[] = ['none', 'run', 'exit', 'sleep', 'hibernate', 'shutdown']
 
@@ -139,6 +141,7 @@ export function sanitizeSettings(input: unknown, base: Settings, defaultColumns:
     theme: source.theme === 'light' || source.theme === 'system' ? source.theme : 'dark',
     downloadDir: safeDownloadDirectory(source.downloadDir, base.downloadDir),
     checkDiskSpace: Boolean(source.checkDiskSpace ?? base.checkDiskSpace),
+    completionSound: typeof source.completionSound === 'boolean' ? source.completionSound : base.completionSound,
     catMode: Boolean(source.catMode ?? base.catMode),
     maxConcurrentTasks: clamp(source.maxConcurrentTasks, 1, 20, base.maxConcurrentTasks),
     exponentialBackoff: Boolean(source.exponentialBackoff ?? base.exponentialBackoff),
@@ -308,11 +311,14 @@ export function sanitizeTasks(input: unknown, defaultDir: string): DownloadTask[
     const audioTracks = sanitizeAudioTracks(raw.audioTracks)
     const youtube = sanitizeYouTube(raw.youtube)
     const segments = sanitizeSegments(raw.segments, size)
+    const subtitles = sanitizeSubtitles(raw.subtitles)
 
     out.push({
       id,
+      handoffId: optionalText(raw.handoffId, 128) ?? undefined,
       url,
       sourceUrl: validUrl(raw.sourceUrl) ?? youtube?.pageUrl ?? url,
+      thumbnailUrl: validUrl(raw.thumbnailUrl),
       groupId: optionalText(raw.groupId, 128) ?? undefined,
       groupName: optionalText(raw.groupName, 160) ?? undefined,
       groupFolder: optionalText(raw.groupFolder, 120) ?? undefined,
@@ -323,6 +329,9 @@ export function sanitizeTasks(input: unknown, defaultDir: string): DownloadTask[
       filename,
       filenameLocked: raw.filenameLocked === true,
       dir: safeDownloadDirectory(raw.dir, defaultDir),
+      // Old records never tracked whether Save As chose this folder. Preserve
+      // their recorded destination rather than guessing a category on resume.
+      dirLocked: raw.dirLocked !== false,
       categoryId: typeof raw.categoryId === 'string' ? raw.categoryId : null,
       queueId: typeof raw.queueId === 'string' ? raw.queueId : null,
       queueRetryCount: clamp(raw.queueRetryCount, 0, 20, 0),
@@ -335,6 +344,9 @@ export function sanitizeTasks(input: unknown, defaultDir: string): DownloadTask[
       expectedSize: safeNonNegativeInt(raw.expectedSize) ?? undefined,
       received,
       status,
+      finalizationStage: raw.finalizationStage === 'processing' || raw.finalizationStage === 'scanning'
+        ? raw.finalizationStage
+        : null,
       resumable: raw.resumable === true,
       singleConnectionFallback: raw.singleConnectionFallback === true,
       segments,
@@ -352,7 +364,17 @@ export function sanitizeTasks(input: unknown, defaultDir: string): DownloadTask[
       etag: optionalText(raw.etag, 4096),
       lastModified: optionalText(raw.lastModified, 1024),
       headers: headers(raw.headers),
-      subtitles: sanitizeSubtitles(raw.subtitles),
+      subtitles,
+      subtitleFiles: Array.isArray(raw.subtitleFiles)
+        ? raw.subtitleFiles.slice(0, subtitles.length).map((name) =>
+            typeof name === 'string' && name.length <= 255 && name === basename(name) && !/[\\/]/.test(name)
+              ? name
+              : null)
+        : [],
+      subtitleDigests: Array.isArray(raw.subtitleDigests)
+        ? raw.subtitleDigests.slice(0, subtitles.length).map((digest) =>
+            typeof digest === 'string' && /^[a-f0-9]{64}$/i.test(digest) ? digest.toLowerCase() : null)
+        : [],
       mimeType: optionalText(raw.mimeType, 1024),
       description: typeof raw.description === 'string' ? raw.description.slice(0, 10_000) : '',
       expectedChecksum: optionalText(raw.expectedChecksum, 256) ?? undefined,
@@ -440,7 +462,9 @@ export function sanitizeQueues(input: unknown): Queue[] {
       startTime: validTime(raw.startTime),
       stopTime: validTime(raw.stopTime),
       days,
-      maxConcurrent: clamp(raw.maxConcurrent, 1, 20, 1),
+      maxConcurrent: raw.parallelismConfigured === true ? clamp(raw.maxConcurrent, 1, 20, 1) : 1,
+      parallelismConfigured: true,
+      icon: queueIcon(raw.icon),
       speedLimit: typeof raw.speedLimit === 'number' && Number.isFinite(raw.speedLimit) && raw.speedLimit > 0
         ? Math.floor(raw.speedLimit)
         : null,

@@ -1,43 +1,61 @@
 import type { MediaVariant, RequestHeaders } from '../../shared/types.ts'
 import { mapConcurrent } from '../engine/concurrency.ts'
 import { buildHeaders } from '../engine/probe.ts'
-import { getDispatcher } from '../engine/http.ts'
+import { fetchGuarded, headersForResource } from '../fetch-guard.ts'
+import { readResponsePrefix, readResponseText } from '../response-limit.ts'
 import { isMasterPlaylist, parseMaster, parseMediaPlaylist, type MediaPlaylist } from './playlist-parser.ts'
 
 export type { HlsSegment } from './playlist-parser.ts'
 export type { MediaPlaylist } from './playlist-parser.ts'
 export { isMasterPlaylist, parseMaster, parseMediaPlaylist } from './playlist-parser.ts'
 
-async function fetchText(url: string, headers: RequestHeaders | undefined): Promise<{ text: string; finalUrl: string }> {
-  const res = await fetch(url, {
-    headers: buildHeaders(headers),
-    redirect: 'follow',
-    dispatcher: getDispatcher(30_000)
-  } as RequestInit)
+export interface PlaylistRequestOptions {
+  signal?: AbortSignal
+  timeoutMs?: number
+  estimateSizes?: boolean
+  /** Original resource to which the captured browser credentials belong. */
+  credentialUrl?: string
+}
 
-  if (!res.ok) throw new Error(`Playlist request failed with ${res.status}`)
-  return { text: await res.text(), finalUrl: res.url || url }
+async function fetchText(url: string, headers: RequestHeaders | undefined, options: PlaylistRequestOptions = {}): Promise<{ text: string; finalUrl: string }> {
+  const timeoutMs = options.timeoutMs ?? 30_000
+  const signal = AbortSignal.any([AbortSignal.timeout(timeoutMs), ...(options.signal ? [options.signal] : [])])
+  const res = await fetchGuarded(url, {
+    headers: headersForResource(url, options.credentialUrl ?? url, buildHeaders(headers)),
+    timeoutMs,
+    signal
+  })
+
+  try {
+    if (!res.ok) throw new Error(`Playlist request failed with ${res.status}`)
+    return { text: await readResponseText(res, 10 * 1024 * 1024), finalUrl: res.url || url }
+  } finally {
+    await res.body?.cancel().catch(() => {})
+  }
 }
 
 /** Fetches a URL and returns its quality ladder, or a single entry for a plain file. */
 export async function resolveVariants(
   url: string,
-  headers: RequestHeaders | undefined
+  headers: RequestHeaders | undefined,
+  options: PlaylistRequestOptions = {}
 ): Promise<MediaVariant[]> {
-  const fetched = await fetchText(url, headers)
+  options = { ...options, credentialUrl: options.credentialUrl ?? url }
+  const fetched = await fetchText(url, headers, options)
   const text = fetched.text
   const baseUrl = fetched.finalUrl
 
   if (isMasterPlaylist(text)) {
     const variants = parseMaster(text, baseUrl)
     if (variants.length > 0) {
+      if (options.estimateSizes === false) return variants
       // BANDWIDTH is useful for sorting, but it is not trustworthy enough for
       // a size estimate. Sample a small number of media segments instead.
       const estimates = new Map<string, Promise<number | null>>()
       const estimate = (mediaUrl: string): Promise<number | null> => {
         let pending = estimates.get(mediaUrl)
         if (!pending) {
-          pending = estimateMediaPlaylistSize(mediaUrl, headers).catch(() => null)
+          pending = estimateMediaPlaylistSize(mediaUrl, headers, options).catch(() => null)
           estimates.set(mediaUrl, pending)
         }
         return pending
@@ -69,9 +87,10 @@ export async function resolveVariants(
 
 async function estimateMediaPlaylistSize(
   url: string,
-  headers: RequestHeaders | undefined
+  headers: RequestHeaders | undefined,
+  options: PlaylistRequestOptions
 ): Promise<number | null> {
-  const playlist = await loadMediaPlaylist(url, headers)
+  const playlist = await loadMediaPlaylist(url, headers, options)
   if (playlist.isLive || playlist.totalDuration <= 0 || playlist.segments.length === 0) return null
 
   // Spread the probes across the whole programme. Capped at 6 to avoid
@@ -83,7 +102,7 @@ async function estimateMediaPlaylistSize(
   const samples = await mapConcurrent(positions, 8, async (position) => {
     const segment = playlist.segments[position]
     if (!segment || segment.duration <= 0) return null
-    const size = segment.byteRange?.length ?? await remoteObjectSize(segment.url, headers)
+    const size = segment.byteRange?.length ?? await remoteObjectSize(segment.url, headers, options)
     return size ? { size, duration: segment.duration } : null
   })
   const measured = samples.filter((sample): sample is { size: number; duration: number } => sample !== null)
@@ -97,13 +116,15 @@ async function estimateMediaPlaylistSize(
 
 async function remoteObjectSize(
   url: string,
-  headers: RequestHeaders | undefined
+  headers: RequestHeaders | undefined,
+  options: PlaylistRequestOptions
 ): Promise<number | null> {
-  const response = await fetch(url, {
-    headers: { ...buildHeaders(headers), range: 'bytes=0-0' },
-    redirect: 'follow',
-    dispatcher: getDispatcher(30_000)
-  } as RequestInit)
+  const timeoutMs = options.timeoutMs ?? 30_000
+  const response = await fetchGuarded(url, {
+    headers: { ...headersForResource(url, options.credentialUrl ?? url, buildHeaders(headers)), range: 'bytes=0-0' },
+    timeoutMs,
+    signal: AbortSignal.any([AbortSignal.timeout(timeoutMs), ...(options.signal ? [options.signal] : [])])
+  })
   try {
     if (!response.ok) return null
     const contentRange = response.headers.get('content-range')
@@ -119,9 +140,10 @@ async function remoteObjectSize(
 
 export async function loadMediaPlaylist(
   url: string,
-  headers: RequestHeaders | undefined
+  headers: RequestHeaders | undefined,
+  options: PlaylistRequestOptions = {}
 ): Promise<MediaPlaylist> {
-  return loadMediaPlaylistDepth(url, headers, 0)
+  return loadMediaPlaylistDepth(url, headers, 0, { ...options, credentialUrl: options.credentialUrl ?? url })
 }
 
 export interface HlsMediaInspection {
@@ -142,14 +164,18 @@ export async function inspectHlsMedia(
   const sample = playlist.initSegment?.url ?? playlist.segments[0]?.url
   if (!sample) return { hasVideo: false, hasAudio: false }
 
-  const response = await fetch(sample, {
-    headers: { ...buildHeaders(headers), range: 'bytes=0-262143' },
-    redirect: 'follow',
-    dispatcher: getDispatcher(30_000)
-  } as RequestInit)
-  if (!response.ok) throw new Error(`HLS sample request failed with ${response.status}`)
-  const bytes = new Uint8Array(await response.arrayBuffer())
-  return inspectTransportStream(bytes)
+  const response = await fetchGuarded(sample, {
+    headers: { ...headersForResource(sample, url, buildHeaders(headers)), range: 'bytes=0-262143' },
+    timeoutMs: 30_000,
+    signal: AbortSignal.timeout(30_000)
+  })
+  try {
+    if (!response.ok) throw new Error(`HLS sample request failed with ${response.status}`)
+    const bytes = await readResponsePrefix(response, 262_144)
+    return inspectTransportStream(bytes)
+  } finally {
+    await response.body?.cancel().catch(() => {})
+  }
 }
 
 const VIDEO_STREAM_TYPES = new Set([0x01, 0x02, 0x10, 0x1b, 0x24, 0x42, 0xd1])
@@ -217,17 +243,18 @@ const MAX_PLAYLIST_NESTING = 5
 async function loadMediaPlaylistDepth(
   url: string,
   headers: RequestHeaders | undefined,
-  depth: number
+  depth: number,
+  options: PlaylistRequestOptions
 ): Promise<MediaPlaylist> {
   if (depth > MAX_PLAYLIST_NESTING) throw new Error('HLS playlist nesting is too deep')
 
-  const fetched = await fetchText(url, headers)
+  const fetched = await fetchText(url, headers, options)
   const text = fetched.text
   const baseUrl = fetched.finalUrl
 
   if (isMasterPlaylist(text)) {
     const best = parseMaster(text, baseUrl)[0]
-    if (best) return loadMediaPlaylistDepth(best.url, headers, depth + 1)
+    if (best) return loadMediaPlaylistDepth(best.url, headers, depth + 1, options)
   }
 
   return parseMediaPlaylist(text, baseUrl)

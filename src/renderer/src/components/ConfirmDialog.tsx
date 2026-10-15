@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { useT } from '../i18n'
 import Dialog, { GhostButton, PrimaryButton } from './Dialog'
 
 export interface ConfirmRequest {
@@ -18,6 +19,7 @@ export default function ConfirmDialog({
   request: ConfirmRequest
   onClose(): void
 }): React.ReactElement {
+  const t = useT()
   const [checked, setChecked] = useState(false)
 
   const confirm = (): void => {
@@ -34,7 +36,7 @@ export default function ConfirmDialog({
       autoFocus={false}
       footer={
         <>
-          <GhostButton onClick={onClose}>Cancel</GhostButton>
+          <GhostButton onClick={onClose}>{t('cancel')}</GhostButton>
           {request.danger ? (
             <button
               type="button"

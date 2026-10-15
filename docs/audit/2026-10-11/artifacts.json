@@ -1,0 +1,30 @@
+{
+  "generatedAt": "2026-10-11T11:37:32.064Z",
+  "files": [
+    {
+      "path": "C:\\Users\\Nihil\\Desktop\\Github Repos\\Draco\\dist\\Draco-0.1.2-x64.exe",
+      "bytes": 242670395,
+      "sha256": "5c29ea729a3198358cc87a33659ac732a6fd4f062495e65b61d1e8fc3e42846e"
+    },
+    {
+      "path": "C:\\Users\\Nihil\\Desktop\\Github Repos\\Draco\\dist\\Draco-0.1.2-portable.exe",
+      "bytes": 242212165,
+      "sha256": "bc1d3d6a0112431b0bc9def1250853af9a45996544376d56916e9511f152043a"
+    },
+    {
+      "path": "C:\\Users\\Nihil\\Desktop\\Github Repos\\Draco\\dist\\win-unpacked\\Draco.exe",
+      "bytes": 239158272,
+      "sha256": "8de1333c01816b79b19a2c2c0c5043368d3095a8026d62b17c413061a47d177a"
+    },
+    {
+      "path": "C:\\Users\\Nihil\\Desktop\\Github Repos\\Draco\\dist\\win-unpacked\\resources\\app.asar",
+      "bytes": 40033582,
+      "sha256": "518e8c7e1fe3fcef7ee9e360802764956550c2eafbf5f55a69dce2a0d309e8a3"
+    },
+    {
+      "path": "C:\\Users\\Nihil\\Desktop\\Github Repos\\Draco\\dist\\win-unpacked\\resources\\draco-host.exe",
+      "bytes": 2972160,
+      "sha256": "3135fb500727eba4fcdb0fe2d12eb7cb93dc9aee910dc94e7dd7eaf3ab8fe9d9"
+    }
+  ]
+}

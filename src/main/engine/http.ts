@@ -15,6 +15,7 @@ import { Agent, ProxyAgent, interceptors, type Dispatcher } from 'undici'
 
 const dispatchers = new Map<number, Dispatcher>()
 const retiredDispatchers = new Set<Dispatcher>()
+const MAX_CACHED_DISPATCHERS = 8
 let proxyUrl: string | null = null
 /**
  * Defaults to 1280 (maxConcurrentTasks 20 x maxConnectionsPerTask 64),
@@ -22,12 +23,19 @@ let proxyUrl: string | null = null
  */
 let poolConnections = 1280
 
+function retire(dispatcher: Dispatcher): void {
+  retiredDispatchers.add(dispatcher)
+  void dispatcher.close().catch(() => {}).finally(() => {
+    retiredDispatchers.delete(dispatcher)
+  })
+}
+
 /** Dynamically sizes the per-origin connection pool to match configured concurrency. */
 export function setPoolConnections(connections: number): void {
   const next = Math.max(256, connections)
   if (next === poolConnections) return
   poolConnections = next
-  for (const dispatcher of dispatchers.values()) retiredDispatchers.add(dispatcher)
+  for (const dispatcher of dispatchers.values()) retire(dispatcher)
   dispatchers.clear()
 }
 
@@ -35,13 +43,17 @@ export function setPoolConnections(connections: number): void {
 export function setProxyUrl(next: string | null): void {
   if (next === proxyUrl) return
   proxyUrl = next
-  for (const dispatcher of dispatchers.values()) retiredDispatchers.add(dispatcher)
+  for (const dispatcher of dispatchers.values()) retire(dispatcher)
   dispatchers.clear()
 }
 
 export function getDispatcher(timeoutMs: number): Dispatcher {
   const existing = dispatchers.get(timeoutMs)
-  if (existing) return existing
+  if (existing) {
+    dispatchers.delete(timeoutMs)
+    dispatchers.set(timeoutMs, existing)
+    return existing
+  }
 
   const options = {
     // Must comfortably exceed maxConnectionsPerTask x maxConcurrentTasks, or
@@ -62,6 +74,14 @@ export function getDispatcher(timeoutMs: number): Dispatcher {
   const agent = base.compose(interceptors.redirect({ maxRedirections: 10 }))
 
   dispatchers.set(timeoutMs, agent)
+  // Editing request timeouts must not retain one connection pool per value
+  // for the lifetime of the app. Retire idle entries without aborting transfers.
+  while (dispatchers.size > MAX_CACHED_DISPATCHERS) {
+    const oldest = dispatchers.keys().next().value!
+    const dispatcher = dispatchers.get(oldest)!
+    dispatchers.delete(oldest)
+    retire(dispatcher)
+  }
   return agent
 }
 
@@ -70,5 +90,5 @@ export async function closeDispatchers(): Promise<void> {
   const all = [...dispatchers.values(), ...retiredDispatchers]
   dispatchers.clear()
   retiredDispatchers.clear()
-  await Promise.allSettled(all.map((d) => d.close()))
+  await Promise.allSettled(all.map((d) => d.destroy()))
 }

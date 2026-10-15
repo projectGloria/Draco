@@ -1,4 +1,5 @@
 import type { MediaAudioTrack, MediaVariant } from '../../shared/types.ts'
+import { isPrivateHost } from '../engine/create.ts'
 
 export interface HlsSegment {
   url: string
@@ -9,7 +10,7 @@ export interface HlsSegment {
 
 export interface MediaPlaylist {
   segments: HlsSegment[]
-  initSegment: { url: string; byteRange: { offset: number; length: number } | null } | null
+  initSegment: { url: string; byteRange: { offset: number; length: number } | null; key?: { url: string; iv: string | null } } | null
   totalDuration: number
   mediaSequence: number
   isLive: boolean
@@ -28,11 +29,14 @@ function parseAttributes(line: string): Record<string, string> {
 }
 
 function resolve(url: string, base: string): string {
-  try {
-    return new URL(url, base).toString()
-  } catch {
-    return url
-  }
+  const target = new URL(url, base)
+  if (target.protocol !== 'http:' && target.protocol !== 'https:') throw new Error('HLS resource has an unsupported address')
+  if (!isPrivateHost(new URL(base).hostname) && isPrivateHost(target.hostname)) throw new Error('HLS resource points into a private network')
+  return target.toString()
+}
+
+function requirePlaylist(text: string): void {
+  if (!/^#EXTM3U(?:\r?\n|$)/.test(text.trimStart())) throw new Error('The server did not return an HLS playlist')
 }
 
 export function isMasterPlaylist(text: string): boolean {
@@ -41,6 +45,7 @@ export function isMasterPlaylist(text: string): boolean {
 
 /** Reads the quality ladder out of a master playlist. */
 export function parseMaster(text: string, baseUrl: string): MediaVariant[] {
+  requirePlaylist(text)
   const lines = text.split(/\r?\n/)
   const variants: MediaVariant[] = []
   
@@ -48,9 +53,9 @@ export function parseMaster(text: string, baseUrl: string): MediaVariant[] {
 
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i].trim()
-    if (line.startsWith('#EXT-X-MEDIA:TYPE=AUDIO')) {
+    if (line.startsWith('#EXT-X-MEDIA:')) {
       const attrs = parseAttributes(line)
-      if (attrs['GROUP-ID'] && attrs.URI) {
+      if (attrs.TYPE === 'AUDIO' && attrs['GROUP-ID'] && attrs.URI) {
         const group = audioGroups.get(attrs['GROUP-ID']) ?? []
         group.push({
           url: resolve(attrs.URI, baseUrl),
@@ -98,6 +103,7 @@ export function parseMaster(text: string, baseUrl: string): MediaVariant[] {
 }
 
 export function parseMediaPlaylist(text: string, baseUrl: string): MediaPlaylist {
+  requirePlaylist(text)
   const lines = text.split(/\r?\n/)
   const segments: HlsSegment[] = []
 
@@ -105,7 +111,7 @@ export function parseMediaPlaylist(text: string, baseUrl: string): MediaPlaylist
   let pendingDuration = 0
   let pendingRange: { length: number; offset: number | null } | null = null
   let currentKey: { url: string; iv: string | null } | null = null
-  let initSegment: { url: string; byteRange: { offset: number; length: number } | null } | null = null
+  let initSegment: MediaPlaylist['initSegment'] = null
   let mediaSequence = 0
   const nextRangeOffsetByUrl = new Map<string, number>()
 
@@ -170,7 +176,12 @@ export function parseMediaPlaylist(text: string, baseUrl: string): MediaPlaylist
         }
         byteRange = { offset, length }
       }
-      initSegment = { url: resolve(attrs.URI, baseUrl), byteRange }
+      if (currentKey && !currentKey.iv) throw new Error('Encrypted HLS initialization maps require an explicit IV')
+      const nextMap = { url: resolve(attrs.URI, baseUrl), byteRange, ...(currentKey ? { key: currentKey } : {}) }
+      if (segments.length > 0 && JSON.stringify(initSegment) !== JSON.stringify(nextMap)) {
+        throw new Error('HLS streams that change initialization maps are not supported')
+      }
+      initSegment = nextMap
       continue
     }
 

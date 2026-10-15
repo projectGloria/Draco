@@ -139,6 +139,21 @@ export class ConnectionRamp {
 
     this.below = this.current
     this.current = Math.min(this.target, this.current * 2)
+    /*
+     * The settling delay applies to every rung, not only the first.
+     *
+     * The reason it exists at all - connection setup and TCP slow start make
+     * the opening moments unrepresentative - is a property of *newly opened
+     * connections*, and a climb opens several. Measuring the new rung from the
+     * instant they open therefore charges it for its own warm-up, biasing every
+     * reading downward by however much of the window that took. Against a gain
+     * threshold of 1.1 that is enough to reject a rung that did pay for itself,
+     * and the ramp stops one step below where it belonged.
+     *
+     * `windowAt` and `windowReceived` are already at `now`; the settling branch
+     * re-baselines them once the new connections are actually up to speed.
+     */
+    this.state = 'settling'
     return true
   }
 }

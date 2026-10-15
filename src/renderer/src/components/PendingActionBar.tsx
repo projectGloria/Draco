@@ -2,15 +2,16 @@ import { useEffect, useState } from 'react'
 import type { PendingAction } from '@shared/types'
 import { formatCountdown } from '../lib/format'
 import { reportError } from '../store/toasts'
+import { useT, type TKey } from '../i18n'
 import { AlertIcon } from './Icons'
 
-const WORDS: Record<PendingAction['action'], string> = {
-  none: '',
-  run: 'Draco will run the configured program',
-  exit: 'Draco will quit',
-  sleep: 'This computer will sleep',
-  hibernate: 'This computer will hibernate',
-  shutdown: 'This computer will shut down'
+const WORDS: Record<PendingAction['action'], TKey | null> = {
+  none: null,
+  run: 'pendingRun',
+  exit: 'pendingExit',
+  sleep: 'pendingSleep',
+  hibernate: 'pendingHibernate',
+  shutdown: 'pendingShutdown'
 }
 
 /**
@@ -23,12 +24,19 @@ export default function PendingActionBar({
 }: {
   pending: PendingAction
 }): React.ReactElement {
+  const t = useT()
   const [now, setNow] = useState(Date.now())
 
   useEffect(() => {
     const timer = setInterval(() => setNow(Date.now()), 500)
     return () => clearInterval(timer)
   }, [])
+
+  // Translated around the `{time}` placeholder rather than interpolated, so
+  // the countdown stays bold and Turkish can place it before the verb.
+  const template = WORDS[pending.action] ? t(WORDS[pending.action] as TKey) : ''
+  const time = formatCountdown(pending.firesAt - now)
+  const [before, after = ''] = template.split('{time}')
 
   return (
     <div
@@ -40,20 +48,21 @@ export default function PendingActionBar({
         <AlertIcon className="w-4 h-4" />
       </span>
       <span className="text-[12.5px]">
-        {WORDS[pending.action]} in{' '}
+        {before}
         <b className="tnum" style={{ color: 'var(--color-warn)' }}>
-          {formatCountdown(pending.firesAt - now)}
+          {time}
         </b>
+        {after}
       </span>
       <button
         onClick={() => {
           void window.api
             .cancelPendingAction()
-            .catch((err) => reportError('Could not cancel', err))
+            .catch((err) => reportError(t('cancelFailed'), err))
         }}
         className="px-3 py-1 rounded-lg text-[12px] font-semibold bg-white/[0.08] hover:bg-white/[0.14] transition-colors"
       >
-        Cancel
+        {t('cancel')}
       </button>
     </div>
   )

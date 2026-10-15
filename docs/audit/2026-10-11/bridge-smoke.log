@@ -1,0 +1,5 @@
+
+> draco@0.1.2 smoke:bridge
+> node tools/smoke-packaged-bridge.mjs
+
+Packaged native host handoff and restart replay passed on an isolated pipe.

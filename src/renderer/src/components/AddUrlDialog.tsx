@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { looksLikeUrl } from '../lib/format'
 import { reportError } from '../store/toasts'
+import { useT } from '../i18n'
 import Dialog, { GhostButton, PrimaryButton } from './Dialog'
 import { TorrentIcon } from './Icons'
 
@@ -16,6 +17,7 @@ export default function AddUrlDialog({
   onSubmit(urls: string[]): void
   onClose(): void
 }): React.ReactElement {
+  const t = useT()
   const [text, setText] = useState('')
   const [choosing, setChoosing] = useState(false)
 
@@ -35,8 +37,8 @@ export default function AddUrlDialog({
 
   return (
     <Dialog
-      title="Add download"
-      subtitle="Paste a URL, magnet link, or torrent info hash"
+      title={t('addDownloadTitle')}
+      subtitle={t('addDownloadSubtitle')}
       width={560}
       onClose={onClose}
       footer={
@@ -53,25 +55,25 @@ export default function AddUrlDialog({
                   onSubmit([magnetUri])
                   onClose()
                 })
-                .catch((err) => reportError('Could not open that torrent file', err))
+                .catch((err) => reportError(t('openTorrentFailed'), err))
                 .finally(() => setChoosing(false))
             }}
             disabled={choosing}
           >
             <span className="inline-flex items-center gap-1.5">
               <TorrentIcon />
-              {choosing ? 'Opening…' : 'Torrent file…'}
+              {choosing ? t('opening') : t('torrentFile')}
             </span>
           </GhostButton>
           <span className="flex-1" />
-          <GhostButton onClick={onClose}>Cancel</GhostButton>
+          <GhostButton onClick={onClose}>{t('cancel')}</GhostButton>
           <PrimaryButton onClick={submit} disabled={valid.length === 0}>
-            {valid.length > 1 ? `Add ${valid.length} downloads` : 'Continue'}
+            {valid.length > 1 ? t('addCountDownloads', { count: valid.length }) : t('continue')}
           </PrimaryButton>
         </>
       }
     >
-      <label className="label">Address</label>
+      <label className="label">{t('address')}</label>
       <textarea
         value={text}
         onChange={(event) => setText(event.target.value)}
@@ -82,22 +84,21 @@ export default function AddUrlDialog({
         }}
         rows={5}
         spellCheck={false}
-        placeholder="https://example.com/file.iso, magnet link, or 40-character torrent hash"
+        placeholder={t('addressPlaceholder')}
         className="field font-mono text-[12px] leading-relaxed resize-none"
       />
 
       <div className="mt-2 h-4 text-[11.5px]">
         {invalid > 0 ? (
           <span className="text-warn">
-            {invalid} line{invalid === 1 ? '' : 's'} skipped — enter a URL, magnet link, or torrent
-            info hash
+            {t('linesSkipped', { count: invalid })}
           </span>
         ) : valid.length > 1 ? (
           <span className="text-faint">
-            {valid.length} downloads will be added and filed by category
+            {t('willBeAddedByCategory', { count: valid.length })}
           </span>
         ) : (
-          <span className="text-faint">Ctrl+Enter to continue</span>
+          <span className="text-faint">{t('ctrlEnterHint')}</span>
         )}
       </div>
     </Dialog>

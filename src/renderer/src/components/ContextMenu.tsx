@@ -49,18 +49,23 @@ export default function ContextMenu({
   useEffect(() => {
     const close = (): void => onClose()
     const onKey = (event: KeyboardEvent): void => {
-      if (event.key === 'Escape') onClose()
+      if (event.key !== 'Escape') return
+      // Capture phase on the window: the menu must win Escape over whatever is
+      // underneath it - a dialog it was opened from, or the table's
+      // clear-selection handler - and none of them may also act on the key.
+      event.stopPropagation()
+      onClose()
     }
 
     // `mousedown` rather than `click`, so the menu is gone before the press
     // underneath it starts a selection.
     window.addEventListener('mousedown', close)
     window.addEventListener('resize', close)
-    window.addEventListener('keydown', onKey)
+    window.addEventListener('keydown', onKey, true)
     return () => {
       window.removeEventListener('mousedown', close)
       window.removeEventListener('resize', close)
-      window.removeEventListener('keydown', onKey)
+      window.removeEventListener('keydown', onKey, true)
     }
   }, [onClose])
 

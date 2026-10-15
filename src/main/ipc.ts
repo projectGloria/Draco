@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { access, constants, readFile, rename, writeFile } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { app, BrowserWindow, clipboard, dialog, ipcMain, nativeImage, shell } from 'electron'
 import type {
   Category,
@@ -17,17 +17,21 @@ import type {
   Settings,
   SiteGrabOptions,
   SiteGrabResult,
+  TaskPatch,
   ToolId
 } from '@shared/types'
 import { getPaths } from './bootstrap/paths.ts'
 import { checkRegistered, ensureRegistered, readExtensionId } from './bridge/integration.ts'
 import type { PipeServer } from './bridge/pipe-server.ts'
+import type { BrowserHandoffInbox } from './bridge/handoff-inbox.ts'
 import { directoryFor } from './categories.ts'
 import { normalizeDownloadDirectory } from './destination-path.ts'
 import { createTask, filenameForKind, kindForUrl, validateUrl } from './engine/create.ts'
+import { mapConcurrent } from './engine/concurrency.ts'
 import { importTorrentFile } from './engine/torrent-store.ts'
 import { findDuplicate } from './engine/duplicate.ts'
 import { buildTransferFile, buildUrlList, parseTransferFile } from './transfer-list.ts'
+import { publicTask, publicTasks } from './public-task.ts'
 import { listCredentials, removeCredential, saveCredential } from './credentials.ts'
 import { discardReservedPath, sanitizeFilename, uniquePath } from './engine/naming.ts'
 import type { DownloadManager } from './engine/manager.ts'
@@ -41,6 +45,9 @@ import { chosenYouTubeUrls, isSupportedYouTubeUrl } from './youtube-url.ts'
 import { getYouTubePrimeStatus, resolveMediaPage, resolvePlaylist, resolveYouTube } from './youtube.ts'
 import { MAX_PLAYLIST_ENTRIES, isPlaylistUrl, singleVideoUrl, type PlaylistEntry } from './youtube-playlist.ts'
 import { iconForExtension, iconForSite } from './icons.ts'
+import { thumbnailFor } from './thumbnails.ts'
+import { checkCookies } from './cookie-check.ts'
+import { listBrowsers } from './browser-icons.ts'
 import {
   registerShellHandlers,
   shellHandlerStatus,
@@ -52,6 +59,7 @@ import type { SiteProjectManager } from './site-grabber/projects.ts'
 import {
   getCategories,
   getSettings,
+  flushTasks,
   saveCategories,
   saveClipboardItems,
   saveSettings,
@@ -60,6 +68,7 @@ import {
 import {
   broadcast,
   closeHandoffWindow,
+  setHandoffEvictListener,
   createProgressWindow,
   getMainWindow,
   send,
@@ -70,6 +79,8 @@ import {
 
 const log = logger('ipc')
 let clipboardSave = Promise.resolve()
+/** Guards `cookies:check`, which spawns yt-dlp and owns one progress bar. */
+let cookieCheckRunning = false
 
 export interface AppContext {
   manager: DownloadManager
@@ -84,6 +95,9 @@ export interface AppContext {
    * survive until there is something to show it in.
    */
   pendingHandoffs: HandoffRequest[]
+  browserInbox: BrowserHandoffInbox
+  /** Accept commits still writing to disk; cancel waits before deciding ownership. */
+  handoffCommits: Map<string, Promise<void>>
   /**
    * Torrents and magnet links the shell asked Draco to open, waiting for a
    * window to show them in. Held here for the same reason `pendingHandoffs`
@@ -127,7 +141,9 @@ export function prepareClipboardItem(ctx: AppContext, rawUrl: string, existingId
       item = {
         id: randomUUID(),
         url,
-        kind: isSupportedYouTubeUrl(url)
+        kind: isPlaylistUrl(url)
+          ? 'playlist'
+          : isSupportedYouTubeUrl(url)
           ? 'youtube'
           : isSupportedMediaPageUrl(url)
             ? 'media'
@@ -161,7 +177,23 @@ export function prepareClipboardItem(ctx: AppContext, rawUrl: string, existingId
   const target = item
   void (async () => {
     try {
-      if (target.kind === 'youtube') {
+      if (target.kind === 'playlist') {
+        /*
+         * A listing, not a file. Resolving it through `resolveYouTube` - which
+         * is what every other YouTube link does here - runs yt-dlp with
+         * `--no-playlist`, so a `/playlist?list=...` came back with no formats
+         * and the inbox row showed an error about PO tokens. One flat listing
+         * is cheap and tells the row what it actually is.
+         */
+        const listing = await resolvePlaylist(target.url)
+        target.playlist = { title: listing.title, count: listing.entries.length }
+        target.youtube = undefined
+        target.media = undefined
+        target.probe = undefined
+        target.filename = listing.title
+        target.size = null
+        target.mimeType = null
+      } else if (target.kind === 'youtube') {
         const youtube = await resolveYouTube(target.url, { referer: target.url })
         const first = youtube.variants[0]
         target.youtube = youtube
@@ -266,18 +298,10 @@ export async function openShellTarget(ctx: AppContext, target: string): Promise<
   }
 }
 
-/**
- * Adds a handoff request to the pending queue, dropping the oldest once it's
- * full. The dropped request's confirm window is closed along with it - a
- * window whose request no longer exists in `pendingHandoffs` can never be
- * confirmed anyway, so leaving it open is just an orphaned renderer process.
- */
+/** Admit only requests for which a confirmation window can remain available. */
 export function pushPendingHandoff(ctx: AppContext, request: HandoffRequest): void {
+  if (ctx.pendingHandoffs.length >= 12) throw new Error('Too many pending confirmations')
   ctx.pendingHandoffs.push(request)
-  if (ctx.pendingHandoffs.length > 12) {
-    const dropped = ctx.pendingHandoffs.shift()
-    if (dropped) closeHandoffWindow(dropped.id)
-  }
 }
 
 /**
@@ -317,10 +341,12 @@ export function placeTask(input: NewDownload): DownloadTask {
   return createTask({
     url,
     sourceUrl: input.sourceUrl,
+    thumbnailUrl: input.thumbnailUrl,
     groupId: input.groupId?.slice(0, 128),
     groupName: input.groupName?.trim().slice(0, 160),
     groupFolder: groupFolder || undefined,
     dir: groupedDir,
+    dirLocked: Boolean(input.dir),
     audioUrl: input.audioUrl,
     audioTracks: input.audioTracks,
     youtube: input.youtube ? { ...input.youtube } : undefined,
@@ -339,8 +365,38 @@ export function placeTask(input: NewDownload): DownloadTask {
   })
 }
 
+/** Resolve page inputs before treating them as downloadable file bytes. */
+export async function prepareTaskInput(input: NewDownload): Promise<NewDownload> {
+  const url = validateUrl(input.url)
+  if (input.youtube || input.kind === 'torrent') return { ...input, url }
+  if (isPlaylistUrl(url)) throw new Error('Choose videos from the playlist dialog before adding this link')
+  if (!isSupportedYouTubeUrl(url)) return { ...input, url }
+
+  const resolved = await resolveYouTube(url, { ...input.headers, referer: input.headers?.referer ?? url })
+  const variant = pickPlaylistVariant(resolved.variants, null, false)
+  if (!variant?.youtube) throw new Error('No downloadable YouTube video format was found')
+  return {
+    ...input,
+    url: variant.url || url,
+    sourceUrl: url,
+    thumbnailUrl: input.thumbnailUrl ?? resolved.thumbnailUrl,
+    filename: input.filename ?? `${resolved.title}.${variant.container ?? 'mp4'}`,
+    audioUrl: variant.audioUrl ?? null,
+    audioTracks: variant.audioTracks,
+    expectedSize: variant.estimatedSize ?? input.expectedSize,
+    youtube: {
+      pageUrl: url,
+      videoFormatId: variant.youtube.videoFormatId,
+      audioFormatId: variant.youtube.audioFormatId ?? null,
+      height: variant.height,
+      role: variant.youtube.role ?? 'video'
+    }
+  }
+}
+
 /** Re-files a task after the probe, unless the caller pinned a destination. */
 export function refileTask(task: DownloadTask): void {
+  if (task.dirLocked) return
   if (task.groupFolder) return
   if (task.filenameLocked && task.categoryId) return
 
@@ -367,7 +423,7 @@ export function refileTask(task: DownloadTask): void {
  * the restore pass at startup, must not paper the desktop with windows nobody
  * pressed a button for.
  */
-function announce(task: DownloadTask): void {
+export function announce(task: DownloadTask): void {
   if (task.kind === 'torrent') return
   if (!getSettings().showProgressWindow) return
   log.info(`progress window for ${task.filename || task.url}`)
@@ -376,6 +432,16 @@ function announce(task: DownloadTask): void {
 }
 
 export function registerIpc(ctx: AppContext): void {
+  // When the handoff-window cap evicts a window, its pending request must go
+  // with it, or the request lingers until the list cap evicts it instead.
+  setHandoffEvictListener((requestId) => {
+    const at = ctx.pendingHandoffs.findIndex((request) => request.id === requestId)
+    if (at >= 0) ctx.pendingHandoffs.splice(at, 1)
+    void ctx.browserInbox.remove(requestId).catch((error) =>
+      log.error(`could not remove evicted browser confirmation ${requestId}: ${String(error)}`)
+    )
+  })
+
   const handle = <T extends unknown[], R>(
     channel: string,
     fn: (...args: T) => R | Promise<R>
@@ -392,33 +458,49 @@ export function registerIpc(ctx: AppContext): void {
 
   /* tasks */
 
-  handle('tasks:list', () => ctx.manager.list())
+  handle('tasks:list', () => publicTasks(ctx.manager.list()))
 
   handle('tasks:add', async (input: NewDownload) => {
-    const task = placeTask(input)
+    const task = placeTask(await prepareTaskInput(input))
     ctx.manager.add(task, input.autoStart !== false)
     if (input.autoStart !== false && input.suppressProgressWindow !== true) announce(task)
-    return task
+    return publicTask(task)
   })
 
   // One round-trip for a batch of URLs (a link drop, a pasted list) instead of
   // N `tasks:add` calls that each open a progress window - dropping 40 links
   // must not open 40 Chromium renderer processes.
   handle('tasks:addMany', async (inputs: NewDownload[]) => {
-    const tasks = inputs.map((input) => {
-      const task = placeTask(input)
-      ctx.manager.add(task, input.autoStart !== false)
-      return task
-    })
+    // Validate the complete batch before admitting any rows. Retrying a batch
+    // with an invalid later URL must not duplicate its successful prefix.
+    const prepared = await mapConcurrent(inputs, 3, prepareTaskInput)
+    const tasks = prepared.map((input) => placeTask(input))
+    tasks.forEach((task, index) => ctx.manager.add(task, inputs[index].autoStart !== false))
     if (
       tasks.length === 1 &&
       inputs[0].autoStart !== false &&
       inputs[0].suppressProgressWindow !== true
     ) announce(tasks[0])
-    return tasks
+    return publicTasks(tasks)
   })
 
-  handle('tasks:get', (id: string) => ctx.manager.get(id) ?? null)
+  handle('tasks:get', (id: string) => {
+    const task = ctx.manager.get(id)
+    return task ? publicTask(task) : null
+  })
+
+  /**
+   * Connection and peer diagnostics for one task.
+   *
+   * Pulled rather than pushed: these used to ride the 4 Hz progress feed for
+   * every task at once, so every window deserialised a torrent's entire file
+   * and peer list four times a second whether or not anything was drawing it.
+   * Asking also marks the task as watched, which is what tells the torrent
+   * runner to keep the panel fresh.
+   */
+  handle('tasks:detail', (id: string) =>
+    typeof id === 'string' ? ctx.manager.detail(id) : null
+  )
 
   /**
    * Whether this download has been had before. Reported, never enforced: asking
@@ -486,9 +568,10 @@ export function registerIpc(ctx: AppContext): void {
     if (items.length === 0) throw new Error('No downloadable links were found in that file')
 
     let added = 0
+    const queueIds = new Set(ctx.scheduler.list().map((queue) => queue.id))
     for (const item of items) {
       try {
-        const task = placeTask(item)
+        const task = placeTask(await prepareTaskInput({ ...item, queueId: item.queueId && queueIds.has(item.queueId) ? item.queueId : null }))
         ctx.manager.add(task, false)
         added++
       } catch {
@@ -555,6 +638,17 @@ export function registerIpc(ctx: AppContext): void {
     return { accepted: entries.length, groupId }
   })
 
+  /**
+   * Calls off an expansion that is still resolving.
+   *
+   * There used to be no way to do this short of deleting the rows that had
+   * already appeared and hoping the loop noticed - which it only did between
+   * entries, and only once at least one had been added.
+   */
+  handle('youtube:cancelPlaylist', (groupId: string) =>
+    typeof groupId === 'string' ? cancelPlaylistExpansion(groupId) : false
+  )
+
   handle('media:resolvePage', (url: string, headers?: RequestHeaders) => {
     const pageUrl = validateUrl(url)
     if (!/^https?:/i.test(pageUrl)) throw new Error('Media pages must use HTTP or HTTPS')
@@ -571,7 +665,11 @@ export function registerIpc(ctx: AppContext): void {
     publishClipboard(ctx)
   })
 
-  handle('tasks:start', (ids: string[]) => ctx.manager.start(ids))
+  handle('tasks:start', async (ids: string[]) => {
+    const queues = new Set(ids.map((id) => ctx.manager.get(id)?.queueId).filter((id): id is string => Boolean(id)))
+    for (const id of queues) await ctx.scheduler.startQueue(id)
+    ctx.manager.start(ids)
+  })
   handle('tasks:pause', (ids: string[]) => ctx.manager.pause(ids, true))
   handle('tasks:pauseAll', () => ctx.manager.pauseAll(true))
   handle('tasks:remove', (ids: string[], deleteFiles: boolean) =>
@@ -579,59 +677,71 @@ export function registerIpc(ctx: AppContext): void {
   )
   handle('tasks:removeCompleted', () => ctx.manager.removeCompleted())
 
-  handle('tasks:update', async (id: string, patch: Partial<DownloadTask>) => {
+  handle('tasks:update', async (id: string, patch: TaskPatch) => {
     const task = ctx.manager.get(id)
     if (!task) return null
+    const nextFilename = typeof patch.filename === 'string' && patch.filename.trim()
+      ? sanitizeFilename(patch.filename.trim(), task.filename || 'download') : task.filename
+    const filenameChanged = nextFilename !== task.filename
+    if (task.kind === 'torrent' && filenameChanged) {
+      throw new Error('Torrent filenames are fixed by their metadata and cannot be renamed')
+    }
+    if (filenameChanged && task.status !== 'done') {
+      throw new Error(task.status === 'downloading' || task.status === 'probing' || task.status === 'queued'
+        ? 'Pause the download before changing its filename'
+        : 'Resume or redownload this task before changing its filename')
+    }
+    if (typeof patch.queueId === 'string' && !ctx.scheduler.list().some((queue) => queue.id === patch.queueId)) {
+      throw new Error('That queue no longer exists')
+    }
+    if (filenameChanged) {
+      const currentPath = join(task.dir, task.filename)
+      let targetPath: string | null = null
+      try {
+        await access(currentPath, constants.F_OK)
+        targetPath = await uniquePath(task.dir, nextFilename)
+        await rename(currentPath, targetPath)
+        task.filename = targetPath.split(/[\\/]/).pop() || nextFilename
+      } catch (err) {
+        if (targetPath) await discardReservedPath(targetPath)
+        if ((err as NodeJS.ErrnoException)?.code !== 'ENOENT') throw err
+        task.filename = nextFilename
+        task.status = 'missing'
+      }
+      task.filenameLocked = true
+    }
 
     // Only fields the UI is allowed to edit. Letting a renderer patch `segments`
     // or `received` would let it corrupt the engine's own bookkeeping.
     if (typeof patch.description === 'string') task.description = patch.description.slice(0, 500)
     if (typeof patch.queueId === 'string' || patch.queueId === null) {
       const previousQueueId = task.queueId
+      const wasActive = task.status === 'downloading' || task.status === 'probing' || task.status === 'queued'
+      if (patch.queueId !== previousQueueId && wasActive) await ctx.manager.pause([id])
       await ctx.scheduler.syncTaskQueue(task.id, previousQueueId, patch.queueId)
       task.queueId = patch.queueId
+      if (wasActive && patch.queueId === null) ctx.manager.start([id])
+      ctx.scheduler.refresh()
     }
-    if (typeof patch.filename === 'string' && patch.filename.trim()) {
-      const nextFilename = sanitizeFilename(patch.filename.trim(), task.filename || 'download')
-      if (task.status === 'downloading' || task.status === 'probing' || task.status === 'queued') {
-        throw new Error('Pause the download before changing its filename')
-      }
-
-      if (task.status === 'done') {
-        const currentPath = join(task.dir, task.filename)
-        let targetPath: string | null = null
-        try {
-          await access(currentPath, constants.F_OK)
-          targetPath = await uniquePath(task.dir, nextFilename)
-          await rename(currentPath, targetPath)
-          task.filename = targetPath.split(/[\\/]/).pop() || nextFilename
-        } catch (err) {
-          if (targetPath) await discardReservedPath(targetPath)
-          if ((err as NodeJS.ErrnoException)?.code !== 'ENOENT') throw err
-          task.filename = nextFilename
-          task.status = 'missing'
-        }
-      } else {
-        // Paused partial downloads keep their on-disk identity. Renaming only the
-        // row would orphan the `.dracodl` and journal. Keep the operation explicit
-        // instead of pretending it is safe.
-        throw new Error('Resume or redownload this task before changing its filename')
-      }
-      task.filenameLocked = true
+    // Clearing a group membership detaches the row from its batch; the files
+    // stay where they are, group folder included.
+    if (patch.groupId === null) {
+      task.groupId = undefined
+      task.groupName = undefined
+    } else if (typeof patch.groupId === 'string') {
+      task.groupId = patch.groupId
+      if (typeof patch.groupName === 'string') task.groupName = patch.groupName
     }
-
     // UI-only task metadata should be persisted immediately enough that a clean
     // restart does not lose a rename/description/queue move.
     persistTaskSnapshot(ctx)
     ctx.manager.emitTasks()
-    return task
+    return publicTask(task)
   })
 
   handle('tasks:redownload', async (id: string) => {
     const task = ctx.manager.get(id)
     if (!task) return
-    await ctx.manager.remove([id], false)
-
     // Everything the original carried, not a subset of it. Dropping `dir` sent
     // a download the user had deliberately filed elsewhere back to the default
     // tree; dropping the group fields split a page batch out of its folder; and
@@ -639,11 +749,10 @@ export function registerIpc(ctx: AppContext): void {
     const fresh = placeTask({
       url: task.url,
       sourceUrl: task.sourceUrl,
-      // `placeTask` appends `groupFolder` to whatever directory it settles on,
-      // and `task.dir` already contains it - passing both would nest the folder
-      // inside itself. For a grouped task the category id reproduces the same
-      // parent, so let it re-derive; otherwise the explicit directory wins.
-      dir: task.groupFolder ? undefined : task.dir,
+      // Preserve the original destination even if settings/categories changed.
+      // placeTask appends groupFolder, which task.dir already contains.
+      dir: task.groupFolder ? dirname(task.dir) : task.dir,
+      thumbnailUrl: task.thumbnailUrl,
       categoryId: task.categoryId ?? undefined,
       groupId: task.groupId,
       groupName: task.groupName,
@@ -662,6 +771,7 @@ export function registerIpc(ctx: AppContext): void {
       torrentFiles: task.torrentFiles,
       youtube: task.youtube ? { pageUrl: task.youtube.pageUrl, videoFormatId: task.youtube.videoFormatId, audioFormatId: task.youtube.audioFormatId ?? null, height: task.youtube.height ?? null, role: task.youtube.role } : undefined
     })
+    await ctx.manager.remove([id], false)
     ctx.manager.add(fresh, true)
     announce(fresh)
   })
@@ -729,8 +839,11 @@ export function registerIpc(ctx: AppContext): void {
 
   handle('handoff:get', (id: string) => ctx.pendingHandoffs.find((h) => h.id === id) ?? null)
 
-  handle('handoff:accept', (id: string, input: NewDownload) => {
-    const request = takeHandoff(id)
+  handle('handoff:accept', async (id: string, input: NewDownload) => {
+    if (ctx.handoffCommits.has(id)) throw new Error('That download is already being saved')
+    const request = ctx.pendingHandoffs.find((h) => h.id === id)
+    if (!request) throw new Error('That download request has expired')
+    if (request.expiresAt && request.expiresAt <= Date.now()) throw new Error('That download request has expired')
 
     // The URL and the captured headers come from the request, not from the
     // window: the renderer is allowed to choose a name and a folder, not to
@@ -741,11 +854,32 @@ export function registerIpc(ctx: AppContext): void {
       sourceUrl: request.pageUrl ?? request.headers.referer,
       headers: request.headers
     })
-
-    ctx.manager.add(task, input.autoStart !== false)
+    if (request.kind === 'file') task.handoffId = id
+    ctx.manager.add(task, false)
+    const commit = (async () => {
+      try {
+        await flushTasks()
+      } catch (error) {
+        await ctx.manager.remove([task.id], false)
+        throw error
+      }
+    })()
+    ctx.handoffCommits.set(id, commit)
+    try {
+      await commit
+    } finally {
+      ctx.handoffCommits.delete(id)
+    }
+    if (request.kind === 'file') {
+      await ctx.browserInbox.remove(id).catch((error) =>
+        log.error(`could not remove accepted browser confirmation ${id}: ${String(error)}`)
+      )
+    }
+    takeHandoff(id)
+    if (input.autoStart !== false) ctx.manager.start([task.id])
     if (input.autoStart !== false) announce(task)
     closeHandoffWindow(id)
-    return task
+    return publicTask(task)
   })
 
   handle('handoff:resolveMedia', async (id: string) => {
@@ -782,8 +916,6 @@ export function registerIpc(ctx: AppContext): void {
       : undefined
     const selectedVariant = candidate.variants.find((variant) => variant.url === opts.variantUrl)
 
-    takeHandoff(id)
-
     const task = placeTask({
       url: urls.url,
       sourceUrl: candidate.pageUrl,
@@ -813,12 +945,15 @@ export function registerIpc(ctx: AppContext): void {
     task.size = selectedVariant?.estimatedSize ?? null
 
     ctx.manager.add(task, true)
+    takeHandoff(id)
     announce(task)
     closeHandoffWindow(id)
-    return task
+    return publicTask(task)
   })
 
-  handle('handoff:dismiss', (id: string) => {
+  handle('handoff:dismiss', async (id: string) => {
+    if (ctx.handoffCommits.has(id)) return
+    await ctx.browserInbox.remove(id)
     const index = ctx.pendingHandoffs.findIndex((h) => h.id === id)
     if (index >= 0) ctx.pendingHandoffs.splice(index, 1)
     closeHandoffWindow(id)
@@ -833,6 +968,7 @@ export function registerIpc(ctx: AppContext): void {
 
   handle('queues:list', () => ctx.scheduler.list())
   handle('queues:save', (queue: Queue) => ctx.scheduler.save(queue))
+  handle('queues:reorder', (id: string, ids: string[]) => ctx.scheduler.reorder(id, ids))
   handle('queues:remove', async (id: string) => {
     await ctx.scheduler.remove(id)
     // Queue removal clears task.queueId in memory; persist that mutation too,
@@ -1003,8 +1139,27 @@ export function registerIpc(ctx: AppContext): void {
 
   /* icons - the shell's, and the source site's */
 
+  /**
+   * Tries a browser's cookies and reports what YouTube made of them.
+   *
+   * One at a time: the run copies a cookie database and starts a yt-dlp, and a
+   * user clicking through the browser buttons would otherwise have four of them
+   * racing, all writing into the same progress bar.
+   */
+  handle('cookies:browsers', () => listBrowsers())
+  handle('cookies:check', async (browser: string) => {
+    if (cookieCheckRunning) throw new Error('A cookie check is already running')
+    cookieCheckRunning = true
+    try {
+      return await checkCookies(String(browser), (progress) => send('cookies:progress', progress))
+    } finally {
+      cookieCheckRunning = false
+    }
+  })
+
   handle('icons:file', (extension: string) => iconForExtension(String(extension)))
   handle('icons:site', (url: string) => iconForSite(String(url)))
+  handle('icons:thumbnail', (url: string) => thumbnailFor(String(url)))
 
   /* window controls - the frame is custom, so these are the buttons */
 
@@ -1067,7 +1222,7 @@ async function openable(ctx: AppContext, id: string): Promise<string | null> {
     await access(target, constants.F_OK)
   } catch {
     task.status = 'missing'
-    broadcast('tasks:changed', ctx.manager.list())
+    broadcast('tasks:changed', publicTasks(ctx.manager.list()))
     return null
   }
   return target
@@ -1098,12 +1253,34 @@ async function openableTorrentItem(
 }
 
 /**
- * Resolves playlist entries one at a time and adds each as a download.
+ * How many playlist entries are resolved at once.
  *
- * Sequential on purpose. yt-dlp is a whole process per lookup and YouTube
- * rate-limits a burst of them, so eight at once would be slower than one at a
- * time and considerably ruder. The user sees rows appear as it works, which is
- * the honest picture of what is happening.
+ * This used to be strictly one. yt-dlp is a whole process per lookup at roughly
+ * six seconds each, so a four-hundred-entry channel was up to forty minutes of
+ * silence - and the comment defending it was only half right. YouTube does
+ * rate-limit a burst, but three is not a burst; eight would be. Entries are
+ * resolved a window at a time and added in listing order, so the rows still
+ * appear in the order the playlist has them.
+ */
+const PLAYLIST_RESOLVE_CONCURRENCY = 3
+
+/** Live playlist expansions, so one can be called off while it is running. */
+const playlistRuns = new Map<string, AbortController>()
+
+export function cancelPlaylistExpansion(groupId: string): boolean {
+  const controller = playlistRuns.get(groupId)
+  if (!controller) return false
+  controller.abort()
+  playlistRuns.delete(groupId)
+  return true
+}
+
+/**
+ * Resolves playlist entries and adds each as a download.
+ *
+ * Resolution is the slow part and happens a few at a time; the adds stay
+ * strictly in listing order, because a playlist that arrives shuffled is not
+ * the playlist the user asked for.
  *
  * One entry failing is not the batch failing: a private or region-blocked video
  * in the middle of a playlist must not cost the other ninety-nine.
@@ -1121,64 +1298,125 @@ async function expandPlaylist(
   }
 ): Promise<void> {
   let added = 0
+  /** Why the run ended early, when it did: the user, or the rows going away. */
+  let stopped: 'cancelled' | 'removed' | null = null
   const failures: string[] = []
+  const controller = new AbortController()
+  playlistRuns.set(options.groupId, controller)
 
-  for (const entry of entries) {
-    // Deleting the rows is how the user cancels a listing that is still
-    // filling in. Once something has been added, the group going empty can
-    // only mean it was removed - so stop, rather than adding the other ninety
-    // videos back one by one.
-    if (added > 0 && !ctx.manager.list().some((task) => task.groupId === options.groupId)) {
-      log.info(`playlist ${options.groupName} cancelled after ${added} entries`)
-      return
-    }
+  const publish = (): void => {
+    send('playlist:progress', {
+      groupId: options.groupId,
+      groupName: options.groupName,
+      done: added + failures.length,
+      total: entries.length,
+      failed: failures.length
+    })
+  }
+  publish()
 
-    try {
-      const resolved = await resolveYouTube(entry.url, { referer: entry.url })
-      const variant = pickPlaylistVariant(resolved.variants, options.height, options.audioOnly)
-      if (!variant) {
-        failures.push(entry.title)
-        continue
+  try {
+    for (let index = 0; index < entries.length; index += PLAYLIST_RESOLVE_CONCURRENCY) {
+      if (controller.signal.aborted) {
+        log.info(`playlist ${options.groupName} cancelled after ${added} entries`)
+        stopped = 'cancelled'
+        break
+      }
+      // Deleting the rows is also how the user calls off a listing that is
+      // still filling in. Once something has been added, the group going empty
+      // can only mean it was removed - so stop, rather than adding the other
+      // ninety videos back one by one.
+      if (added > 0 && !ctx.manager.list().some((task) => task.groupId === options.groupId)) {
+        log.info(`playlist ${options.groupName} removed after ${added} entries`)
+        stopped = 'removed'
+        break
       }
 
-      const task = placeTask({
-        url: variant.url,
-        sourceUrl: entry.url,
-        groupId: options.groupId,
-        groupName: options.groupName,
-        groupFolder: options.groupName,
-        audioUrl: variant.audioUrl ?? null,
-        audioTracks: variant.audioTracks,
-        youtube: variant.youtube
-          ? {
-              pageUrl: entry.url,
-              videoFormatId: variant.youtube.videoFormatId,
-              audioFormatId: variant.youtube.audioFormatId ?? null,
-              height: variant.height,
-              role: variant.youtube.role ?? 'video'
-            }
-          : undefined,
-        filename: resolved.title,
-        dir: options.dir,
-        queueId: options.queueId,
-        // A queued task is started by the scheduler, not by the add.
-        autoStart: options.queueId === null,
-        suppressProgressWindow: true
-      })
-      ctx.manager.add(task, options.queueId === null)
-      added++
-    } catch (error) {
-      failures.push(entry.title)
-      log.warn(`playlist entry failed (${entry.title}): ${error instanceof Error ? error.message : String(error)}`)
+      const window = entries.slice(index, index + PLAYLIST_RESOLVE_CONCURRENCY)
+      const resolutions = await Promise.all(
+        window.map((entry) =>
+          resolveYouTube(entry.url, { referer: entry.url })
+            .then((resolved) => ({ entry, resolved, error: null as unknown }))
+            .catch((error: unknown) => ({ entry, resolved: null, error }))
+        )
+      )
+
+      for (const { entry, resolved, error } of resolutions) {
+        // Cancellation can arrive while this window of extractors is in
+        // flight. Do not admit their results after the user stopped the run.
+        if (controller.signal.aborted) { stopped = 'cancelled'; break }
+        if (added > 0 && !ctx.manager.list().some((task) => task.groupId === options.groupId)) {
+          stopped = 'removed'
+          break
+        }
+        if (!resolved) {
+          failures.push(entry.title)
+          log.warn(`playlist entry failed (${entry.title}): ${error instanceof Error ? error.message : String(error)}`)
+          continue
+        }
+
+        const variant = pickPlaylistVariant(resolved.variants, options.height, options.audioOnly)
+        if (!variant) {
+          failures.push(entry.title)
+          continue
+        }
+
+        const task = placeTask({
+          url: variant.url,
+          sourceUrl: entry.url,
+          thumbnailUrl: resolved.thumbnailUrl ?? entry.thumbnailUrl,
+          groupId: options.groupId,
+          groupName: options.groupName,
+          groupFolder: options.groupName,
+          audioUrl: variant.audioUrl ?? null,
+          audioTracks: variant.audioTracks,
+          youtube: variant.youtube
+            ? {
+                pageUrl: entry.url,
+                videoFormatId: variant.youtube.videoFormatId,
+                audioFormatId: variant.youtube.audioFormatId ?? null,
+                height: variant.height,
+                role: variant.youtube.role ?? 'video'
+              }
+            : undefined,
+          filename: resolved.title,
+          dir: options.dir,
+          queueId: options.queueId,
+          // A queued task is started by the scheduler, not by the add.
+          autoStart: options.queueId === null,
+          suppressProgressWindow: true
+        })
+        ctx.manager.add(task, options.queueId === null)
+        added++
+      }
+
+      publish()
     }
+  } finally {
+    playlistRuns.delete(options.groupId)
+    // Zero total is how the renderer knows to take the line down, whether this
+    // finished, failed or was called off part-way.
+    send('playlist:progress', {
+      groupId: options.groupId,
+      groupName: options.groupName,
+      done: added + failures.length,
+      total: 0,
+      failed: failures.length
+    })
+    persistTaskSnapshot(ctx)
   }
 
-  persistTaskSnapshot(ctx)
+  // A run the user called off still says what it managed; one whose rows were
+  // deleted says nothing, because the deletion was the feedback.
+  if (stopped === 'removed') return
+
   send('toast', {
-    kind: failures.length === 0 ? 'success' : 'info',
-    message: failures.length === 0
-      ? `Added ${added} video(s) from ${options.groupName}`
-      : `Added ${added} of ${entries.length} from ${options.groupName}; ${failures.length} could not be resolved`
+    kind: stopped === 'cancelled' ? 'info' : failures.length === 0 ? 'success' : 'info',
+    message: stopped === 'cancelled'
+      ? `Stopped after adding ${added} of ${entries.length} from ${options.groupName}`
+      : failures.length === 0
+        ? `Added ${added} video(s) from ${options.groupName}`
+        : `Added ${added} of ${entries.length} from ${options.groupName}; ${failures.length} could not be resolved`
   })
 }
 
@@ -1392,7 +1630,8 @@ export function handoffToTask(
     cookie?: string
     userAgent?: string
     bulk?: boolean
-  }
+  },
+  autoStart = true
 ): DownloadTask {
   const task = placeTask({
     url: message.url,
@@ -1405,11 +1644,11 @@ export function handoffToTask(
     }
   })
 
-  ctx.manager.add(task, true)
+  ctx.manager.add(task, autoStart)
   // With the confirm window turned off this is the only thing the user sees of
   // a download they started, so it matters most here. A bulk action still gets
   // nothing: forty windows is the problem the confirm window already avoids.
-  if (!message.bulk) announce(task)
+  if (autoStart && !message.bulk) announce(task)
   return task
 }
 

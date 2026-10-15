@@ -43,7 +43,9 @@ export function buildTransferFile(tasks: readonly DownloadTask[]): TransferFile 
     version: TRANSFER_VERSION,
     exportedAt: Date.now(),
     items: tasks.map((task) => ({
-      url: task.url,
+      // A YouTube CDN URL carries a short-lived signature. Export the stable
+      // watch page instead of writing that token into a portable plain file.
+      url: task.youtube?.pageUrl ?? task.url,
       filename: task.filename,
       dir: task.dir,
       categoryId: task.categoryId,
@@ -59,7 +61,7 @@ export function buildTransferFile(tasks: readonly DownloadTask[]): TransferFile 
 
 /** One URL per line, which is what everything else reads. */
 export function buildUrlList(tasks: readonly DownloadTask[]): string {
-  const lines = tasks.map((task) => task.youtube?.pageUrl ?? task.sourceUrl ?? task.url)
+  const lines = tasks.map((task) => task.youtube?.pageUrl ?? task.url)
   return [...new Set(lines)].join('\r\n') + '\r\n'
 }
 
@@ -102,8 +104,7 @@ function itemToDownload(raw: unknown): NewDownload[] {
   const item = raw as TransferItem | null
   if (!item || typeof item !== 'object') return []
 
-  // The page URL is preferred where there is one: a signed media address
-  // exported last week resolves to nothing today.
+  // Prefer the exported download URL; sourceUrl may be an ordinary article.
   const url = pickUrl(item)
   if (!url) return []
 
@@ -113,6 +114,7 @@ function itemToDownload(raw: unknown): NewDownload[] {
     dir: typeof item.dir === 'string' ? item.dir : undefined,
     categoryId: typeof item.categoryId === 'string' ? item.categoryId : null,
     queueId: typeof item.queueId === 'string' ? item.queueId : null,
+    description: typeof item.description === 'string' ? item.description.slice(0, 500) : undefined,
     // Imported rows are not started: an import is a list of intentions, and
     // fifty downloads beginning at once is not what dropping a file in means.
     autoStart: false,
@@ -121,7 +123,7 @@ function itemToDownload(raw: unknown): NewDownload[] {
 }
 
 function pickUrl(item: TransferItem): string | null {
-  const candidates = [item.sourceUrl, item.url]
+  const candidates = [item.url, item.sourceUrl]
   for (const candidate of candidates) {
     if (typeof candidate === 'string' && isTransferableUrl(candidate)) return candidate
   }

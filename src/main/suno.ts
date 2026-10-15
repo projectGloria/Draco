@@ -1,4 +1,6 @@
 import type { MediaVariant, RequestHeaders, YouTubeResolution } from '../shared/types.ts'
+import { fetchGuarded } from './fetch-guard.ts'
+import { readResponseText } from './response-limit.ts'
 
 export async function resolveSuno(
   pageUrl: string,
@@ -12,15 +14,20 @@ export async function resolveSuno(
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), 20_000)
   try {
-    const response = await fetch(pageUrl, {
+    const response = await fetchGuarded(pageUrl, {
       signal: controller.signal,
+      timeoutMs: 20_000,
       headers: {
         ...(headers?.userAgent ? { 'user-agent': headers.userAgent } : {}),
         ...(headers?.referer ? { referer: headers.referer } : {})
       }
     })
     if (!response.ok) throw new Error(`Suno returned HTTP ${response.status}`)
-    return sunoMediaFromHtml(pageUrl, id, await response.text())
+    // A /s/ share link redirects to the song's UUID. The silent og:audio
+    // placeholder must fall back to that final UUID rather than the share ID.
+    const finalUrl = response.url || pageUrl
+    const finalId = /^\/(?:song|s)\/([^/?#]+)/i.exec(new URL(finalUrl).pathname)?.[1] ?? id
+    return sunoMediaFromHtml(finalUrl, finalId, await readResponseText(response, 5 * 1024 * 1024))
   } finally {
     clearTimeout(timer)
   }

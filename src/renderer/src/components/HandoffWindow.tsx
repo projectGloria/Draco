@@ -8,11 +8,14 @@ import type {
   Settings,
   YouTubePrimeState
 } from '@shared/types'
-import { formatBytes, hostOf } from '../lib/format'
-import { applyAccent } from '../store/app'
+import { formatBytes, hostOf, looksLikeTorrentInput } from '../lib/format'
+import { useApp } from '../store/app'
+import { useAppearance } from '../lib/use-appearance'
 import { BrandMark, CloseGlyph, FolderIcon } from './Icons'
 import { GhostButton, PrimaryButton } from './Dialog'
 import { SiteIcon } from './FileIcon'
+import { youtubeThumbnailUrl } from '@shared/youtube-link'
+import { useThumbnail } from '../lib/icons'
 
 /**
  * IDM's download dialog, as its own window.
@@ -26,6 +29,9 @@ import { SiteIcon } from './FileIcon'
 export default function HandoffWindow({ id }: { id: string }): React.ReactElement {
   const [request, setRequest] = useState<HandoffRequest | null>(null)
   const [gone, setGone] = useState(false)
+  const [dismissError, setDismissError] = useState<string | null>(null)
+  const settings = useApp((state) => state.settings)
+  useAppearance(settings)
 
   const [categories, setCategories] = useState<Category[]>([])
   const [queues, setQueues] = useState<Queue[]>([])
@@ -39,7 +45,7 @@ export default function HandoffWindow({ id }: { id: string }): React.ReactElemen
         window.api.getSettings().catch(() => null as Settings | null)
       ])
 
-      if (settings) applyAccent(settings.accent)
+      if (settings) useApp.setState({ settings })
       setCategories(cats)
       setQueues(qs)
 
@@ -49,7 +55,10 @@ export default function HandoffWindow({ id }: { id: string }): React.ReactElemen
   }, [id])
 
   const dismiss = (): void => {
-    void window.api.dismissHandoff(id)
+    setDismissError(null)
+    void window.api.dismissHandoff(id).catch((error: unknown) => {
+      setDismissError(error instanceof Error ? error.message : String(error))
+    })
   }
 
   useEffect(() => {
@@ -81,6 +90,12 @@ export default function HandoffWindow({ id }: { id: string }): React.ReactElemen
           <CloseGlyph />
         </button>
       </header>
+
+      {dismissError && (
+        <p role="alert" className="px-5 py-2 text-xs text-red-300">
+          Could not dismiss this download: {dismissError}
+        </p>
+      )}
 
       {gone || !request ? (
         <Placeholder gone={gone} />
@@ -127,6 +142,7 @@ function FileBody({
   const [queueId, setQueueId] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const torrentMode = looksLikeTorrentInput(request.url) || probe?.torrentFiles !== undefined
 
   useEffect(() => {
     let cancelled = false
@@ -154,7 +170,7 @@ function FileBody({
     try {
       await window.api.acceptHandoff(request.id, {
         url: request.url,
-        filename: filename.trim() || undefined,
+        filename: torrentMode ? undefined : filename.trim() || undefined,
         dir: dir ?? undefined,
         categoryId: categoryId || null,
         queueId: queueId || null,
@@ -178,6 +194,7 @@ function FileBody({
         <Field label="File name">
           <input
             value={filename}
+            disabled={torrentMode}
             autoFocus
             onChange={(event) => {
               touched.current = true
@@ -186,6 +203,7 @@ function FileBody({
             spellCheck={false}
             className="field text-[12.5px]"
           />
+          {torrentMode && <p className="mt-1.5 text-[11px] text-faint">Torrent names come from their metadata and cannot be changed here.</p>}
         </Field>
 
         <SaveTo dir={dir} onPick={setDir} />
@@ -349,6 +367,7 @@ function MediaBody({
           url={request.pageUrl ?? request.url}
           title={request.pageTitle}
           icon={<SiteIcon url={request.pageUrl ?? request.url} className="w-4 h-4" />}
+          preview
         />
 
         <Field label={audioOnly ? 'Format' : 'Quality'}>
@@ -514,21 +533,24 @@ function Field({
 function Source({
   url,
   title,
-  icon
+  icon,
+  preview = false
 }: {
   url: string
   title?: string
   icon: React.ReactNode
+  preview?: boolean
 }): React.ReactElement {
+  const thumbnail = useThumbnail(preview ? youtubeThumbnailUrl(url) : null)
   return (
     <div className="flex items-start gap-2.5">
       <span
-        className="w-8 h-8 rounded-lg grid place-items-center shrink-0"
+        className={`${preview ? 'w-[96px] h-[60px]' : 'w-8 h-8'} rounded-lg grid place-items-center shrink-0 overflow-hidden`}
         style={{ background: 'var(--accent-soft)', color: 'var(--accent)' }}
       >
-        {icon}
+        {thumbnail ? <img src={thumbnail} alt="Media preview" className="w-full h-full object-cover" /> : icon}
       </span>
-      <div className="min-w-0">
+      <div className="min-w-0 flex-1">
         <div className="text-[12.5px] font-semibold truncate" title={title || url}>
           {title || hostOf(url) || url}
         </div>

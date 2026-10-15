@@ -1,6 +1,8 @@
-import { useState } from 'react'
 import type { ClipboardItem } from '@shared/types'
+import { youtubeThumbnailUrl } from '@shared/youtube-link'
+import { useT } from '../i18n'
 import { formatBytes, hostOf } from '../lib/format'
+import { useThumbnail } from '../lib/icons'
 import { useApp } from '../store/app'
 import FileIcon, { SiteIcon } from './FileIcon'
 import { ClipboardIcon, TorrentIcon, TrashIcon } from './Icons'
@@ -50,6 +52,7 @@ function ClipboardRow({
   item: ClipboardItem
   onDownload(item: ClipboardItem): void
 }): React.ReactElement {
+  const t = useT()
   const remove = (): void => {
     void window.api.removeClipboardItem(item.id)
   }
@@ -63,16 +66,22 @@ function ClipboardRow({
 
       <div className="min-w-0 flex-1">
         <div className="text-[12.5px] font-semibold truncate" title={item.filename ?? item.url}>
-          {item.filename ?? (item.status === 'fetching' ? 'Reading link…' : item.url)}
+          {item.filename ?? (item.status === 'fetching' ? t('readingLink') : item.url)}
         </div>
         <div className="text-[10.5px] text-faint flex items-center gap-2 mt-0.5 min-w-0">
           <span className="truncate" title={item.url}>{hostOf(item.url) || item.url}</span>
           {item.size != null && <span className="tnum shrink-0">{formatBytes(item.size)}</span>}
+          {/* A listing has no size, so its length is the useful figure there. */}
+          {item.playlist && (
+            <span className="tnum shrink-0">
+              {t('videoCount', { count: item.playlist.count })}
+            </span>
+          )}
           <span className="uppercase shrink-0">{item.kind}</span>
         </div>
         {item.status === 'error' && (
           <div className="text-[10.5px] text-warn truncate mt-1" title={item.error ?? ''}>
-            {item.error || 'Could not prepare this link'}
+            {item.error || t('prepareFailed')}
           </div>
         )}
       </div>
@@ -85,7 +94,7 @@ function ClipboardRow({
             className="h-8 px-3 rounded-lg border border-line text-[11.5px] text-muted hover:text-ink hover:bg-white/[0.06]"
             onClick={() => void window.api.retryClipboardItem(item.id)}
           >
-            Retry
+            {t('retry')}
           </button>
         )}
         <button
@@ -109,26 +118,26 @@ function ClipboardRow({
 }
 
 function ClipboardPreview({ item }: { item: ClipboardItem }): React.ReactElement {
-  const [thumbnailFailed, setThumbnailFailed] = useState(false)
+  const resolution = item.youtube ?? item.media
+  const previewOf = item.kind === 'youtube' || item.kind === 'media' || item.kind === 'playlist'
+  /*
+   * A playlist row has no resolution of its own - `prepareClipboardItem` keeps
+   * a listing rather than a video - so it falls back to the id in the link,
+   * which for `watch?v=X&list=Y` is a real video and for a bare `list=` is
+   * nothing. `useThumbnail` is happy with null and simply draws the site icon.
+   */
+  const thumbnailUrl = previewOf
+    ? resolution?.thumbnailUrl ?? youtubeThumbnailUrl(resolution?.id ?? item.url)
+    : null
+  // Unconditional: a hook cannot sit behind the `previewOf` branch below.
+  const thumbnail = useThumbnail(thumbnailUrl)
 
-  if (item.kind === 'youtube' || item.kind === 'media') {
-    const resolution = item.youtube ?? item.media
-    const id = resolution?.id
-    const thumbnail = resolution?.thumbnailUrl ??
-      (item.kind === 'youtube' && id
-        ? `https://i.ytimg.com/vi/${encodeURIComponent(id)}/hqdefault.jpg`
-        : null)
-    const previewClass = item.kind === 'youtube' ? 'w-24 h-[54px]' : 'w-[54px] h-[54px]'
+  if (previewOf) {
+    const previewClass = item.kind === 'media' ? 'w-[54px] h-[54px]' : 'w-24 h-[54px]'
     return (
       <div className={`${previewClass} rounded-lg bg-black/30 border border-line overflow-hidden grid place-items-center shrink-0`}>
-        {thumbnail && !thumbnailFailed ? (
-          <img
-            src={thumbnail}
-            alt=""
-            draggable={false}
-            onError={() => setThumbnailFailed(true)}
-            className="w-full h-full object-cover"
-          />
+        {thumbnail ? (
+          <img src={thumbnail} alt="" draggable={false} className="w-full h-full object-cover" />
         ) : (
           <SiteIcon url={item.url} className="w-6 h-6" />
         )}
@@ -158,17 +167,18 @@ function ClipboardPreview({ item }: { item: ClipboardItem }): React.ReactElement
 }
 
 function Status({ item }: { item: ClipboardItem }): React.ReactElement {
+  const t = useT()
   if (item.status === 'fetching') {
     return (
       <div className="flex items-center gap-2 text-[11px] text-faint shrink-0">
         <span className="w-3.5 h-3.5 rounded-full border-2 border-faint border-t-[var(--accent)] animate-spin" />
-        Fetching
+        {t('fetching')}
       </div>
     )
   }
   return (
     <div className={item.status === 'ready' ? 'text-ok text-[11px] shrink-0' : 'text-warn text-[11px] shrink-0'}>
-      {item.status === 'ready' ? 'Ready' : 'Error'}
+      {item.status === 'ready' ? t('statusReady') : t('statusError')}
     </div>
   )
 }

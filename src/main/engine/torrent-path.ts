@@ -1,4 +1,4 @@
-import { isAbsolute, relative, resolve } from 'node:path'
+import { isAbsolute, relative, resolve, sep } from 'node:path'
 
 /** Resolves only a metadata-listed item that remains beneath the download root. */
 export function resolveTorrentItemPath(
@@ -10,6 +10,6 @@ export function resolveTorrentItemPath(
   const root = resolve(rootDir)
   const target = resolve(root, itemPath)
   const inside = relative(root, target)
-  if (!inside || inside.startsWith('..') || isAbsolute(inside)) return null
+  if (!inside || inside === '..' || inside.startsWith(`..${sep}`) || inside.startsWith('../') || isAbsolute(inside)) return null
   return target
 }

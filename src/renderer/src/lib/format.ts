@@ -1,3 +1,5 @@
+import { normalizeLinkInput } from '@shared/youtube-link'
+
 /**
  * Formatting for a dense table. Every function here returns something that
  * fits in a narrow column and never changes width mid-download - a size that
@@ -72,7 +74,11 @@ export function looksLikeUrl(value: string): boolean {
   if (!trimmed || /\s/.test(trimmed)) return false
   if (/^[0-9a-fA-F]{40}$/.test(trimmed)) return true
   try {
-    const parsed = new URL(trimmed)
+    // Normalised first, so a pasted `youtube.com/playlist?list=...` is accepted
+    // here exactly as `validateUrl` in main accepts it. The two used to
+    // disagree, and this box was where that showed: the dialog refused the line
+    // before main ever got a chance to make sense of it.
+    const parsed = new URL(normalizeLinkInput(trimmed) ?? trimmed)
     return parsed.protocol === 'http:' || parsed.protocol === 'https:' || parsed.protocol === 'magnet:'
   } catch {
     return false
@@ -93,45 +99,18 @@ export function looksLikeTorrentInput(value: string): boolean {
   }
 }
 
-export function looksLikeYouTubeInput(value: string): boolean {
-  const trimmed = value.trim()
-  if (!trimmed || /\s/.test(trimmed)) return false
-  try {
-    const parsed = new URL(trimmed)
-    return parsed.protocol === 'https:' &&
-      (/(^|\.)youtube\.com$/i.test(parsed.hostname) || /(^|\.)youtu\.be$/i.test(parsed.hostname))
-  } catch {
-    return false
-  }
-}
-
-/**
- * Whether this link stands for a collection rather than one video.
- *
- * A quick read, only good enough to decide which dialog opens. `main` holds
- * the authority (`youtube-playlist.ts`) and says no to anything this lets
- * through, so a false positive costs an error message rather than a wrong
- * download.
+/*
+ * Both of these used to be reimplemented here, with a comment explaining that
+ * main held the authority and would catch anything this let through. That is
+ * only true while the two copies agree, and keeping them agreeing meant making
+ * every fix twice. They are one function now, in `shared`, and this re-export
+ * is only so the call sites in this app did not all have to move.
  */
-export function looksLikePlaylistInput(value: string): boolean {
-  const trimmed = value.trim()
-  if (!looksLikeYouTubeInput(trimmed)) return false
-
-  try {
-    const parsed = new URL(trimmed)
-    const list = parsed.searchParams.get('list')
-    // RD/UL/TL lists are YouTube's endless generated mixes: there is no last
-    // entry, so "download the playlist" means nothing for one.
-    if (list) return !/^(RD|UL|TL)/.test(list)
-    return (
-      /^\/@[^/]+(?:\/(?:videos|shorts|streams|featured))?\/?$/i.test(parsed.pathname) ||
-      /^\/(?:channel|c|user)\/[^/]+(?:\/(?:videos|shorts|streams|featured))?\/?$/i.test(parsed.pathname) ||
-      /^\/playlist\/?$/i.test(parsed.pathname)
-    )
-  } catch {
-    return false
-  }
-}
+export {
+  isSupportedYouTubeUrl as looksLikeYouTubeInput,
+  isPlaylistUrl as looksLikePlaylistInput,
+  normalizeLinkInput
+} from '@shared/youtube-link'
 
 export function hostOf(url: string): string {
   try {

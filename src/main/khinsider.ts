@@ -16,7 +16,8 @@
 
 import type { MediaVariant, RequestHeaders, YouTubeResolution } from '../shared/types.ts'
 import { mapConcurrent } from './engine/concurrency.ts'
-import { getDispatcher } from './engine/http.ts'
+import { fetchGuarded } from './fetch-guard.ts'
+import { readResponseText } from './response-limit.ts'
 import { DEFAULT_USER_AGENT } from './engine/probe.ts'
 import { logger } from './log.ts'
 
@@ -274,23 +275,17 @@ async function fetchPage(
   headers: RequestHeaders | undefined,
   referer: string | undefined
 ): Promise<{ html: string; url: string }> {
-  const response = await fetch(url, {
+  const response = await fetchGuarded(url, {
     headers: {
       accept: 'text/html,application/xhtml+xml',
       'user-agent': headers?.userAgent || DEFAULT_USER_AGENT,
       ...(referer ? { referer } : {}),
       ...(headers?.cookie ? { cookie: headers.cookie } : {})
     },
-    redirect: 'follow',
-    dispatcher: getDispatcher(30_000)
-  } as RequestInit)
+    timeoutMs: 30_000
+  })
   if (!response.ok) throw new Error(`khinsider returned HTTP ${response.status}`)
-  const declared = Number(response.headers.get('content-length') ?? 0)
-  if (declared > MAX_HTML_BYTES) throw new Error('That khinsider page is too large to read')
-  const html = await response.text()
-  if (Buffer.byteLength(html, 'utf8') > MAX_HTML_BYTES) {
-    throw new Error('That khinsider page is too large to read')
-  }
+  const html = await readResponseText(response, MAX_HTML_BYTES)
   return { html, url: response.url || url }
 }
 

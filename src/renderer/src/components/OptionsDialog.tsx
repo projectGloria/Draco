@@ -1,66 +1,276 @@
-import { useEffect, useState } from 'react'
-import type { Category, SiteCredential, ToolStatus } from '@shared/types'
+import { useCallback, useEffect, useRef, useState } from 'react'
+import type {
+  Category,
+  CookieCheckProgress,
+  CookieCheckResult,
+  InstalledBrowser,
+  SiteCredential,
+  Settings,
+  ToolId,
+  ToolStatus
+} from '@shared/types'
 import { formatBytes, formatWhen } from '../lib/format'
 import { useApp } from '../store/app'
 import { reportError, toast } from '../store/toasts'
 import Dialog, { GhostButton, PrimaryButton } from './Dialog'
-import { CopyIcon, FolderIcon, PlusIcon, RefreshIcon, TrashIcon } from './Icons'
+import { CookieIcon, CopyIcon, FolderIcon, GearIcon, GlobeIcon, LayersIcon, LinkIcon, PaletteIcon, PlusIcon, RefreshIcon, ToolsIcon, TrashIcon } from './Icons'
+import ffmpegIcon from '../../../../resources/tools/ffmpeg.ico'
+import ytDlpIcon from '../../../../resources/tools/yt-dlp.ico'
 import Toggle from './Toggle'
-import { useT } from '../i18n'
+import { useT, type TKey } from '../i18n'
 
-type Tab = 'general' | 'connection' | 'categories' | 'browser' | 'appearance'
+type Tab = 'general' | 'connection' | 'cookies' | 'categories' | 'browser' | 'appearance' | 'tools'
 
-const TABS: Array<{ id: Tab; label: string }> = [
-  { id: 'general', label: 'General' },
-  { id: 'connection', label: 'Connection' },
-  { id: 'categories', label: 'Categories' },
-  { id: 'browser', label: 'Browser' },
-  { id: 'appearance', label: 'Appearance' }
-]
+const TABS = [
+  { id: 'general', label: 'General', icon: GearIcon },
+  { id: 'connection', label: 'Connection', icon: LinkIcon },
+  { id: 'cookies', label: 'Cookies', icon: CookieIcon },
+  { id: 'categories', label: 'Categories', icon: LayersIcon },
+  { id: 'browser', label: 'Browser', icon: GlobeIcon },
+  { id: 'appearance', label: 'Appearance', icon: PaletteIcon },
+  { id: 'tools', label: 'Necessary tools', icon: ToolsIcon }
+] as const
+
+function validateDraft(settings: Settings): TKey | null {
+  const schedule = settings.scheduledLimit
+  if (schedule && (!/^(?:[01]\d|2[0-3]):[0-5]\d$/.test(schedule.startTime)
+    || !/^(?:[01]\d|2[0-3]):[0-5]\d$/.test(schedule.stopTime)
+    || !Number.isFinite(schedule.bytesPerSecond) || schedule.bytesPerSecond <= 0)) {
+    return 'incompleteScheduledLimit'
+  }
+  for (const [value, protocols, error] of [
+    [settings.proxyUrl, ['http:', 'https:'], 'invalidProxyUrl'],
+    [settings.updateFeedUrl, ['https:'], 'invalidUpdateFeedUrl']
+  ] as const) {
+    if (!value) continue
+    if (value.length > 2048) return error
+    try {
+      if (!(protocols as readonly string[]).includes(new URL(value).protocol)) return error
+    } catch { return error }
+  }
+  return null
+}
 
 export default function OptionsDialog({
-  onClose,
-  onShowTools
+  onClose
 }: {
   onClose(): void
-  /** Hands the helper-tool list to the one dialog that offers the update. */
-  onShowTools(tools: ToolStatus[]): void
 }): React.ReactElement {
   const [tab, setTab] = useState<Tab>('general')
+  const liveSettings = useApp((s) => s.settings)
+  const persist = useApp((s) => s.patchSettings)
+  const original = useRef(liveSettings)
+  const [draft, setDraft] = useState(liveSettings)
+  const draftRef = useRef(liveSettings)
+  const [changes, setChanges] = useState<Partial<Settings>>({})
+  const changesRef = useRef<Partial<Settings>>({})
+  const [saving, setSaving] = useState(false)
+  const [confirmDiscard, setConfirmDiscard] = useState(false)
+  const [validationError, setValidationError] = useState<TKey | null>(null)
+  const t = useT()
+  const dirty = Object.keys(changes).length > 0
+
+  const patchDraft = useCallback((patch: Partial<Settings>): void => {
+    draftRef.current = { ...draftRef.current, ...patch }
+    setDraft(draftRef.current)
+    const next = { ...changesRef.current, ...patch }
+    for (const key of Object.keys(patch) as Array<keyof Settings>) {
+      if (JSON.stringify(next[key]) === JSON.stringify(original.current[key])) delete next[key]
+    }
+    changesRef.current = next
+    setChanges(next)
+    setConfirmDiscard(false)
+    setValidationError(null)
+  }, [])
+
+  const requestClose = (): void => {
+    if (saving) return
+    if (document.activeElement instanceof HTMLElement) document.activeElement.blur()
+    const hasChanges = Object.keys(changesRef.current).length > 0
+    if (hasChanges && !confirmDiscard) { setConfirmDiscard(true); return }
+    if (hasChanges && confirmDiscard) { setConfirmDiscard(false); return }
+    onClose()
+  }
+
+  const apply = async (): Promise<void> => {
+    if (saving) return
+    if (document.activeElement instanceof HTMLElement) document.activeElement.blur()
+    if (Object.keys(changesRef.current).length === 0) { onClose(); return }
+    const error = validateDraft(draftRef.current)
+    if (error) { setValidationError(error); return }
+    setSaving(true)
+    try {
+      if (!await persist(changesRef.current)) return
+      onClose()
+    } catch (error) {
+      reportError(t('settingsSaveFailed'), error)
+    } finally {
+      setSaving(false)
+    }
+  }
 
   return (
     <Dialog
-      title="Options"
-      width={680}
-      onClose={onClose}
-      footer={<PrimaryButton onClick={onClose}>Done</PrimaryButton>}
+      title={t('options')}
+      width={780}
+      height={690}
+      onClose={requestClose}
+      footer={confirmDiscard ? <>
+        <span role="alert" className="mr-auto text-[12px] text-warn">{t('unsavedSettings')}</span>
+        <GhostButton onClick={() => setConfirmDiscard(false)}>{t('keepEditing')}</GhostButton>
+        <PrimaryButton onClick={onClose}>{t('discardChanges')}</PrimaryButton>
+      </> : <>
+        {validationError && <span role="alert" className="mr-auto text-[12px] text-warn">{t(validationError)}</span>}
+        <GhostButton onClick={requestClose} disabled={saving}>{t('cancel')}</GhostButton>
+        <PrimaryButton onClick={() => void apply()} disabled={saving}>{saving ? t('saving') : dirty ? t('apply') : t('done')}</PrimaryButton>
+      </>}
     >
-      <div className="flex gap-5 min-h-[400px]">
-        <aside className="w-[130px] shrink-0 flex flex-col gap-0.5">
+      <div>
+        <nav aria-label="Options sections" className="sticky top-[-16px] z-10 flex gap-1 overflow-x-auto border-b border-line pb-2 bg-[var(--color-surface)]">
           {TABS.map((entry) => (
             <button
               key={entry.id}
+              type="button"
               onClick={() => setTab(entry.id)}
+              aria-current={tab === entry.id ? 'page' : undefined}
               className={
-                'px-2.5 py-2 rounded-lg text-[12.5px] text-left transition-colors ' +
+                'flex shrink-0 items-center gap-1.5 whitespace-nowrap px-2 py-2 rounded-lg text-[12px] text-center transition-colors ' +
                 (tab === entry.id ? 'text-ink' : 'text-muted hover:text-ink hover:bg-white/[0.05]')
               }
               style={tab === entry.id ? { background: 'var(--accent-soft)' } : undefined}
             >
+              <entry.icon className="h-3.5 w-3.5 shrink-0" />
               {entry.label}
             </button>
           ))}
-        </aside>
+        </nav>
 
-        <div className="flex-1 min-w-0">
-          {tab === 'general' && <GeneralTab onShowTools={onShowTools} />}
-          {tab === 'connection' && <ConnectionTab />}
+        <div className="min-w-0 pt-4">
+          {tab === 'general' && <GeneralTab settings={draft} patch={patchDraft} />}
+          {tab === 'connection' && <ConnectionTab settings={draft} patch={patchDraft} />}
+          {tab === 'cookies' && <CookiesTab />}
           {tab === 'categories' && <CategoriesTab />}
-          {tab === 'browser' && <BrowserTab />}
+          {tab === 'browser' && <BrowserTab settings={draft} patch={patchDraft} />}
           {tab === 'appearance' && <AppearanceTab />}
+          {tab === 'tools' && <NecessaryToolsTab />}
         </div>
       </div>
     </Dialog>
+  )
+}
+
+/* ------------------------------------------------------------------ */
+
+const TOOL_PLACEHOLDERS: ToolStatus[] = [
+  { id: 'ffmpeg', name: 'FFmpeg', purpose: 'Merges video and audio, and finishes playlist downloads' },
+  { id: 'yt-dlp', name: 'yt-dlp', purpose: 'Resolves YouTube download links' }
+].map((tool) => ({ ...tool, id: tool.id as ToolId, path: null, managed: false,
+  installedVersion: null, latestVersion: null, updateAvailable: false, error: null }))
+let cachedTools: ToolStatus[] | null = null
+
+function NecessaryToolsTab(): React.ReactElement {
+  const [tools, setTools] = useState<ToolStatus[]>(() => cachedTools ?? TOOL_PLACEHOLDERS)
+  const [loaded, setLoaded] = useState(() => cachedTools !== null)
+  const [scanning, setScanning] = useState(true)
+  const [checking, setChecking] = useState(false)
+  const [busyTool, setBusyTool] = useState<ToolId | null>(null)
+  const [error, setError] = useState<string | null>(null)
+
+  useEffect(() => {
+    let live = true
+    void window.api.getToolStatus(false)
+      .then((found) => { cachedTools = found; if (live) { setTools(found); setLoaded(true) } })
+      .catch((err) => { if (live) setError(String(err)) })
+      .finally(() => { if (live) setScanning(false) })
+    return () => { live = false }
+  }, [])
+
+  const checkLatest = async (): Promise<void> => {
+    setChecking(true)
+    setError(null)
+    try {
+      const found = await window.api.getToolStatus(true)
+      cachedTools = found
+      setTools(found)
+      setLoaded(true)
+    } catch (err) {
+      setError(String(err))
+    } finally {
+      setChecking(false)
+    }
+  }
+
+  const install = async (id: ToolId): Promise<void> => {
+    setBusyTool(id)
+    setError(null)
+    try {
+      const updated = await window.api.updateTool(id)
+      setTools((current) => {
+        cachedTools = current.map((tool) => tool.id === id ? updated : tool)
+        return cachedTools
+      })
+    } catch (err) {
+      setError(String(err))
+    } finally {
+      setBusyTool(null)
+    }
+  }
+
+  return (
+    <div className="space-y-4">
+      <div className="flex items-start gap-3">
+        <div className="min-w-0 flex-1">
+          <h3 className="text-[13px] font-semibold">Necessary tools</h3>
+          <p className="mt-1 text-[11.5px] text-faint leading-relaxed">
+            Draco uses yt-dlp to find video formats and FFmpeg to combine video and audio.
+            These checks show the executables Draco will use on this computer.
+          </p>
+        </div>
+        <button type="button" onClick={() => void checkLatest()} disabled={scanning || checking || busyTool !== null}
+          title={checking ? 'Checking for updates…' : 'Check for updates'}
+          aria-label={checking ? 'Checking for updates' : 'Check for updates'}
+          className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-line bg-white/[0.03] text-muted transition-colors hover:bg-white/[0.08] hover:text-ink disabled:opacity-50">
+          <RefreshIcon className={'h-4 w-4' + (checking ? ' animate-spin' : '')} />
+        </button>
+      </div>
+
+      {tools.map((tool) => (
+        <div key={tool.id} className="rounded-lg border border-line bg-white/[0.02] p-4">
+          <div className="flex items-start gap-3">
+            <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border border-line bg-black/10">
+              <img src={tool.id === 'ffmpeg' ? ffmpegIcon : ytDlpIcon} alt="" className="h-7 w-7 object-contain" draggable={false} />
+            </div>
+            <div className="min-w-0 flex-1">
+              <div className="flex items-center gap-2">
+                <h4 className="text-[13px] font-semibold">{tool.name}</h4>
+                <span className={tool.path && tool.installedVersion ? 'text-[11px] text-ok' : 'text-[11px] text-warn'}>
+                  {!loaded ? scanning ? 'Checking…' : 'Not checked' : tool.path ? tool.installedVersion ? 'Ready' : 'Version unavailable' : 'Missing'}
+                </span>
+              </div>
+              <p className="mt-0.5 text-[11.5px] text-faint">{tool.purpose}</p>
+            </div>
+            {loaded && (!tool.path || tool.updateAvailable) && (
+              <PrimaryButton onClick={() => void install(tool.id)} disabled={scanning || busyTool !== null || checking}>
+                {busyTool === tool.id ? 'Installing…' : tool.path ? 'Update' : 'Install'}
+              </PrimaryButton>
+            )}
+          </div>
+          <dl className="mt-3 grid grid-cols-[96px_minmax(0,1fr)] gap-x-3 gap-y-1.5 text-[11.5px]">
+            <dt className="text-faint">Installed</dt>
+            <dd className="tnum break-all">{tool.installedVersion ?? (loaded ? '—' : scanning ? 'Checking…' : '—')}</dd>
+            <dt className="text-faint">Latest</dt>
+            <dd className="tnum">{tool.latestVersion ?? 'Check for updates to compare'}</dd>
+            <dt className="text-faint">Location</dt>
+            <dd className="break-all" title={tool.path ?? undefined}>{tool.path ?? (loaded ? 'Not installed' : scanning ? 'Locating…' : '—')}</dd>
+          </dl>
+          {tool.path && !tool.managed && (
+            <p className="mt-2 text-[11px] text-faint">Found on your system PATH. Update this copy outside Draco.</p>
+          )}
+          {tool.error && <p className="mt-2 text-[11px] text-err">{tool.error}</p>}
+        </div>
+      ))}
+      {error && <p role="alert" className="text-[11.5px] text-err">{error}</p>}
+    </div>
   )
 }
 
@@ -115,8 +325,11 @@ function NumberField({
         onChange={(event) => setText(event.target.value)}
         onBlur={() => {
           const parsed = Number(text)
-          if (Number.isFinite(parsed)) onCommit(parsed)
-          else setText(String(value))
+          if (Number.isFinite(parsed) && text.trim() !== '') {
+            const bounded = Math.max(min, Math.min(max, parsed))
+            setText(String(bounded))
+            onCommit(bounded)
+          } else setText(String(value))
         }}
         className="field text-[12.5px] tnum"
       />
@@ -126,13 +339,13 @@ function NumberField({
 
 /* ------------------------------------------------------------------ */
 
-function GeneralTab({ onShowTools }: { onShowTools(tools: ToolStatus[]): void }): React.ReactElement {
-  const settings = useApp((s) => s.settings)
+function GeneralTab({ settings, patch }: {
+  settings: Settings
+  patch: (change: Partial<Settings>) => void
+}): React.ReactElement {
   const categories = useApp((s) => s.categories)
-  const patch = useApp((s) => s.patchSettings)
+  const savedUpdateFeed = useApp((s) => s.settings.updateFeedUrl)
   const [checkingUpdate, setCheckingUpdate] = useState(false)
-  const [checkingTools, setCheckingTools] = useState(false)
-  const [toolSummary, setToolSummary] = useState<string | null>(null)
   const t = useT()
 
   return (
@@ -260,7 +473,7 @@ function GeneralTab({ onShowTools }: { onShowTools(tools: ToolStatus[]): void })
             placeholder="https://example.com/draco/latest.json"
           />
           <GhostButton
-            disabled={checkingUpdate || !settings.updateFeedUrl}
+            disabled={checkingUpdate || !settings.updateFeedUrl || settings.updateFeedUrl !== savedUpdateFeed}
             onClick={() => {
               setCheckingUpdate(true)
               void window.api.checkForUpdates()
@@ -277,46 +490,16 @@ function GeneralTab({ onShowTools }: { onShowTools(tools: ToolStatus[]): void })
             {checkingUpdate ? 'Checking…' : 'Check'}
           </GhostButton>
         </div>
+        {settings.updateFeedUrl !== savedUpdateFeed && (
+          <p className="mt-1.5 text-[11px] text-faint">Apply settings before checking this update feed.</p>
+        )}
       </Field>
       <Toggle
         checked={settings.autoCheckUpdates}
         onChange={(next) => void patch({ autoCheckUpdates: next })}
         label="Check for updates at startup"
-        hint="The feed above, and the versions of the helper tools below."
+        hint="Checks the update feed and helper tool versions at startup."
       />
-
-      <Field
-        label="Helper tools"
-        hint="ffmpeg and yt-dlp are fetched on first use rather than shipped. yt-dlp especially goes stale - YouTube changes, and an old copy starts reporting that a video has no downloadable formats."
-      >
-        <div className="flex items-center gap-2">
-          <div className="flex-1 text-[11.5px] text-faint leading-snug">
-            {toolSummary ?? 'Not checked yet'}
-          </div>
-          <GhostButton
-            disabled={checkingTools}
-            onClick={() => {
-              setCheckingTools(true)
-              void window.api
-                .getToolStatus(true)
-                .then((tools) => {
-                  setToolSummary(
-                    tools
-                      .map((tool) => `${tool.name} ${tool.installedVersion ?? 'not installed'}`)
-                      .join(' · ')
-                  )
-                  // The same dialog the startup check raises, so an update is
-                  // only ever offered from one place.
-                  onShowTools(tools)
-                })
-                .catch((error) => reportError('Could not check the helper tools', error))
-                .finally(() => setCheckingTools(false))
-            }}
-          >
-            {checkingTools ? 'Checking…' : 'Check'}
-          </GhostButton>
-        </div>
-      </Field>
 
       <div className="pt-1 border-t border-line">
         <Toggle
@@ -339,6 +522,12 @@ function GeneralTab({ onShowTools }: { onShowTools(tools: ToolStatus[]): void })
           checked={settings.watchClipboard}
           onChange={(next) => void patch({ watchClipboard: next })}
           label="Watch the clipboard for download links"
+        />
+        <Toggle
+          checked={settings.completionSound}
+          onChange={(next) => void patch({ completionSound: next })}
+          label="Play a sound when a download finishes"
+          hint="A short, soft chime for completed downloads."
         />
         <Toggle
           checked={settings.associateTorrents}
@@ -490,9 +679,10 @@ function SiteCredentials(): React.ReactElement {
   )
 }
 
-function ConnectionTab(): React.ReactElement {
-  const settings = useApp((s) => s.settings)
-  const patch = useApp((s) => s.patchSettings)
+function ConnectionTab({ settings, patch }: {
+  settings: Settings
+  patch: (change: Partial<Settings>) => void
+}): React.ReactElement {
 
   const [limitText, setLimitText] = useState(
     settings.speedLimit ? String(Math.round(settings.speedLimit / 1024)) : ''
@@ -517,21 +707,14 @@ function ConnectionTab(): React.ReactElement {
     settings.hostConnectionLimits.map((rule) => `${rule.host}=${rule.connections}`).join('\n')
   )
 
-  /**
-   * The three parts of a scheduled limit only mean anything together, so they
-   * are edited as one value: an incomplete triple is stored as no schedule at
-   * all rather than a half-applied one.
-   */
+  /** Keep incomplete edits in the local draft so the next field can complete the schedule. */
   const patchSchedule = (
     change: Partial<{ startTime: string; stopTime: string; bytesPerSecond: number }>
   ): Promise<void> | void => {
     const current = settings.scheduledLimit ?? { startTime: '', stopTime: '', bytesPerSecond: 0 }
     const next = { ...current, ...change }
-    const complete =
-      /^\d{1,2}:\d{2}$/.test(next.startTime) &&
-      /^\d{1,2}:\d{2}$/.test(next.stopTime) &&
-      next.bytesPerSecond > 0
-    return patch({ scheduledLimit: complete ? next : null })
+    const empty = !next.startTime && !next.stopTime && next.bytesPerSecond <= 0
+    return patch({ scheduledLimit: empty ? null : next })
   }
 
   useEffect(() => setProxyText(settings.proxyUrl ?? ''), [settings.proxyUrl])
@@ -584,7 +767,7 @@ function ConnectionTab(): React.ReactElement {
 
       <Field
         label="Adaptive ceiling"
-        hint="Leave empty to stop at the number above. Set it higher to let Draco keep climbing past that on servers that reward it; a per-host rule still wins."
+        hint="Leave empty to stop at the number above. Set it higher to let Draco keep climbing past that on servers that reward it; a per-host rule still wins. Applies to ordinary downloads and to YouTube video+audio; playlist streams use a fixed pool."
       >
         <input
           value={ceilingText}
@@ -786,29 +969,203 @@ function ConnectionTab(): React.ReactElement {
         </Field>
       </div>
 
-      <Field
-        label="Borrow cookies from"
-        hint="Lets yt-dlp resolve members-only, age-gated and other signed-in pages. Close the browser first if reading its cookies fails."
-      >
-        <select
-          value={settings.cookiesFromBrowser}
-          onChange={(event) =>
-            void patch({ cookiesFromBrowser: event.target.value as typeof settings.cookiesFromBrowser })
-          }
-          className="field text-[12.5px]"
-        >
-          <option value="none">No browser (anonymous)</option>
-          <option value="chrome">Chrome</option>
-          <option value="edge">Edge</option>
-          <option value="brave">Brave</option>
-          <option value="firefox">Firefox</option>
-          <option value="chromium">Chromium</option>
-          <option value="opera">Opera</option>
-          <option value="vivaldi">Vivaldi</option>
-        </select>
-      </Field>
-
       <SiteCredentials />
+    </div>
+  )
+}
+
+/* ------------------------------------------------------------------ */
+
+/**
+ * Which browser Draco borrows cookies from, and whether that actually works.
+ *
+ * This was a dropdown on the Connection tab with a hint under it, and choosing
+ * from it told the user nothing: whether the pick had helped only surfaced
+ * later, in a different window, as a download failing with a message about PO
+ * tokens. It matters more than a dropdown suggests, because YouTube now
+ * withholds every format above 360p from a request it reads as signed out - so
+ * this setting is the difference between 4K and a 360p file wearing a 4K name.
+ *
+ * Hence a tab, real browser icons, and a check that goes and finds out.
+ */
+function CookiesTab(): React.ReactElement {
+  const settings = useApp((s) => s.settings)
+  const patch = useApp((s) => s.patchSettings)
+  const [browsers, setBrowsers] = useState<InstalledBrowser[]>([])
+  const [progress, setProgress] = useState<CookieCheckProgress | null>(null)
+  const [result, setResult] = useState<CookieCheckResult | null>(null)
+  const [running, setRunning] = useState<string | null>(null)
+
+  useEffect(() => {
+    void window.api.listBrowsers().then(setBrowsers).catch(() => setBrowsers([]))
+  }, [])
+
+  // Subscribed for the life of the tab rather than per run: the progress events
+  // start arriving the moment main spawns yt-dlp, which is before the invoke
+  // resolves, and a subscription set up inside `check` would miss the first.
+  useEffect(() => window.api.onCookieCheckProgress(setProgress), [])
+
+  async function check(browser: string): Promise<void> {
+    setRunning(browser)
+    setResult(null)
+    setProgress({ stage: 'starting', percent: 2, message: 'Starting' })
+    try {
+      // Saved first, so the check measures the setting that is now in force
+      // rather than a choice that would be lost if the dialog were closed.
+      if (!await patch({ cookiesFromBrowser: browser as typeof settings.cookiesFromBrowser })) return
+      setResult(await window.api.checkCookies(browser))
+    } catch (err) {
+      reportError('The cookie check could not run', err)
+    } finally {
+      setRunning(null)
+      setProgress(null)
+    }
+  }
+
+  return (
+    <div className="space-y-4">
+      <div>
+        <label className="label">Borrow cookies from</label>
+        <p className="text-[11px] text-faint leading-relaxed mb-2.5">
+          Pick the browser you watch YouTube in. Draco checks its cookies and compares the
+          downloadable qualities with a public lookup. YouTube can limit yt-dlp to 360p even
+          when your browser is signed in.
+        </p>
+
+        <div className="grid grid-cols-4 gap-2">
+          <BrowserButton
+            label="None"
+            icon={null}
+            installed
+            selected={settings.cookiesFromBrowser === 'none'}
+            busy={false}
+            disabled={running !== null}
+            onClick={() => {
+              setResult(null)
+              void patch({ cookiesFromBrowser: 'none' })
+            }}
+          />
+          {browsers.map((browser) => (
+            <BrowserButton
+              key={browser.id}
+              label={browser.label}
+              icon={browser.icon}
+              installed={browser.installed}
+              selected={settings.cookiesFromBrowser === browser.id}
+              busy={running === browser.id}
+              disabled={running !== null}
+              onClick={() => void check(browser.id)}
+            />
+          ))}
+        </div>
+      </div>
+
+      {progress && (
+        <div className="rounded-lg border border-line bg-white/[0.02] px-3.5 py-3">
+          <div className="flex items-center justify-between text-[11.5px]">
+            <span>{progress.message}</span>
+            <span className="text-faint tnum">{progress.percent}%</span>
+          </div>
+          <div className="h-1.5 mt-2 rounded-full bg-white/[0.06] overflow-hidden">
+            <span
+              className="block h-full rounded-full transition-[width] duration-300"
+              style={{ width: `${progress.percent}%`, background: 'var(--grad)' }}
+            />
+          </div>
+        </div>
+      )}
+
+      {result && <CookieVerdict result={result} />}
+
+      {!progress && !result && settings.cookiesFromBrowser !== 'none' && (
+        <p className="text-[11px] text-faint leading-relaxed">
+          Currently borrowing cookies from <strong className="text-ink">{settings.cookiesFromBrowser}</strong>.
+          Click it again to test the session.
+        </p>
+      )}
+    </div>
+  )
+}
+
+function BrowserButton({
+  label,
+  icon,
+  installed,
+  selected,
+  busy,
+  disabled,
+  onClick
+}: {
+  label: string
+  icon: string | null
+  installed: boolean
+  selected: boolean
+  busy: boolean
+  disabled: boolean
+  onClick(): void
+}): React.ReactElement {
+  return (
+    <button
+      onClick={onClick}
+      disabled={disabled}
+      title={installed ? label : `${label} was not found on this PC`}
+      className={
+        'rounded-xl border px-2 py-3 flex flex-col items-center gap-1.5 transition-colors ' +
+        'disabled:cursor-not-allowed ' +
+        (selected ? 'border-[var(--accent)] text-ink' : 'border-line text-muted hover:text-ink hover:bg-white/[0.05]') +
+        (installed ? '' : ' opacity-45')
+      }
+      style={selected ? { background: 'var(--accent-soft)' } : undefined}
+    >
+      <span className="w-7 h-7 grid place-items-center">
+        {busy ? (
+          <span className="w-4 h-4 rounded-full border-2 border-faint border-t-[var(--accent)] animate-spin" />
+        ) : icon ? (
+          <img src={icon} alt="" draggable={false} className="w-7 h-7 object-contain" />
+        ) : (
+          <GlobeIcon className="w-5 h-5" />
+        )}
+      </span>
+      <span className="text-[11px] truncate max-w-full">{label}</span>
+    </button>
+  )
+}
+
+function CookieVerdict({ result }: { result: CookieCheckResult }): React.ReactElement {
+  const tone = result.ok
+    ? { border: 'rgba(74,222,128,0.25)', bg: 'rgba(74,222,128,0.08)' }
+    : { border: 'rgba(251,191,36,0.25)', bg: 'rgba(251,191,36,0.08)' }
+
+  return (
+    <div
+      className="rounded-lg px-3.5 py-3 text-[11.5px] leading-relaxed border"
+      style={{ borderColor: tone.border, background: tone.bg }}
+    >
+      <div className={'font-semibold ' + (result.ok ? 'text-ok' : 'text-warn')}>
+        {result.ok
+          ? result.usedPublicFallback
+            ? `Public lookup works — up to ${result.bestQuality}`
+            : `${result.browser}'s session works — up to ${result.bestQuality}`
+          : `${result.browser}'s lookup is limited to ${result.bestQuality ?? 'no formats'}`}
+      </div>
+
+      <div className="text-faint mt-1.5 tnum">
+        {result.cookiesRead === null ? 'Cookie count unknown' : `${result.cookiesRead} cookies read`}
+        {result.offered.length > 0 && ` · ${result.usedPublicFallback ? 'public formats' : 'offered'} ${result.offered.join(', ')}`}
+      </div>
+
+      {result.cause && (
+        <p className="mt-2">
+          <span className="text-faint uppercase text-[10px] tracking-[0.4px]">Cause </span>
+          {result.cause}
+        </p>
+      )}
+      {result.fix && (
+        <p className="mt-1.5">
+          <span className="text-faint uppercase text-[10px] tracking-[0.4px]">Fix </span>
+          {result.fix}
+        </p>
+      )}
     </div>
   )
 }
@@ -817,6 +1174,7 @@ function ConnectionTab(): React.ReactElement {
 
 function CategoriesTab(): React.ReactElement {
   const categories = useApp((s) => s.categories)
+  const persistCategories = useApp((s) => s.saveCategories)
   const [draft, setDraft] = useState<Category[]>(categories)
   const [selected, setSelected] = useState(0)
 
@@ -829,11 +1187,8 @@ function CategoriesTab(): React.ReactElement {
   }
 
   async function save(list: Category[]): Promise<void> {
-    try {
-      await window.api.saveCategories(list)
+    if (await persistCategories(list)) {
       toast('success', 'Categories saved')
-    } catch (err) {
-      reportError('Could not save categories', err)
     }
   }
 
@@ -957,9 +1312,10 @@ function CategoriesTab(): React.ReactElement {
 
 /* ------------------------------------------------------------------ */
 
-function BrowserTab(): React.ReactElement {
-  const settings = useApp((s) => s.settings)
-  const patch = useApp((s) => s.patchSettings)
+function BrowserTab({ settings, patch }: {
+  settings: Settings
+  patch: (change: Partial<Settings>) => void
+}): React.ReactElement {
   const integration = useApp((s) => s.integration)
   const refresh = useApp((s) => s.refreshIntegration)
 
@@ -1063,7 +1419,9 @@ function BrowserTab(): React.ReactElement {
             <span className="truncate">{integration?.extensionPath ?? '—'}</span>
           </button>
           <p className="text-[11px] text-faint leading-relaxed mt-2 mb-2">
-            Firefox uses its generated package at:
+            In Firefox, open about:debugging → This Firefox → Load Temporary Add-on,
+            then select manifest.json from this folder. Firefox removes temporary add-ons
+            when it restarts; a permanent install needs a Mozilla-signed XPI.
           </p>
           <button
             onClick={() => {

@@ -9,7 +9,6 @@ import {
   PauseIcon,
   PlayIcon,
   PlusIcon,
-  SearchIcon,
   StopAllIcon,
   TrashIcon
 } from './Icons'
@@ -33,20 +32,21 @@ export interface ToolbarActions {
   onSiteGrabber(): void
 }
 
+function isBusy(status: string): boolean {
+  return status === 'downloading' || status === 'probing' || status === 'processing' ||
+    status === 'scanning' || status === 'queued'
+}
+
 export default function Toolbar({
-  actions,
-  search,
-  onSearch
+  actions
 }: {
   actions: ToolbarActions
-  search: string
-  onSearch(value: string): void
 }): React.ReactElement {
   const toolbarState = useApp((s) => {
     const selected = s.tasks.filter((t) => s.selection.includes(t.id))
-    const canResume = selected.some((t) => t.status !== 'downloading' && t.status !== 'done')
-    const canPause = selected.some((t) => t.status === 'downloading' || t.status === 'queued')
-    const anyRunning = s.tasks.some((t) => t.status === 'downloading' || t.status === 'queued')
+    const canResume = selected.some((t) => !isBusy(t.status) && t.status !== 'done')
+    const canPause = selected.some((t) => isBusy(t.status))
+    const anyRunning = s.tasks.some((t) => isBusy(t.status))
     const anyDone = s.tasks.some((t) => t.status === 'done')
     const selectionLength = s.selection.length
     return `${canResume}:${canPause}:${anyRunning}:${anyDone}:${selectionLength}`
@@ -110,16 +110,6 @@ export default function Toolbar({
 
       <div className="flex-1" />
 
-      <label className="relative w-[190px] max-[900px]:w-[120px] max-[650px]:w-[92px] shrink-0">
-        <SearchIcon className="w-3.5 h-3.5 absolute left-2.5 top-1/2 -translate-y-1/2 text-faint pointer-events-none" />
-        <input
-          value={search}
-          onChange={(event) => onSearch(event.target.value)}
-          placeholder={t('search')}
-          className="field !py-1 !pl-8 text-[12px]"
-          spellCheck={false}
-        />
-      </label>
     </div>
   )
 }

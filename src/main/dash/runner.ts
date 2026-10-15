@@ -1,14 +1,17 @@
 import { spawn, type ChildProcess } from 'node:child_process'
+import { killTree } from '../proc.ts'
 import { basename, extname, join } from 'node:path'
-import { rm, stat } from 'node:fs/promises'
+import { mkdir, rm, stat } from 'node:fs/promises'
 import type { DownloadTask } from '../../shared/types.ts'
 import type { RunnerContext } from '../engine/manager.ts'
 import { discardReservedPath, uniquePath, moveFile } from '../engine/naming.ts'
 import type { Runner } from '../engine/runner.ts'
-import { workspaceDir } from '../engine/workspace.ts'
+import { taskWorkspaceDir } from '../engine/workspace.ts'
 import { ensureFfmpeg } from '../hls/ffmpeg.ts'
 import { ffmpegHeaders } from './headers.ts'
 import { resolveMpd } from './manifest.ts'
+import { unsupportedMpdPolicy } from './transfer-policy.ts'
+import { verifyExpectedChecksum } from '../engine/checksum.ts'
 
 const SPEED_WINDOW_MS = 3000
 
@@ -29,6 +32,7 @@ export class MpdRunner implements Runner {
   private durationSeconds: number | null = null
   private mediaSeconds = 0
   private lastProgressAt = 0
+  private policyError: string | null = null
 
   constructor(task: DownloadTask, context: RunnerContext) {
     this.task = task
@@ -40,6 +44,7 @@ export class MpdRunner implements Runner {
     this.running = true
     this.controller = new AbortController()
     this.samples = []
+    this.policyError = null
 
     try {
       this.inFlight = this.run()
@@ -53,6 +58,12 @@ export class MpdRunner implements Runner {
         this.task.eta = null
         this.context.onFinished(this.task, null)
       } else {
+        if (this.policyError) {
+          if (this.outputPath) await rm(this.outputPath, { force: true }).catch(() => {})
+          this.outputPath = null
+          this.task.received = 0
+          this.task.segments = []
+        }
         if (this.reservedTarget) await discardReservedPath(this.reservedTarget)
         this.reservedTarget = null
         const reason = error instanceof Error ? error : new Error(String(error))
@@ -93,6 +104,10 @@ export class MpdRunner implements Runner {
 
   tick(): void {
     if (!this.running) return
+    if (this.child && !this.policyError) {
+      this.policyError = unsupportedMpdPolicy(this.context.limiter)
+      if (this.policyError) this.killChild()
+    }
     const now = Date.now()
     this.samples.push({ t: now, received: this.task.received })
     while (this.samples.length > 2 && now - this.samples[0].t > SPEED_WINDOW_MS) this.samples.shift()
@@ -126,12 +141,15 @@ export class MpdRunner implements Runner {
   }
 
   private async run(): Promise<void> {
+    this.assertSupportedPolicy()
     this.task.status = 'probing'
     this.task.error = null
     this.task.detail = 'Inspecting DASH manifest…'
     this.context.onUpdate(this.task)
 
-    const resolved = await resolveMpd(this.task.url, this.task.headers, this.context.timeoutMs)
+    const resolved = await resolveMpd(this.task.url, this.task.headers, this.context.timeoutMs, this.controller.signal)
+    if (this.controller.signal.aborted) throw new Error('Cancelled')
+    this.assertSupportedPolicy()
     this.durationSeconds = resolved.summary.durationSeconds
     this.task.finalUrl = resolved.variants[0].url
     this.task.mimeType = 'video/mp4'
@@ -147,9 +165,11 @@ export class MpdRunner implements Runner {
       this.context.onUpdate(this.task)
     })
     if (this.controller.signal.aborted) throw new Error('Cancelled')
+    this.assertSupportedPolicy()
 
     const extension = extname(this.task.filename) || '.mp4'
-    const tempDir = workspaceDir(this.task.dir, this.context.tempDir)
+    const tempDir = taskWorkspaceDir(this.task.dir, this.task.id, this.context.tempDir)
+    await mkdir(tempDir, { recursive: true })
     this.outputPath = join(tempDir, `${basename(this.task.filename, extension)}.draco-dash-temp${extension}`)
     await rm(this.outputPath, { force: true }).catch(() => {})
 
@@ -162,9 +182,15 @@ export class MpdRunner implements Runner {
 
     await this.runFfmpeg(ffmpegPath, this.task.finalUrl, this.outputPath)
     if (this.controller.signal.aborted) throw new Error('Cancelled')
+    this.assertSupportedPolicy()
 
-    const wouldBeTarget = join(this.task.dir, this.task.filename)
-    await discardReservedPath(wouldBeTarget)
+    if (this.task.expectedChecksum) {
+      this.task.detail = 'Verifying checksum...'
+      this.context.onUpdate(this.task)
+      await verifyExpectedChecksum(this.outputPath, this.task.expectedChecksum, this.controller.signal)
+    }
+    if (this.controller.signal.aborted) throw new Error('Cancelled')
+
     const targetPath = await uniquePath(this.task.dir, this.task.filename)
     this.reservedTarget = targetPath
     try {
@@ -190,11 +216,16 @@ export class MpdRunner implements Runner {
 
   private runFfmpeg(ffmpegPath: string, url: string, outputPath: string): Promise<void> {
     return new Promise((resolve, reject) => {
+      this.assertSupportedPolicy()
       const args = ['-y', '-nostdin', '-hide_banner', '-loglevel', 'error']
+      args.push('-rw_timeout', String(Math.max(1, Math.round(this.context.timeoutMs * 1000))))
       if (this.context.proxyUrl) args.push('-http_proxy', this.context.proxyUrl)
       const headerBlock = ffmpegHeaders(this.task.headers)
       if (headerBlock) args.push('-headers', headerBlock)
-      args.push('-i', url, '-map', '0', '-c', 'copy', '-progress', 'pipe:1', '-nostats')
+      // Automatic stream selection chooses the highest-resolution video and
+      // one audio stream. Mapping every DASH stream saves every representation
+      // (including lower qualities) into the user's one requested download.
+      args.push('-i', url, '-c', 'copy', '-progress', 'pipe:1', '-nostats')
       if (outputPath.toLowerCase().endsWith('.mp4')) args.push('-movflags', '+faststart')
       args.push(outputPath)
 
@@ -219,16 +250,22 @@ export class MpdRunner implements Runner {
 
       const onAbort = (): void => this.killChild()
       this.controller.signal.addEventListener('abort', onAbort, { once: true })
-      child.on('error', (error) => reject(error))
-      child.on('close', (code) => {
+      let processError: Error | null = null
+      child.on('error', (error) => { processError = error })
+      child.on('close', async (code) => {
         this.controller.signal.removeEventListener('abort', onAbort)
         this.child = null
-        if (this.controller.signal.aborted) {
-          void rm(outputPath, { force: true }).catch(() => {})
+        if (processError) {
+          await rm(outputPath, { force: true }).catch(() => {})
+          reject(processError)
+        } else if (this.policyError) {
+          reject(new Error(this.policyError))
+        } else if (this.controller.signal.aborted) {
+          await rm(outputPath, { force: true }).catch(() => {})
           reject(new Error('Cancelled'))
         } else if (code === 0) resolve()
         else {
-          void rm(outputPath, { force: true }).catch(() => {})
+          await rm(outputPath, { force: true }).catch(() => {})
           reject(new Error(`Media engine failed (${code}): ${stderr.trim().split(/\r?\n/).pop() ?? 'unknown error'}`))
         }
       })
@@ -254,13 +291,11 @@ export class MpdRunner implements Runner {
   }
 
   private killChild(): void {
-    const pid = this.child?.pid
-    if (!pid) return
-    const killer = spawn('taskkill', ['/PID', String(pid), '/T', '/F'], {
-      shell: false,
-      windowsHide: true,
-      stdio: 'ignore'
-    })
-    killer.on('error', () => this.child?.kill('SIGKILL'))
+    if (this.child) killTree(this.child)
+  }
+
+  private assertSupportedPolicy(): void {
+    this.policyError ??= unsupportedMpdPolicy(this.context.limiter)
+    if (this.policyError) throw new Error(this.policyError)
   }
 }

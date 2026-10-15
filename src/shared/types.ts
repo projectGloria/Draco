@@ -40,6 +40,8 @@ export type TaskStatus =
   | 'queued'
   | 'probing'
   | 'downloading'
+  | 'processing'
+  | 'scanning'
   | 'paused'
   | 'done'
   | 'error'
@@ -115,6 +117,8 @@ export interface TorrentRuntimeInfo {
 
 export interface DownloadTask {
   id: string
+  /** Browser handoff receipt retained to resolve retries after a restart. */
+  handoffId?: string
   /** True if this task is currently being briefly downloaded by Cat Mode. */
   isCatMode?: boolean
   /** Timestamp of when this task was last pinged by Cat Mode. */
@@ -130,6 +134,8 @@ export interface DownloadTask {
   url: string
   /** Page/origin the download was discovered on, used for its persisted favicon. */
   sourceUrl?: string
+  /** Poster found while inspecting the source page, when available. */
+  thumbnailUrl?: string | null
   /** Shared identity for files selected from one inspected web page. */
   groupId?: string
   groupName?: string
@@ -164,6 +170,8 @@ export interface DownloadTask {
   filenameLocked: boolean
   /** Absolute directory the finished file lands in. */
   dir: string
+  /** Caller chose this directory; probing must not refile it by category. */
+  dirLocked?: boolean
   categoryId: string | null
   queueId: string | null
   queueRetryCount: number
@@ -191,6 +199,8 @@ export interface DownloadTask {
   expectedSize?: number
   received: number
   status: TaskStatus
+  /** A completed media transfer still awaiting captions or a security scan. */
+  finalizationStage?: 'processing' | 'scanning' | null
   /** True once a 206 has actually been seen - not merely Accept-Ranges. */
   resumable: boolean
   /** Sticky compatibility mode for servers that advertise ranges then ignore them. */
@@ -216,11 +226,28 @@ export interface DownloadTask {
   headers: RequestHeaders
   /** External caption files captured from the page and saved beside the media. */
   subtitles?: SubtitleTrack[]
+  /** Task-owned sidecar names, indexed by subtitle track for crash-safe retry. */
+  subtitleFiles?: Array<string | null>
+  /** SHA-256 of each completed sidecar, committed with its reserved name. */
+  subtitleDigests?: Array<string | null>
   mimeType: string | null
   description: string
 }
 
-/** The 4 Hz batched update. Only the fields that actually move. */
+/**
+ * The 4 Hz batched update. Only the fields that actually move *and* are drawn
+ * by the list.
+ *
+ * `segments` and `torrentInfo` are deliberately absent. Both used to ride this
+ * feed, and both are read by exactly one surface - the details dialog. A
+ * 3,000-file torrent with 120 peers meant roughly a megabyte of object graph
+ * allocated, structured-cloned and shipped to the main window *and* every open
+ * progress window, four times a second, for data nothing on screen was looking
+ * at. Worse, it landed on the same event loop that drains the sockets, so the
+ * cost was paid in download throughput as well as in frames.
+ *
+ * They are fetched on demand instead - see `taskDetail`.
+ */
 export interface TaskProgress {
   id: string
   received: number
@@ -228,9 +255,19 @@ export interface TaskProgress {
   speed: number
   eta: number | null
   status: TaskStatus
-  segments: Segment[]
   error: string | null
   detail: string | null
+}
+
+/**
+ * The heavy per-task diagnostics, pulled only while something is showing them.
+ *
+ * Returned by `taskDetail(id)`, which the details dialog polls once a second
+ * while it is open and nothing else ever calls.
+ */
+export interface TaskLiveDetail {
+  id: string
+  segments: Segment[]
   torrentInfo?: TorrentRuntimeInfo
 }
 
@@ -238,6 +275,7 @@ export interface TaskProgress {
 export interface NewDownload {
   url: string
   sourceUrl?: string
+  thumbnailUrl?: string | null
   groupId?: string
   groupName?: string
   groupFolder?: string
@@ -273,6 +311,8 @@ export interface NewDownload {
  */
 export interface HandoffRequest {
   id: string
+  /** Browser file requests expire with the extension's bounded pause window. */
+  expiresAt?: number
   /**
    * `file` is an ordinary download the browser was about to start. `media` is a
    * stream someone pressed the button on, which has a quality ladder to choose
@@ -337,6 +377,9 @@ export type QueueMode = 'manual' | 'onetime' | 'periodic'
 export type QueueCompletionAction = 'none' | 'run' | 'exit' | 'sleep' | 'hibernate' | 'shutdown'
 
 export interface Queue {
+  icon?: import('./queue-order').QueueIconName
+  /** Marks the serial-by-default queue settings migration. */
+  parallelismConfigured?: boolean
   id: string
   name: string
   /** Ordered - the queue runs its tasks top to bottom. */
@@ -402,6 +445,11 @@ export interface PlaylistEntryInfo {
   title: string
   /** Seconds, when the flat listing knew - a live item often has none. */
   duration: number | null
+  /**
+   * Poster image, or null when the listing gave none and the URL named no
+   * video. Optional so a listing saved by an older build still parses.
+   */
+  thumbnailUrl?: string | null
 }
 
 export interface PlaylistListing {
@@ -414,6 +462,83 @@ export interface PlaylistListing {
    * Offered rather than guessed at: a watch URL carrying `list=` is both.
    */
   singleVideoUrl: string | null
+}
+
+/**
+ * How far a background playlist expansion has got.
+ *
+ * Each entry is a separate yt-dlp lookup, so a long listing takes minutes even
+ * three at a time. Without this the only sign of life was rows appearing, and
+ * the only sign of completion was a toast at the very end.
+ */
+export interface PlaylistProgress {
+  groupId: string
+  groupName: string
+  /** Entries resolved so far, successfully or not. */
+  done: number
+  /** Entries in the listing, or 0 once the expansion is over. */
+  total: number
+  failed: number
+}
+
+/* ------------------------------------------------------------------ */
+/* Cookie check                                                        */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Trying a browser's cookies and saying what happened.
+ *
+ * "Borrow cookies from" was a dropdown with no feedback: whether the choice
+ * worked only showed up later, as a download failing with a message about PO
+ * tokens. These two shapes are what turns it into something answerable.
+ */
+/** One browser the cookie picker can offer, as main found it on this machine. */
+export interface InstalledBrowser {
+  id: 'chrome' | 'edge' | 'brave' | 'firefox' | 'chromium' | 'opera' | 'vivaldi'
+  label: string
+  /** False when no executable was found; the button is still offered, greyed. */
+  installed: boolean
+  /** The browser's own icon as a data URL, or null when it could not be read. */
+  icon: string | null
+}
+
+export type CookieCheckStage =
+  | 'starting'
+  | 'cookies'
+  | 'contacting'
+  | 'player'
+  | 'formats'
+  | 'done'
+
+export interface CookieCheckProgress {
+  stage: CookieCheckStage
+  /** 0-100, and never decreasing within one run. */
+  percent: number
+  message: string
+}
+
+export interface CookieCheckResult {
+  browser: string
+  /** True when either the browser session or the public fallback gets a full ladder. */
+  ok: boolean
+  /** The browser session was limited, but the public lookup offered better formats. */
+  usedPublicFallback: boolean
+  /** Cookies yt-dlp managed to read, or null when it never said. */
+  cookiesRead: number | null
+  /**
+   * True when YouTube handed back a cut-down player rather than the real one.
+   * This can occur with valid signed-in cookies too; it does not establish
+   * whether the user is signed in.
+   */
+  downgraded: boolean
+  /** The best rung the test video could actually be downloaded at. */
+  bestQuality: string | null
+  /** Every rung on offer, highest first. */
+  offered: string[]
+  /** One sentence on what is wrong, or null when nothing is. */
+  cause: string | null
+  /** One sentence on what to do, or null when there is nothing to do. */
+  fix: string | null
 }
 
 /* ------------------------------------------------------------------ */
@@ -467,6 +592,7 @@ export interface Settings {
   downloadDir: string
   /** Prevent downloading if free space is less than the file size. */
   checkDiskSpace: boolean
+  completionSound: boolean
   /** Show a floating desktop dropzone widget. */
   showDropzone: boolean
   /** 🐱 Keeps waiting downloads alive by occasionally downloading tiny chunks. */
@@ -675,7 +801,7 @@ export interface YouTubeResolution {
 export interface ClipboardItem {
   id: string
   url: string
-  kind: 'file' | 'torrent' | 'youtube' | 'media'
+  kind: 'file' | 'torrent' | 'youtube' | 'media' | 'playlist'
   status: 'fetching' | 'ready' | 'error'
   createdAt: number
   updatedAt: number
@@ -686,6 +812,12 @@ export interface ClipboardItem {
   probe?: ProbeResult
   youtube?: YouTubeResolution
   media?: YouTubeResolution
+  /**
+   * What a playlist or channel link turned out to contain. Kept instead of a
+   * `youtube` resolution, which cannot describe one: resolving a listing as a
+   * single video is exactly the failure this row type exists to avoid.
+   */
+  playlist?: { title: string; count: number }
 }
 
 /* ------------------------------------------------------------------ */
@@ -775,6 +907,12 @@ export interface Toast {
   message: string
 }
 
+/** Fields a renderer may patch on a task. `groupId: null` clears membership. */
+export type TaskPatch = Omit<Partial<DownloadTask>, 'groupId' | 'groupName'> & {
+  groupId?: string | null
+  groupName?: string | null
+}
+
 export interface RendererApi {
   /* bootstrap */
   onBootstrap(cb: (state: BootstrapState) => void): () => void
@@ -785,6 +923,12 @@ export interface RendererApi {
   listTasks(): Promise<DownloadTask[]>
   /** One task, for the windows that show a single download rather than the list. */
   getTask(id: string): Promise<DownloadTask | null>
+  /**
+   * Per-connection and per-peer diagnostics for one task. Kept off the progress
+   * feed on purpose - see `TaskProgress` - so only a dialog that is actually
+   * drawing them pays for them.
+   */
+  taskDetail(id: string): Promise<TaskLiveDetail | null>
   addDownload(input: NewDownload): Promise<DownloadTask>
   /** Adds many URLs as one IPC round-trip and opens at most one progress
    * window, instead of the caller firing N `addDownload`s that each open one. */
@@ -796,6 +940,10 @@ export interface RendererApi {
    * of the videos in it - one lookup, however long the listing.
    */
   resolvePlaylist(url: string): Promise<PlaylistListing>
+  /** Stops an expansion that is still resolving its entries. */
+  cancelPlaylist(groupId: string): Promise<boolean>
+  /** Progress of the background expansion. `total: 0` means it is over. */
+  onPlaylistProgress(cb: (progress: PlaylistProgress) => void): () => void
   /**
    * Adds a listing as downloads. Resolves as soon as the work is accepted:
    * entries are resolved one at a time in the background, and rows appear as
@@ -838,7 +986,7 @@ export interface RendererApi {
   exportDownloads(ids: string[] | null): Promise<number>
   /** Reads either format back, adding rows without starting them. */
   importDownloads(): Promise<number>
-  updateTask(id: string, patch: Partial<DownloadTask>): Promise<DownloadTask | null>
+  updateTask(id: string, patch: TaskPatch): Promise<DownloadTask | null>
   redownload(id: string): Promise<void>
   /** Both resolve false when the file is gone, having marked the task missing. */
   openFile(id: string): Promise<boolean>
@@ -893,6 +1041,7 @@ export interface RendererApi {
   /* queues */
   listQueues(): Promise<Queue[]>
   saveQueue(queue: Queue): Promise<Queue>
+  reorderQueue(id: string, taskIds: string[]): Promise<void>
   removeQueue(id: string): Promise<void>
   startQueue(id: string): Promise<void>
   stopQueue(id: string): Promise<void>
@@ -955,6 +1104,25 @@ export interface RendererApi {
   fileIcon(extension: string): Promise<string | null>
   /** The favicon of the site a download came from, as a data URL. */
   siteIcon(url: string): Promise<string | null>
+  /**
+   * A video's poster image as a data URL, or null when it could not be had.
+   *
+   * Fetched in main rather than by the window: every renderer ships with
+   * `img-src 'self' data:`, so a preview loaded straight from `i.ytimg.com`
+   * would need that CSP widened for every resolver-supplied host.
+   */
+  thumbnail(url: string): Promise<string | null>
+
+  /* cookies */
+  /** The browsers on this machine, with their own icons, for the picker. */
+  listBrowsers(): Promise<InstalledBrowser[]>
+  /**
+   * Tries a browser's cookies against YouTube and reports what came back.
+   * Rejects if another check is already running - there is one progress bar.
+   */
+  checkCookies(browser: string): Promise<CookieCheckResult>
+  /** Stage-by-stage progress of the running check. */
+  onCookieCheckProgress(cb: (progress: CookieCheckProgress) => void): () => void
 
   /* window */
   minimize(): Promise<void>
@@ -967,6 +1135,7 @@ export interface RendererApi {
   /** The frame is custom, so the restore glyph has to be told when to change. */
   onMaximizeChange(cb: (maximized: boolean) => void): () => void
   onToast(cb: (toast: Toast) => void): () => void
+  onDownloadComplete(cb: () => void): () => void
 }
 
 declare global {

@@ -1,22 +1,21 @@
-import { createHash } from 'node:crypto'
-import { createReadStream } from 'node:fs'
-import { open, rm, stat, statfs, type FileHandle } from 'node:fs/promises'
-import { basename, dirname, extname, join } from 'node:path'
-import { spawn } from 'node:child_process'
+import { mkdir, open, rm, stat, statfs, type FileHandle } from 'node:fs/promises'
+import { basename, dirname, extname } from 'node:path'
 import type { DownloadTask, Segment } from '../../shared/types.ts'
-import { journalMatches, journalSegmentsValid, readJournal, removeJournal, segmentsForJournal, writeJournal, JOURNAL_VERSION } from './journal.ts'
+import { isStrongEtag, journalMatches, journalSegmentsValid, readJournal, removeJournal, segmentsForJournal, writeJournal, JOURNAL_VERSION } from './journal.ts'
 import { QuotaExceededError, type RateLimiter } from './limiter.ts'
 import { discardReservedPath, uniquePath, moveFile } from './naming.ts'
 import { authFailureMessage, type HttpAuthenticator } from './auth.ts'
 import { buildHeaders, probeUrl } from './probe.ts'
 import { logger } from '../log.ts'
-import { preallocate } from './preallocate.ts'
+import { clearSparseFlag, preallocate } from './preallocate.ts'
 import { ConnectionRamp, getLearnedHostCap, recordLearnedHostCap } from './ramp.ts'
 import { Segmenter } from './segmenter.ts'
 import { AbortedError, HttpStatusError, NotResumableError, ServerBusyError, runSegment } from './worker.ts'
-import { preparedYouTubeUrl, youtubeFormatId } from '../youtube-url.ts'
+import { isFixedYouTubeResource, preparedYouTubeUrl, youtubeFormatId } from '../youtube-url.ts'
 import { ensureDownloadDirectory } from '../destination-path.ts'
 import { partPathFor } from './workspace.ts'
+import { verifyExpectedChecksum } from './checksum.ts'
+import { QUOTA_DETAIL_PREFIX } from '../../shared/quota.ts'
 
 /**
  * Drives one download: probe, resume-or-start, keep the connection pool fed,
@@ -81,6 +80,25 @@ const FLUSH_EVERY_BYTES = 8 * 1024 * 1024
 const FLUSH_EVERY_MS = 1000
 
 /**
+ * The ceiling the interval backs off to when the barrier turns out to be
+ * expensive on this file.
+ *
+ * The numbers above were measured on a throttled transfer to a freshly
+ * allocated file. On an unthrottled link, or against the sparse fallback in
+ * `preallocate.ts` - which is what an unelevated run gets, and which leaves a
+ * multi-gigabyte file with an extent map thousands of entries long - a single
+ * `FlushFileBuffers` can run into hundreds of milliseconds, with every
+ * connection queued behind it. Rather than guess, the interval is derived from
+ * what the last few syncs actually cost.
+ *
+ * Backing off costs resume granularity and nothing else, and only up to
+ * `FLUSH_EVERY_BYTES` of it, because the byte trigger is unchanged.
+ */
+const FLUSH_MAX_MS = 5000
+/** A sync slower than this is one worth doing less often. */
+const SLOW_SYNC_MS = 100
+
+/**
  * Upper bound on what a connection may hold back before writing.
  *
  * Two things bound this from above. The segmenter's split point is derived
@@ -119,20 +137,37 @@ class UrlRefreshError extends Error {
   }
 }
 
+class CheckpointWriteError extends Error {
+  constructor(cause: unknown) {
+    super(`Could not save the resume checkpoint: ${cause instanceof Error ? cause.message : String(cause)}`)
+    this.name = 'CheckpointWriteError'
+  }
+}
+
+const CHECKPOINT_WARNING = 'Resume checkpoint could not be saved; retrying…'
+
 export class TaskRunner {
   private controller = new AbortController()
   private segmenter: Segmenter | null = null
   private fh: FileHandle | null = null
   private inflight = new Set<Promise<void>>()
+  /** Resolves the pump's wait when any connection settles - see `pumpUntilDone`. */
+  private settleWaiter: (() => void) | null = null
   private received = 0
   private samples: Array<{ t: number; received: number }> = []
   private bytesSinceFlush = 0
   private lastFlush = 0
+  /** Smoothed cost of the fsync barrier; drives `flushIntervalMs`. */
+  private syncCostMs = 0
+  private flushIntervalMs = FLUSH_EVERY_MS
   private flushPromise: Promise<void> | null = null
+  private checkpointRetryAt = 0
+  private checkpointFailure: Error | null = null
   private lifecyclePromise: Promise<void> | null = null
   private fatal: Error | null = null
   private restarted = false
   private urlRefreshes = 0
+  private lastRefreshAt = 0
   /** Only one YouTube refresh may be in flight; all expired workers share it. */
   private urlRefreshPromise: Promise<string> | null = null
   /** The URL the last successful refresh produced, so a second expiry can reuse it. */
@@ -145,7 +180,16 @@ export class TaskRunner {
   private connectionCap = 1
   /** Null whenever the task is pinned to one connection and cannot climb. */
   private ramp: ConnectionRamp | null = null
+  /**
+   * The ceiling this run was allowed to climb to. 1 means the transfer was
+   * never eligible for parallelism at all, which is what `finish` checks before
+   * teaching the next download anything about this host.
+   */
+  private connectionTarget = 1
   private busyRetries = 0
+  private requestFullRange = false
+  private sequentialRanges = false
+  private pauseRequested = false
 
   running = false
 
@@ -160,7 +204,7 @@ export class TaskRunner {
   }
 
   get partPath(): string {
-    return partPathFor(this.task.dir, this.task.filename, this.config.tempDir)
+    return partPathFor(this.task.dir, this.task.filename, this.task.id, this.config.tempDir)
   }
 
   get journalPath(): string {
@@ -174,15 +218,22 @@ export class TaskRunner {
     }
 
     this.running = true
+    this.pauseRequested = false
     this.controller = new AbortController()
     this.fatal = null
     this.samples = []
     this.urlRefreshes = 0
+    this.lastRefreshAt = 0
     this.urlRefreshPromise = null
     this.lastRefreshedUrl = null
     this.forcedProbeUrl = null
     this.busyRetries = 0
     this.ramp = null
+    this.checkpointFailure = null
+    this.checkpointRetryAt = 0
+    // A resolver left over from a run that threw out of the pump would wake the
+    // wrong wait.
+    this.settleWaiter = null
 
     const lifecycle = this.runLifecycle()
     this.lifecyclePromise = lifecycle
@@ -195,7 +246,8 @@ export class TaskRunner {
   }
 
   private async runLifecycle(): Promise<void> {
-    let refreshRestarted = false
+    let refreshRestarts = 0
+    let lastReceivedOnRestart = 0
 
     for (;;) {
       try {
@@ -205,43 +257,60 @@ export class TaskRunner {
         return
       } catch (err) {
         const error = err instanceof Error ? err : new Error(String(err))
-
-        if (error instanceof UrlRefreshError && this.task.youtube && !refreshRestarted) {
-          refreshRestarted = true
-          this.task.finalUrl = error.url
+        let checkpointError: CheckpointWriteError | null = null
+        try {
           await this.teardown()
-          await rm(this.partPath, { force: true })
-          await removeJournal(this.journalPath)
-          this.segmenter = null
-          this.received = 0
-          this.task.received = 0
-          this.task.segments = []
-          this.task.error = null
-          this.task.detail = 'Refreshing YouTube stream…'
-          this.deps.onUpdate(this.task)
-          this.controller = new AbortController()
-          this.fatal = null
-          this.forcedProbeUrl = error.url
-          continue
+        } catch (failure) {
+          checkpointError = failure instanceof CheckpointWriteError
+            ? failure : new CheckpointWriteError(failure)
         }
 
-        await this.teardown()
+        if (!checkpointError && !this.pauseRequested && error instanceof UrlRefreshError && this.task.youtube) {
+          if (this.received > lastReceivedOnRestart) {
+            refreshRestarts = 0
+            lastReceivedOnRestart = this.received
+          }
+          if (refreshRestarts < 10) {
+            refreshRestarts++
+            // The partial was flushed under the URL that supplied its bytes.
+            // A matching ETag at another CDN location cannot relabel it.
+            // The next probe may fail before restoreOrReset runs. Do not let
+            // that failure flush this old segment map under new probe metadata.
+            this.segmenter = null
+            this.task.finalUrl = error.url
+            this.task.error = null
+            this.task.detail = 'Refreshing YouTube stream…'
+            this.deps.onUpdate(this.task)
+            this.controller = new AbortController()
+            this.fatal = null
+            this.forcedProbeUrl = error.url
+            continue
+          }
+        }
+        const failure = checkpointError ?? error
+        if (failure instanceof CheckpointWriteError) this.checkpointFailure = failure
 
         // Out of budget, not broken. The partial data and its journal stay
         // exactly as they are; the manager brings the task back when the
         // window turns.
-        if (error instanceof QuotaExceededError) {
+        if (failure instanceof QuotaExceededError) {
           this.task.status = 'paused'
           this.task.error = null
           this.task.speed = 0
           this.task.eta = null
-          this.task.detail = quotaDetail(error.resumesAt)
-          this.deps.onFinished(this.task, error)
+          this.task.detail = quotaDetail(failure.resumesAt)
+          this.deps.onFinished(this.task, failure)
           return
         }
 
-        if ((error instanceof AbortedError || this.controller.signal.aborted) && !this.fatal) {
-          // A pause is not a failure; pause() has already set the status.
+        if ((this.pauseRequested || ((failure instanceof AbortedError || this.controller.signal.aborted) && !this.fatal)) && !checkpointError) {
+          // Probe, preallocation, or journal I/O can finish after pause() set
+          // the status and briefly write "downloading" again. The settled
+          // runner must always hand back a paused task.
+          this.task.status = 'paused'
+          this.task.detail = null
+          this.task.speed = 0
+          this.task.eta = null
           this.deps.onFinished(this.task, null)
         } else {
           this.task.status = 'error'
@@ -249,12 +318,12 @@ export class TaskRunner {
           // the saved one was refused. "HTTP 401" would be true and useless;
           // what the user needs is which site is asking and where to say so.
           this.task.error =
-            error instanceof HttpStatusError && error.statusCode === 401 && !this.task.youtube
+            failure instanceof HttpStatusError && failure.statusCode === 401 && !this.task.youtube
               ? authFailureMessage(this.task.finalUrl || this.task.url, this.deps.auth?.realm ?? null, this.deps.auth?.armed === true)
-              : error.message
+              : failure.message
           this.task.speed = 0
           this.task.eta = null
-          this.deps.onFinished(this.task, error)
+          this.deps.onFinished(this.task, failure)
         }
         return
       }
@@ -263,7 +332,9 @@ export class TaskRunner {
 
   /** Stops cleanly, leaving the part file and journal ready to resume from. */
   async pause(): Promise<void> {
+    this.pauseRequested = true
     if (!this.running) {
+      if (this.checkpointFailure) throw this.checkpointFailure
       this.task.status = 'paused'
       this.task.speed = 0
       this.task.eta = null
@@ -274,6 +345,7 @@ export class TaskRunner {
     this.task.status = 'paused'
     this.controller.abort()
     await this.lifecyclePromise?.catch(() => {})
+    if (this.checkpointFailure) throw this.checkpointFailure
     this.task.speed = 0
     this.task.eta = null
     this.deps.onUpdate(this.task)
@@ -336,8 +408,17 @@ export class TaskRunner {
     }
 
     const due =
-      this.bytesSinceFlush >= FLUSH_EVERY_BYTES || now - this.lastFlush >= FLUSH_EVERY_MS
-    if (due) void this.flushJournal(false)
+      this.bytesSinceFlush >= FLUSH_EVERY_BYTES || now - this.lastFlush >= this.flushIntervalMs
+    if (due && now >= this.checkpointRetryAt) {
+      void this.flushJournal(false).catch((error) => {
+        this.checkpointRetryAt = Date.now() + 2000
+        log.warn(`${this.task.filename}: resume checkpoint write failed: ${error instanceof Error ? error.message : String(error)}`)
+        if (this.task.detail !== CHECKPOINT_WARNING) {
+          this.task.detail = CHECKPOINT_WARNING
+          this.deps.onUpdate(this.task)
+        }
+      })
+    }
   }
 
   /* ---------------------------------------------------------------- */
@@ -382,6 +463,7 @@ export class TaskRunner {
         headers: this.task.headers,
         timeoutMs: this.config.timeoutMs,
         signal: this.controller.signal,
+        fresh: true,
         auth: this.deps.auth
       })
     } catch (err) {
@@ -401,7 +483,16 @@ export class TaskRunner {
 
     this.task.finalUrl = probe.finalUrl
     this.task.size = probe.size
-    this.task.resumable = probe.resumable
+    // Parallel byte ranges are safe only when every response can prove it is
+    // from the same resource version. Without a strong validator, one stream
+    // gives a coherent response and a restart begins from zero.
+    this.task.resumable = probe.resumable && isStrongEtag(probe.etag) && !this.task.singleConnectionFallback
+    // Range transport and safe resume are separate capabilities. Google media
+    // can throttle or reject a plain GET while serving a full-file Range quickly.
+    // Without a validator, use one response except for fixed signed YouTube
+    // resources, which need bounded chunks. Neither case adopts old partials.
+    this.requestFullRange = probe.resumable && !this.task.resumable && !this.task.singleConnectionFallback
+    this.sequentialRanges = this.requestFullRange && isFixedYouTubeResource(probe.finalUrl, probe.size)
     this.task.etag = probe.etag
     this.task.lastModified = probe.lastModified
     this.task.mimeType = probe.mimeType
@@ -410,8 +501,10 @@ export class TaskRunner {
     // The category - and therefore the directory - depends on the extension and
     // MIME type, neither of which was known before the probe.
     await this.deps.onProbed?.(this.task)
+    if (this.controller.signal.aborted) throw new AbortedError()
 
     this.task.dir = await ensureDownloadDirectory(this.task.dir)
+    await mkdir(dirname(this.partPath), { recursive: true })
 
     if (this.config.checkDiskSpace && this.task.size !== null && this.task.size > 0) {
       // Measured on the volume the bytes actually accumulate on, which is the
@@ -421,9 +514,27 @@ export class TaskRunner {
       try {
         const stats = await statfs(target)
         const free = stats.bavail * stats.bsize
-        // Require at least the file size + 10MB of padding
-        if (free < this.task.size + 10 * 1024 * 1024) {
-          throw new Error(`Not enough disk space. Requires ${Math.ceil(this.task.size / (1024 * 1024))} MB.`)
+        /*
+         * Charge only for what is still missing.
+         *
+         * A part file left by an earlier run has already taken its space out of
+         * `free` - the whole file under `valid-data` preallocation, and the
+         * written portion under the sparse fallback. Asking for the full size
+         * again on top of that failed every resume of a download larger than the
+         * remaining free space, which is precisely the case preallocation makes
+         * ordinary: a 400 GB transfer at 99% on a 500 GB disk demanded another
+         * 400 GB and refused to continue.
+         *
+         * `blocks` is what the file actually occupies, so it reads correctly
+         * under both modes where `size` would only be right under one.
+         */
+        const existing = await stat(this.partPath).catch(() => null)
+        const reserved = existing?.isFile() ? (existing.blocks ?? 0) * 512 : 0
+        const needed = this.task.size + 10 * 1024 * 1024
+        if (free + reserved < needed) {
+          throw new Error(
+            `Not enough disk space. Requires ${Math.ceil((needed - reserved) / (1024 * 1024))} MB.`
+          )
         }
       } catch (err) {
         if (err instanceof Error && err.message.includes('Not enough disk space')) throw err
@@ -432,12 +543,14 @@ export class TaskRunner {
     }
 
     const restored = await this.restoreOrReset(probe.size)
+    if (this.controller.signal.aborted) throw new AbortedError()
 
     // Only a server that honours ranges *and* told us the length can be split.
     const connectionTarget =
       this.task.resumable && this.task.size !== null
         ? Math.max(this.config.maxConnections, this.config.connectionCeiling ?? 0)
         : 1
+    this.connectionTarget = connectionTarget
     // The configured maximum is a ceiling the ramp climbs towards on evidence,
     // never a number of connections to open on faith.
     let startConnections = Math.min(RAMP_START_CONNECTIONS, connectionTarget)
@@ -453,21 +566,28 @@ export class TaskRunner {
     this.connectionCap = this.ramp.cap
     this.task.connections = this.connectionCap
 
-    if (!restored && process.platform === 'win32' && this.task.size !== null && this.task.size > 0) {
+    const preallocated = !restored && process.platform === 'win32' && this.task.size !== null && this.task.size > 0
+    if (preallocated) {
       // Reserving the whole range now is what keeps every segment's offset
       // valid from the first write. Which of the two workable ways it gets is
       // a property of the volume and the privileges to hand - see preallocate.
-      const mode = await preallocate(this.partPath, this.task.size)
+      const mode = await preallocate(this.partPath, this.task.size!)
       log.info(`${this.task.filename}: reserved ${this.task.size} bytes (${mode})`)
     }
 
-    this.fh = await open(this.partPath, restored ? 'r+' : 'w+')
+    if (this.controller.signal.aborted) throw new AbortedError()
+
+    // Opening with w+ would discard the allocation and valid data length that
+    // preallocate just established, restoring NTFS's expensive zero-fill.
+    this.fh = await open(this.partPath, restored || preallocated ? 'r+' : 'w+')
 
     // A restored file is already this long and a fresh one was just reserved,
     // so this is the safety net for the case where neither held.
     if (this.task.size !== null && this.task.size > 0) {
       await this.fh.truncate(this.task.size)
     }
+
+    if (this.controller.signal.aborted) throw new AbortedError()
 
     this.task.status = 'downloading'
     this.task.startedAt = this.task.startedAt ?? Date.now()
@@ -484,13 +604,17 @@ export class TaskRunner {
    */
   private async restoreOrReset(size: number | null): Promise<boolean> {
     const journal = await readJournal(this.journalPath)
-    const partExists = await exists(this.partPath)
+    const part = await stat(this.partPath).catch(() => null)
 
     if (
       journal &&
-      partExists &&
+      part?.isFile() &&
+      journal.url === this.task.url &&
       this.task.resumable &&
       journalSegmentsValid(journal.segments, size) &&
+      // Extending a truncated part file would fill missing, supposedly saved
+      // bytes with zeros and then report a corrupt download as complete.
+      journal.segments.every((seg) => seg.position === seg.start || seg.position <= part.size) &&
       journalMatches(journal, {
         finalUrl: this.task.finalUrl,
         filename: this.task.filename,
@@ -500,7 +624,7 @@ export class TaskRunner {
         lastModified: this.task.lastModified,
         mimeType: this.task.mimeType,
         statusCode: 206
-      }, { allowFinalUrlChange: Boolean(this.task.youtube) })
+      })
     ) {
       this.segmenter = Segmenter.restore(journal.segments, size, this.config.minSplitSize)
       this.received = this.segmenter.received
@@ -510,6 +634,10 @@ export class TaskRunner {
 
     // Either nothing to resume, or the remote file moved on. Starting over is
     // the cheap mistake; splicing two different files together is not.
+    if (journal && part?.isFile()) {
+      this.task.detail = 'Saved bytes could not be verified against the source; restarting from zero.'
+      log.warn(`${this.task.filename}: discarded a partial download that could not be verified`)
+    }
     await rm(this.partPath, { force: true })
     await removeJournal(this.journalPath)
     this.segmenter = new Segmenter(size, this.config.minSplitSize)
@@ -540,7 +668,15 @@ export class TaskRunner {
         throw this.fatal ?? new Error('Download stalled with work outstanding')
       }
 
-      await Promise.race([...this.inflight])
+      // A latch rather than `Promise.race([...this.inflight])`. Racing attaches
+      // a fresh continuation to every surviving promise on every pass, so with
+      // sixteen connections and hundreds of segments the handlers accumulated
+      // in proportion to connections x completions - all of them settling
+      // eventually, but all of them allocated on the transfer's hot path.
+      // `launch` resolves this latch once, whichever connection finishes first.
+      await new Promise<void>((resolve) => {
+        this.settleWaiter = resolve
+      })
     }
 
     await Promise.allSettled([...this.inflight])
@@ -575,6 +711,10 @@ export class TaskRunner {
       retryLimit: this.config.retryLimit,
       exponentialBackoff: this.config.exponentialBackoff ?? false,
       expectedSize: this.task.size,
+      expectedEtag: this.task.etag,
+      useRanges: this.task.resumable,
+      requestFullRange: this.requestFullRange,
+      sequentialRanges: this.sequentialRanges,
       signal: this.controller.signal,
       writeBufferBytes: Math.min(MAX_WRITE_BUFFER_BYTES, this.config.minSplitSize),
       auth: this.deps.auth,
@@ -610,15 +750,20 @@ export class TaskRunner {
         ) {
           try {
             if (!this.urlRefreshPromise) {
-              if (this.urlRefreshes >= 1) {
+              const now = Date.now()
+              if (this.lastRefreshAt > 0 && now - this.lastRefreshAt < 5000) {
                 if (this.lastRefreshedUrl) {
                   this.fatal = new UrlRefreshError(this.lastRefreshedUrl)
                   this.controller.abort()
                   return
                 }
-                throw new Error('YouTube media URL expired again after a refresh')
+                throw new Error('YouTube media URL expired and refresh failed to resolve')
+              }
+              if (this.urlRefreshes >= 10) {
+                throw new Error('YouTube media URL expired repeatedly')
               }
               this.urlRefreshes++
+              this.lastRefreshAt = now
               log.warn(`${this.task.filename}: media URL expired mid-transfer; refreshing`)
               // Forced: the URL this task holds is the one that just 401'd.
               this.urlRefreshPromise = this.deps.refreshYouTube(this.task, true).then((refreshedUrl) => {
@@ -663,7 +808,7 @@ export class TaskRunner {
             `${this.task.filename}: server refused another connection (HTTP ${err.statusCode}); ` +
             `backing off ${Math.round(waitMs / 1000)}s, cap now ${this.connectionCap}, refusal ${this.busyRetries}/${this.config.retryLimit}`
           )
-          await delay(waitMs)
+          await delay(waitMs, this.controller.signal)
           this.fill()
           return
         }
@@ -677,6 +822,10 @@ export class TaskRunner {
       })
       .finally(() => {
         this.inflight.delete(promise)
+        // Wakes `pumpUntilDone` exactly once per settled connection.
+        const waiter = this.settleWaiter
+        this.settleWaiter = null
+        waiter?.()
       })
 
     this.inflight.add(promise)
@@ -684,6 +833,7 @@ export class TaskRunner {
 
   private async finish(): Promise<void> {
     await this.flushJournal(true)
+    if (this.controller.signal.aborted) throw new AbortedError()
 
     if (this.task.size !== null && this.received < this.task.size) {
       throw new Error(
@@ -693,36 +843,47 @@ export class TaskRunner {
 
     await this.fh?.close()
     this.fh = null
+    if (this.controller.signal.aborted) throw new AbortedError()
+
+    // The part file is complete and has no holes left, so the sparse flag is
+    // pure cost from here on - and it would otherwise follow the payload to its
+    // final name and stay there. Best-effort; see `clearSparseFlag`.
+    await clearSparseFlag(this.partPath)
 
     if (this.task.expectedChecksum) {
       this.task.detail = 'Verifying checksum...'
       this.deps.onUpdate(this.task)
-      
-      const checksumLength = this.task.expectedChecksum.trim().length
-      const algo = checksumLength === 32 ? 'md5' : checksumLength === 40 ? 'sha1' : 'sha256'
-      
-      const hash = createHash(algo)
-      const stream = createReadStream(this.partPath)
-      
-      await new Promise<void>((resolve, reject) => {
-        stream.on('data', (chunk) => hash.update(chunk))
-        stream.on('end', () => resolve())
-        stream.on('error', (err) => reject(err))
-      })
-      
-      const actual = hash.digest('hex').toLowerCase()
-      const expected = this.task.expectedChecksum.trim().toLowerCase()
-      
-      if (actual !== expected) {
-        throw new Error(`Checksum mismatch. Expected ${expected}, got ${actual}`)
+      await verifyExpectedChecksum(this.partPath, this.task.expectedChecksum, this.controller.signal)
+    }
+
+    if (this.controller.signal.aborted) throw new AbortedError()
+
+    const sourcePath = this.partPath
+    let payloadPath = sourcePath
+    let filename = this.task.filename
+    if (this.task.postProcess === 'mp4' || this.task.postProcess === 'mp3') {
+      this.task.detail = `Converting to ${this.task.postProcess.toUpperCase()}...`
+      this.deps.onUpdate(this.task)
+      // Keep the completed source and its checkpoint until conversion succeeds.
+      // A retry can reuse its verified bytes, and no raw file escapes into the
+      // destination when provisioning, conversion, or cancellation fails.
+      const output = sourcePath + '.convert.' + this.task.postProcess
+      try {
+        const { convertMedia } = await import('./postprocess.ts')
+        await convertMedia(sourcePath, output, this.task.postProcess, this.controller.signal)
+        if (this.controller.signal.aborted) throw new AbortedError()
+        payloadPath = output
+        filename = basename(filename, extname(filename)) + '.' + this.task.postProcess
+      } catch (error) {
+        await rm(output, { force: true }).catch(() => {})
+        throw error
       }
     }
 
-    const wouldBeTarget = join(this.task.dir, this.task.filename)
-    await discardReservedPath(wouldBeTarget)
-    let target = await uniquePath(this.task.dir, this.task.filename)
+    const target = await uniquePath(this.task.dir, filename)
     try {
-      await moveFile(this.partPath, target)
+      if (this.controller.signal.aborted) throw new AbortedError()
+      await moveFile(payloadPath, target)
     } catch (err) {
       // The name was reserved as an empty file; a failed move must not leave it
       // sitting there holding the download's own name.
@@ -733,56 +894,31 @@ export class TaskRunner {
     // recovery metadata, so a transient cleanup failure must not turn a finished
     // download into a visible error.
     await removeJournal(this.journalPath).catch(() => {})
+    if (payloadPath !== sourcePath) await rm(sourcePath, { force: true }).catch(() => {})
 
-    try {
-      const host = new URL(this.task.finalUrl || this.task.url).hostname.toLowerCase()
-      recordLearnedHostCap(host, this.connectionCap)
-    } catch {}
-
-    if (this.task.postProcess === 'mp4' || this.task.postProcess === 'mp3') {
-      this.task.detail = `Converting to ${this.task.postProcess.toUpperCase()}...`
-      this.deps.onUpdate(this.task)
-
-      // Imported here rather than at the top of the file: ffmpeg provisioning
-      // reaches Electron's paths, and this module has to stay loadable under
-      // bare Node for `tools/dl.ts` and the engine tests. Post-processing is
-      // the one path that genuinely needs it, and only in the app.
-      const { ensureFfmpeg } = await import('../hls/ffmpeg.ts')
-      const ffmpegPath = await ensureFfmpeg()
-      const finalExt = '.' + this.task.postProcess
-      const outPath = await uniquePath(
-        this.task.dir, 
-        basename(this.task.filename, extname(this.task.filename)) + finalExt
-      )
-      
+    /*
+     * A download that was never allowed to go wide has measured nothing about
+     * this host, and must not be allowed to say it did.
+     *
+     * `connectionTarget` collapses to 1 for anything non-resumable or of unknown
+     * length - a chunked response, a PHP download script, a CDN that refuses
+     * ranges - and the cap it finishes on is therefore 1 by construction rather
+     * than by observation. Recording that taught every later download from the
+     * same origin to start at a single connection and climb 1-2-4-8-16 from
+     * there, so one chunked response quietly throttled the host for an hour.
+     */
+    if (this.connectionTarget > 1) {
       try {
-        const args = ['-y', '-i', target]
-        if (this.task.postProcess === 'mp4') {
-          args.push('-c:v', 'copy', '-c:a', 'copy')
-        } else if (this.task.postProcess === 'mp3') {
-          args.push('-vn', '-c:a', 'libmp3lame', '-q:a', '2')
-        }
-        args.push(outPath)
-
-        await new Promise<void>((resolve, reject) => {
-          const child = spawn(ffmpegPath, args, { windowsHide: true, stdio: 'ignore' })
-          child.on('error', reject)
-          child.on('close', (code) => {
-            if (code === 0) resolve()
-            else reject(new Error(`ffmpeg exited with code ${code}`))
-          })
-        })
-
-        await rm(target, { force: true }).catch(() => {})
-        target = outPath
-      } catch (err) {
-        await discardReservedPath(outPath)
-        throw err
-      }
+        const host = new URL(this.task.finalUrl || this.task.url).hostname.toLowerCase()
+        recordLearnedHostCap(host, this.connectionCap)
+      } catch {}
     }
 
     this.task.filename = basename(target)
     this.task.status = 'done'
+    // "Verifying checksum..." or "Converting to MP4..." must not outlive the
+    // step it described; a finished row has nothing left to say.
+    this.task.detail = null
     this.task.completedAt = Date.now()
     this.task.speed = 0
     this.task.eta = null
@@ -792,55 +928,103 @@ export class TaskRunner {
 
   private async teardown(): Promise<void> {
     await Promise.allSettled([...this.inflight])
-    await this.flushJournal(true)
-    await this.fh?.close().catch(() => {})
-    this.fh = null
+    let failure: unknown = null
+    try {
+      await this.flushJournal(true)
+    } catch (error) {
+      failure = error
+    } finally {
+      try {
+        await this.fh?.close()
+      } catch (error) {
+        failure ??= error
+      }
+      this.fh = null
+    }
+    if (failure) throw failure
   }
 
+  /**
+   * Writes the journal, at most one flush at a time.
+   *
+   * The guard is a loop, and it has to be, because a flush is mostly *fsync*:
+   * on the sparse fallback a single `FlushFileBuffers` can run for hundreds of
+   * milliseconds, which is the whole reason `flushIntervalMs` backs off. A guard
+   * that only became visible after the sync left that entire window unprotected
+   * - and it is exactly the window in which the next tick's 8 MB byte trigger
+   * fires. Two flushes then ran concurrently, each paying for its own barrier,
+   * and the later snapshot could be renamed into place before the earlier one.
+   *
+   * A tick arriving mid-flush has nothing to add and gives up. A forced flush -
+   * pause, shutdown, finish - must land its own snapshot, so it waits and then
+   * re-checks, because another waiter may have started one in the meantime.
+   */
   private async flushJournal(force: boolean): Promise<void> {
     if (!this.segmenter) return
     if (this.task.size === null || !this.task.resumable) return
 
-    // Never let two journal writers race over the same `.tmp` path. This used to
-    // be possible when the 250 ms ticker started a flush and pause/shutdown forced
-    // another one before the first rename completed.
-    if (this.flushPromise) {
-      await this.flushPromise
+    while (this.flushPromise) {
+      try {
+        await this.flushPromise
+      } catch (error) {
+        if (!force) throw error
+        // A forced pause or finish gets one fresh attempt after a failed
+        // background checkpoint; a transient error must not block it forever.
+      }
       if (!force) return
     }
 
-    this.bytesSinceFlush = 0
-    this.lastFlush = Date.now()
-
-    // The journal may only claim bytes that are actually durable.
-    if (this.fh) {
-      try {
-        await this.fh.sync()
-      } catch {
-        return
-      }
-    }
-
-    const run = writeJournal(this.journalPath, {
-      version: JOURNAL_VERSION,
-      url: this.task.url,
-      finalUrl: this.task.finalUrl,
-      filename: this.task.filename,
-      size: this.task.size,
-      etag: this.task.etag,
-      lastModified: this.task.lastModified,
-      segments: segmentsForJournal(this.segmenter.snapshot()),
-      updatedAt: Date.now()
-    }).catch(() => {
-      // A failed flush costs resume granularity, not the download. Losing the
-      // whole task because the journal could not be written would be worse.
-    })
-
+    const run = this.writeJournalNow()
     this.flushPromise = run.finally(() => {
       this.flushPromise = null
     })
-
     await this.flushPromise
+    this.checkpointRetryAt = 0
+    if (this.task.detail === CHECKPOINT_WARNING) {
+      this.task.detail = null
+      this.deps.onUpdate(this.task)
+    }
+  }
+
+  private async writeJournalNow(): Promise<void> {
+    if (!this.segmenter) return
+
+    // Snapshot before the barrier: writes completed while sync is pending may
+    // not be covered by it and must not be claimed by this checkpoint.
+    const segments = segmentsForJournal(this.segmenter.snapshot())
+    const checkpointBytes = this.bytesSinceFlush
+
+    // The journal may only claim bytes that are actually durable.
+    try {
+      if (this.fh) {
+        const startedAt = Date.now()
+        await this.fh.sync()
+        // What the barrier cost this time decides how soon the next one is due.
+        // Smoothed, so one unlucky sync does not slow the journal for the rest
+        // of the download and one lucky one does not undo a genuine back-off.
+        const took = Date.now() - startedAt
+        this.syncCostMs = this.syncCostMs === 0 ? took : this.syncCostMs * 0.7 + took * 0.3
+        this.flushIntervalMs = this.syncCostMs > SLOW_SYNC_MS
+          ? Math.min(FLUSH_MAX_MS, Math.round(this.syncCostMs * 20))
+          : FLUSH_EVERY_MS
+      }
+
+      await writeJournal(this.journalPath, {
+        version: JOURNAL_VERSION,
+        url: this.task.url,
+        finalUrl: this.task.finalUrl,
+        filename: this.task.filename,
+        size: this.task.size,
+        etag: this.task.etag,
+        lastModified: this.task.lastModified,
+        segments,
+        updatedAt: Date.now()
+      })
+      this.bytesSinceFlush = Math.max(0, this.bytesSinceFlush - checkpointBytes)
+      this.lastFlush = Date.now()
+    } catch (error) {
+      throw new CheckpointWriteError(error)
+    }
   }
 
   /**
@@ -850,8 +1034,11 @@ export class TaskRunner {
   async resetForRestart(): Promise<boolean> {
     if (this.restarted) return false
     this.restarted = true
-    await rm(this.partPath, { force: true })
-    await removeJournal(this.journalPath)
+    // A locked part file (antivirus scan, search indexer) must not turn a
+    // clean-restart request into an exception that escapes the manager's
+    // onFinished and stalls the scheduler.
+    await rm(this.partPath, { force: true }).catch(() => {})
+    await removeJournal(this.journalPath).catch(() => {})
     this.received = 0
     this.task.received = 0
     this.task.resumable = false
@@ -867,19 +1054,22 @@ export class TaskRunner {
 /** "Transfer quota reached - resumes at 14:30", in the row and the window. */
 export function quotaDetail(resumesAt: number): string {
   const time = new Date(resumesAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-  return `Transfer quota reached; resumes at ${time}`
+  return `${QUOTA_DETAIL_PREFIX}; resumes at ${time}`
 }
 
-function delay(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms))
-}
+function delay(ms: number, signal?: AbortSignal): Promise<void> {
+  if (signal?.aborted) return Promise.resolve()
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort)
+      resolve()
+    }, ms)
 
+    function onAbort(): void {
+      clearTimeout(timer)
+      resolve()
+    }
 
-async function exists(path: string): Promise<boolean> {
-  try {
-    await stat(path)
-    return true
-  } catch {
-    return false
-  }
+    signal?.addEventListener('abort', onAbort, { once: true })
+  })
 }

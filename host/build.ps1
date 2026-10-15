@@ -8,11 +8,9 @@ $ErrorActionPreference = 'Stop'
 $here = Split-Path -Parent $MyInvocation.MyCommand.Path
 Push-Location $here
 try {
-    $env:CGO_ENABLED = '0'
-    $env:GOOS = 'windows'
-    # -s -w strip the symbol table and DWARF data; this binary is never debugged
-    # in the field and the size shows up in every install.
-    go build -trimpath -ldflags '-s -w' -o draco-host.exe .
+    # The Node build entry point provisions a private Go toolchain if needed.
+    node (Join-Path $here '../tools/build-host.mjs')
+    if ($LASTEXITCODE -ne 0) { throw 'Native host build failed' }
     Write-Host "built $here\draco-host.exe"
 } finally {
     Pop-Location

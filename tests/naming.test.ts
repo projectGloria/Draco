@@ -1,4 +1,4 @@
-import { ok, strictEqual } from 'node:assert/strict'
+import { ok, rejects, strictEqual } from 'node:assert/strict'
 import { mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { basename, join } from 'node:path'
@@ -45,6 +45,9 @@ describe('sanitizeFilename', () => {
     strictEqual(sanitizeFilename('CON'), 'CON_')
     strictEqual(sanitizeFilename('com4.txt'), 'com4_.txt')
     strictEqual(sanitizeFilename('console.txt'), 'console.txt', 'only the exact names are reserved')
+    strictEqual(sanitizeFilename('CON.tar.gz'), 'CON_.tar.gz')
+    strictEqual(sanitizeFilename('COM¹.mp4'), 'COM¹_.mp4')
+    strictEqual(sanitizeFilename('lpt².backup.zip'), 'lpt²_.backup.zip')
   })
 
   it('removes the trailing dots and spaces Windows would silently eat', () => {
@@ -127,6 +130,10 @@ describe('filenameFromUrl', () => {
 })
 
 describe('uniquePath', () => {
+  it('fails when it cannot reserve a name', async () => {
+    await rejects(uniquePath(join(dir, 'missing-directory'), 'clip.mp4'), { code: 'ENOENT' })
+  })
+
   it('reserves the name it returns, so two downloads cannot be handed the same one', async () => {
     const first = await uniquePath(dir, 'clip.mp4')
     strictEqual(basename(first), 'clip.mp4')

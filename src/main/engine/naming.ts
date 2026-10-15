@@ -1,5 +1,6 @@
-import { open, rm, stat } from 'node:fs/promises'
+import { copyFile, open, rename, rm, stat, unlink } from 'node:fs/promises'
 import { extname, join, basename } from 'node:path'
+import { randomUUID } from 'node:crypto'
 
 /**
  * Filename handling for downloads. Deliberately free of Electron imports so the
@@ -8,7 +9,11 @@ import { extname, join, basename } from 'node:path'
 
 /** Characters NTFS rejects outright. */
 const ILLEGAL_PATH_CHARS = /[<>:"/\\|?*]/g
-const RESERVED_DEVICE_NAMES = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])$/i
+const RESERVED_DEVICE_NAMES = /^(con|prn|aux|nul|com[1-9¹²³]|lpt[1-9¹²³])(?=\.|$)/i
+
+export function escapeWindowsDeviceName(name: string): string {
+  return name.replace(RESERVED_DEVICE_NAMES, '$1_')
+}
 
 /**
  * Turns an arbitrary string into a name Windows will actually accept.
@@ -37,9 +42,44 @@ export function sanitizeFilename(name: string, fallback = 'download'): string {
 
   // Cap the stem, not the whole name, so a long title never eats the extension.
   const cappedStem = Array.from(stem).slice(0, 150).join('').replace(/[.\s]+$/, '') || fallback
-  const safeStem = RESERVED_DEVICE_NAMES.test(cappedStem) ? cappedStem + '_' : cappedStem
+  // The device prefix remains reserved with any number of extensions.
+  const safeStem = escapeWindowsDeviceName(cappedStem)
 
   return safeStem + ext.slice(0, 16)
+}
+
+/**
+ * What one half of a merged video+audio download is called on disk.
+ *
+ * The format id is in the name, and that is the whole point. `DashRunner`'s
+ * `adoptFinishedHalf` treats the file existing as proof the half is finished,
+ * which is true for the case it was written for - the same task retrying after
+ * a failed mux - and was badly false for another: an attempt whose video format
+ * was *substituted* downloads a complete video half, then fails on the audio
+ * half, and leaves that half on disk. The retry adopted it, muxed it, and
+ * produced a 360p file named `… 2160p.mp4` in two seconds without ever
+ * contacting YouTube. Nothing downstream could catch it, because nothing
+ * downstream ran.
+ *
+ * Naming the half after the format it holds makes the collision impossible:
+ * `.v.313.mp4` and `.v.18.mp4` are different files. A retry of the same task at
+ * the same quality still finds and reuses its own half, exactly as before.
+ *
+ * Only YouTube supplies a format id, and only YouTube substitutes formats, so
+ * every other source keeps the original names and the original behaviour.
+ */
+export function halfSuffix(
+  role: 'v' | 'a',
+  extension: string,
+  formatId?: string | null
+): string {
+  // The id becomes part of a filename, so it is filtered rather than trusted:
+  // it arrives from an extractor's JSON, and `140-1` is as exotic as it
+  // legitimately gets.
+  const id = typeof formatId === 'string'
+    ? formatId.replace(/[^A-Za-z0-9_-]/g, '').slice(0, 24)
+    : ''
+  return id ? `.${role}.${id}.${extension}` : `.${role}.${extension}`
 }
 
 /** Lowercase extension without the dot, or '' when there is none. */
@@ -154,14 +194,25 @@ export async function uniquePath(dir: string, filename: string): Promise<string>
     } catch (err) {
       const code = (err as NodeJS.ErrnoException)?.code
       if (code === 'EEXIST') continue
-      // A directory we cannot create in is not a naming problem; fall back to
-      // the non-reserving answer and let the real write report the reason.
-      return candidate
+      // The caller may rename over this path. Returning without owning the
+      // reservation would permit an overwrite after a permission or disk error.
+      throw err
     }
   }
 
-  // Pathological case: a thousand collisions. A timestamp always terminates.
-  return join(dir, `${stem} (${Date.now()})${ext}`)
+  // A crowded folder still needs the same atomic ownership guarantee.
+  for (let i = 0; i < 10; i++) {
+    const candidate = join(dir, `${stem} (${randomUUID()})${ext}`)
+    try {
+      const handle = await open(candidate, 'wx')
+      await handle.close()
+      return candidate
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException)?.code === 'EEXIST') continue
+      throw err
+    }
+  }
+  throw new Error('Could not reserve a unique filename')
 }
 
 /**
@@ -187,7 +238,6 @@ export async function discardReservedPath(path: string): Promise<void> {
  * are on different drives (which throws EXDEV on rename).
  */
 export async function moveFile(src: string, dest: string): Promise<void> {
-  const { rename, copyFile, unlink } = await import('node:fs/promises')
   try {
     await rename(src, dest)
   } catch (err: any) {

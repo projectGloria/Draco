@@ -171,6 +171,8 @@ describe('transfer lists', () => {
     })
 
     strictEqual(buildUrlList([youtube]).trim(), 'https://www.youtube.com/watch?v=abc')
+    strictEqual(buildTransferFile([youtube]).items[0].url,
+      'https://www.youtube.com/watch?v=abc')
     strictEqual(parseTransferFile(JSON.stringify(buildTransferFile([youtube])))[0].url,
       'https://www.youtube.com/watch?v=abc')
   })

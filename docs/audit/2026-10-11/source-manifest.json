@@ -1,0 +1,1344 @@
+{
+  "capturedAt": "2026-10-11T11:32:36.561Z",
+  "scope": "Authored application source and build/bridge code; file counts are an inventory, not execution coverage. Generated Firefox copies and third-party dependencies are excluded.",
+  "files": [
+    {
+      "path": "C:\\Users\\Nihil\\Desktop\\Github Repos\\Draco\\src\\main\\bootstrap\\paths.ts",
+      "relativePath": "src/main/bootstrap/paths.ts",
+      "lines": 156,
+      "sha256": "d67ed187111a5c9c2033f5492144da0d8c63a617eb3d9157fa8e64fac8d133a3",
+      "change": "unchanged"
+    },
+    {
+      "path": "C:\\Users\\Nihil\\Desktop\\Github Repos\\Draco\\src\\main\\bridge\\admission.ts",
+      "relativePath": "src/main/bridge/admission.ts",
+      "lines": 33,
+      "sha256": "bebc077e91852045fd5943a00a73f131acdd4ae3622b4fc7531b515f707c9603",
+      "change": "unchanged"
+    },
+    {
+      "path": "C:\\Users\\Nihil\\Desktop\\Github Repos\\Draco\\src\\main\\bridge\\handoff-inbox.ts",
+      "relativePath": "src/main/bridge/handoff-inbox.ts",
+      "lines": 111,
+      "sha256": "1646f853f335311fa6fa84f898bb4319ccf7a9d595578f0a4787a1e220aee0d4",
+      "change": "unchanged"
+    },
+    {
+      "path": "C:\\Users\\Nihil\\Desktop\\Github Repos\\Draco\\src\\main\\bridge\\integration.ts",
+      "relativePath": "src/main/bridge/integration.ts",
+      "lines": 201,
+      "sha256": "0fb6c7b3342ce5a3c94785fc0af1d2f165895e0bfa63da9a6939e20221378ed8",
+      "change": "unchanged"
+    },
+    {
+      "path": "C:\\Users\\Nihil\\Desktop\\Github Repos\\Draco\\src\\main\\bridge\\pipe-server.ts",
+      "relativePath": "src/main/bridge/pipe-server.ts",
+      "lines": 197,
+      "sha256": "d6415916bbdd0b19335cdf6dcff9361763079d5e61191d18c1727ffcdc3a9dea",
+      "change": "unchanged"
+    },
+    {
+      "path": "C:\\Users\\Nihil\\Desktop\\Github Repos\\Draco\\src\\main\\bridge\\protocol.ts",
+      "relativePath": "src/main/bridge/protocol.ts",
+      "lines": 600,
+      "sha256": "46a6719a80390ec69a2030e8f632c981029a91462dcc94b3eaa3287ed6c77892",
+      "change": "unchanged"
+    },
+    {
+      "path": "C:\\Users\\Nihil\\Desktop\\Github Repos\\Draco\\src\\main\\browser-icons.ts",
+      "relativePath": "src/main/browser-icons.ts",
+      "lines": 103,
+      "sha256": "4f1860261e9cf73d1a2ba116b58ca5ca171ed73ac8b6500630f96769f7f1b844",
+      "change": "unchanged"
+    },
+    {
+      "path": "C:\\Users\\Nihil\\Desktop\\Github Repos\\Draco\\src\\main\\categories.ts",
+      "relativePath": "src/main/categories.ts",
+      "lines": 127,
+      "sha256": "35ddd715040a76979d67ade77f30937905c91b06a576c83fe1b0828b34cd4b27",
+      "change": "unchanged"
+    },
+    {
+      "path": "C:\\Users\\Nihil\\Desktop\\Github Repos\\Draco\\src\\main\\clipboard-url.ts",
+      "relativePath": "src/main/clipboard-url.ts",
+      "lines": 28,
+      "sha256": "e451327faa98cedb313c079cb75f3b2edfe95af391d51a22c3456c9f5590341d",
+      "change": "unchanged"
+    },
+    {
+      "path": "C:\\Users\\Nihil\\Desktop\\Github Repos\\Draco\\src\\main\\clipboard.ts",
+      "relativePath": "src/main/clipboard.ts",
+      "lines": 62,
+      "sha256": "2d8743b0c573a3f1b014bcfbcc908787c774d5ab7e0be99195189ae5b5d1ca1b",
+      "change": "unchanged"
+    },
+    {
+      "path": "C:\\Users\\Nihil\\Desktop\\Github Repos\\Draco\\src\\main\\cookie-check.ts",
+      "relativePath": "src/main/cookie-check.ts",
+      "lines": 228,
+      "sha256": "d895fbfb078952645ab9af43a905cf08e75a35d3f6b8dcb8b5f744dad7d1a087",
+      "change": "unchanged"
+    },
+    {
+      "path": "C:\\Users\\Nihil\\Desktop\\Github Repos\\Draco\\src\\main\\cookie-report.ts",
+      "relativePath": "src/main/cookie-report.ts",
+      "lines": 203,
+      "sha256": "2548e0f6c5d4cb23df94a93ce06369fd13b6c402edeff4302a6f8b428806a16e",
+      "change": "unchanged"
+    },
+    {
+      "path": "C:\\Users\\Nihil\\Desktop\\Github Repos\\Draco\\src\\main\\credentials.ts",
+      "relativePath": "src/main/credentials.ts",
+      "lines": 190,
+      "sha256": "90766de1ef8f0ebfbff41a44b73398faf0f53697e258cb036022223c6f357632",
+      "change": "modified"
+    },
+    {
+      "path": "C:\\Users\\Nihil\\Desktop\\Github Repos\\Draco\\src\\main\\dash\\headers.ts",
+      "relativePath": "src/main/dash/headers.ts",
+      "lines": 11,
+      "sha256": "5211988ccddfb121534c0709f7dd4aa88a7ff7d6b026dc74ca60aef91e94f6ca",
+      "change": "unchanged"
+    },
+    {
+      "path": "C:\\Users\\Nihil\\Desktop\\Github Repos\\Draco\\src\\main\\dash\\manifest.ts",
+      "relativePath": "src/main/dash/manifest.ts",
+      "lines": 156,
+      "sha256": "279890759334896e3ece0915801afcd5a487e359d606f10ed7f30d092318e38f",
+      "change": "unchanged"
+    },
+    {
+      "path": "C:\\Users\\Nihil\\Desktop\\Github Repos\\Draco\\src\\main\\dash\\runner.ts",
+      "relativePath": "src/main/dash/runner.ts",
+      "lines": 301,
+      "sha256": "28b868b4c01cc66324e43629e31fb62cf241e4577adaded2542a6499366850f1",
+      "change": "modified"
+    },
+    {
+      "path": "C:\\Users\\Nihil\\Desktop\\Github Repos\\Draco\\src\\main\\dash\\transfer-policy.ts",
+      "relativePath": "src/main/dash/transfer-policy.ts",
+      "lines": 7,
+      "sha256": "cf2aa43dd2693a899dbd0f4f2a207d9bca6abc434735509a763f474928979cc0",
+      "change": "unchanged"
+    },
+    {
+      "path": "C:\\Users\\Nihil\\Desktop\\Github Repos\\Draco\\src\\main\\destination-path.ts",
+      "relativePath": "src/main/destination-path.ts",
+      "lines": 45,
+      "sha256": "63841ff8ebe39dfe6dfb61a69788bb84d09c8aa04562928abff7272d16ec1877",
+      "change": "modified"
+    },
+    {
+      "path": "C:\\Users\\Nihil\\Desktop\\Github Repos\\Draco\\src\\main\\electron-json-cipher.ts",
+      "relativePath": "src/main/electron-json-cipher.ts",
+      "lines": 56,
+      "sha256": "2c95bd244d633db96f8ee3618b339933c1ada0a5717deb00c09a06054c317db4",
+      "change": "unchanged"
+    },
+    {
+      "path": "C:\\Users\\Nihil\\Desktop\\Github Repos\\Draco\\src\\main\\engine\\auth.ts",
+      "relativePath": "src/main/engine/auth.ts",
+      "lines": 325,
+      "sha256": "27c5242418885e9e2c6eb22091e05edbca1ad115c6cae39fbaaa70e123af3ba7",
+      "change": "modified"
+    },
+    {
+      "path": "C:\\Users\\Nihil\\Desktop\\Github Repos\\Draco\\src\\main\\engine\\checksum.ts",
+      "relativePath": "src/main/engine/checksum.ts",
+      "lines": 17,
+      "sha256": "2ecc1f8d31c281c7607076c5611dfaf23bebfd826244c7241a6c933bec1737da",
+      "change": "unchanged"
+    },
+    {
+      "path": "C:\\Users\\Nihil\\Desktop\\Github Repos\\Draco\\src\\main\\engine\\concurrency.ts",
+      "relativePath": "src/main/engine/concurrency.ts",
+      "lines": 32,
+      "sha256": "5da9da0f525bb5f89342d27d04105b642d1903e9ac86a60406d8aa6861a02916",
+      "change": "unchanged"
+    },
+    {
+      "path": "C:\\Users\\Nihil\\Desktop\\Github Repos\\Draco\\src\\main\\engine\\connection-budget.ts",
+      "relativePath": "src/main/engine/connection-budget.ts",
+      "lines": 46,
+      "sha256": "bada51f2ff0af2cb0a5b538365c77748e065b6d0187918c5e0fc73b9cfc8ed56",
+      "change": "unchanged"
+    },
+    {
+      "path": "C:\\Users\\Nihil\\Desktop\\Github Repos\\Draco\\src\\main\\engine\\create.ts",
+      "relativePath": "src/main/engine/create.ts",
+      "lines": 289,
+      "sha256": "d0b0b307e3c0ea57c399d79b0ec7cadd5a6b363ccb2131effc1ae5baa6833fec",
+      "change": "unchanged"
+    },
+    {
+      "path": "C:\\Users\\Nihil\\Desktop\\Github Repos\\Draco\\src\\main\\engine\\duplicate.ts",
+      "relativePath": "src/main/engine/duplicate.ts",
+      "lines": 128,
+      "sha256": "28d9659c12f688dc3fe7e59ffcf9f869a82020fb2de571bcfbcb7193bbad85a3",
+      "change": "unchanged"
+    },
+    {
+      "path": "C:\\Users\\Nihil\\Desktop\\Github Repos\\Draco\\src\\main\\engine\\finalization-pool.ts",
+      "relativePath": "src/main/engine/finalization-pool.ts",
+      "lines": 72,
+      "sha256": "f7884fbe192e54afb56cb53dd70470728677939e4434e2f6e0d4795e63b5c700",
+      "change": "unchanged"
+    },
+    {
+      "path": "C:\\Users\\Nihil\\Desktop\\Github Repos\\Draco\\src\\main\\engine\\http.ts",
+      "relativePath": "src/main/engine/http.ts",
+      "lines": 94,
+      "sha256": "2b5db4f529f237f19577f978c882829f588fceb687b3c38f8e31ec89cbbce32e",
+      "change": "unchanged"
+    },
+    {
+      "path": "C:\\Users\\Nihil\\Desktop\\Github Repos\\Draco\\src\\main\\engine\\journal.ts",
+      "relativePath": "src/main/engine/journal.ts",
+      "lines": 154,
+      "sha256": "c71fe5a1a242674e3beefc62d7f59defff4a48edc46d772eeaeef0a8c569ffa4",
+      "change": "modified"
+    },
+    {
+      "path": "C:\\Users\\Nihil\\Desktop\\Github Repos\\Draco\\src\\main\\engine\\limit-window.ts",
+      "relativePath": "src/main/engine/limit-window.ts",
+      "lines": 76,
+      "sha256": "13faeec94ac1f83fd9152f9fc39503c7185c5ab7ea3b628eae2687ba7b8f1570",
+      "change": "unchanged"
+    },
+    {
+      "path": "C:\\Users\\Nihil\\Desktop\\Github Repos\\Draco\\src\\main\\engine\\limiter.ts",
+      "relativePath": "src/main/engine/limiter.ts",
+      "lines": 202,
+      "sha256": "11dc4e6953c4b18d1d851273b6bdb013a9ed6b1e03c3918eb72d82cf08905102",
+      "change": "unchanged"
+    },
+    {
+      "path": "C:\\Users\\Nihil\\Desktop\\Github Repos\\Draco\\src\\main\\engine\\manager.ts",
+      "relativePath": "src/main/engine/manager.ts",
+      "lines": 1549,
+      "sha256": "d5d1964a4b622b713b8320b4661a68d8bf0420fea2a2b2b8ba6c70e2424cbd6d",
+      "change": "modified"
+    },
+    {
+      "path": "C:\\Users\\Nihil\\Desktop\\Github Repos\\Draco\\src\\main\\engine\\naming.ts",
+      "relativePath": "src/main/engine/naming.ts",
+      "lines": 251,
+      "sha256": "3951d2b8a1f95bab768e2cf7c07b205444a3283e577f17ae004809d2c4f5a9dc",
+      "change": "modified"
+    },
+    {
+      "path": "C:\\Users\\Nihil\\Desktop\\Github Repos\\Draco\\src\\main\\engine\\network-rules.ts",
+      "relativePath": "src/main/engine/network-rules.ts",
+      "lines": 27,
+      "sha256": "aa767c016bcd0c39d46e7d39787602151d83844d95415011f6a63da5c97a1d87",
+      "change": "unchanged"
+    },
+    {
+      "path": "C:\\Users\\Nihil\\Desktop\\Github Repos\\Draco\\src\\main\\engine\\postprocess.ts",
+      "relativePath": "src/main/engine/postprocess.ts",
+      "lines": 36,
+      "sha256": "7e6e2294f172b558d59a95a2afd19f6527c199f819770ac56e057128202f7316",
+      "change": "added"
+    },
+    {
+      "path": "C:\\Users\\Nihil\\Desktop\\Github Repos\\Draco\\src\\main\\engine\\preallocate.ts",
+      "relativePath": "src/main/engine/preallocate.ts",
+      "lines": 192,
+      "sha256": "ba1a89b645748dc2e761fe80f8fb787fa0845c3154a00152af2eaf0f0c7fe3cb",
+      "change": "unchanged"
+    },
+    {
+      "path": "C:\\Users\\Nihil\\Desktop\\Github Repos\\Draco\\src\\main\\engine\\probe-helpers.ts",
+      "relativePath": "src/main/engine/probe-helpers.ts",
+      "lines": 3,
+      "sha256": "4250fd78db24f6f5b719eddda7d2e7d6d04f4a8c129fbfae425ffe1ad91cbc5e",
+      "change": "unchanged"
+    },
+    {
+      "path": "C:\\Users\\Nihil\\Desktop\\Github Repos\\Draco\\src\\main\\engine\\probe.ts",
+      "relativePath": "src/main/engine/probe.ts",
+      "lines": 558,
+      "sha256": "1ba4832742369863c33cf6653378930a068a30b1e6fdee748e3f60d1bc4421f2",
+      "change": "modified"
+    },
+    {
+      "path": "C:\\Users\\Nihil\\Desktop\\Github Repos\\Draco\\src\\main\\engine\\ramp.ts",
+      "relativePath": "src/main/engine/ramp.ts",
+      "lines": 204,
+      "sha256": "9c500b25bafbb495ece6bb4c9554b94145196a72ad41620a0c9b545abf4fdd40",
+      "change": "unchanged"
+    },
+    {
+      "path": "C:\\Users\\Nihil\\Desktop\\Github Repos\\Draco\\src\\main\\engine\\runner.ts",
+      "relativePath": "src/main/engine/runner.ts",
+      "lines": 54,
+      "sha256": "a020bb2f05125f312449edaf6ab8d93d898eb710996516926902b875cb4cc9ef",
+      "change": "modified"
+    },
+    {
+      "path": "C:\\Users\\Nihil\\Desktop\\Github Repos\\Draco\\src\\main\\engine\\seeding.ts",
+      "relativePath": "src/main/engine/seeding.ts",
+      "lines": 79,
+      "sha256": "80598b7e7ba142cae1d7d2f38bbf8a6f24e7e739c8e923803f081fcf3ae7ceef",
+      "change": "unchanged"
+    },
+    {
+      "path": "C:\\Users\\Nihil\\Desktop\\Github Repos\\Draco\\src\\main\\engine\\segmenter.ts",
+      "relativePath": "src/main/engine/segmenter.ts",
+      "lines": 251,
+      "sha256": "ca2e999128f631bae6fd374ad5364e81dac29b8da65a401f21d02adf85dc27c7",
+      "change": "unchanged"
+    },
+    {
+      "path": "C:\\Users\\Nihil\\Desktop\\Github Repos\\Draco\\src\\main\\engine\\task.ts",
+      "relativePath": "src/main/engine/task.ts",
+      "lines": 1075,
+      "sha256": "6523759ea0a97b37a4e78378e4d010db726834fa8444fb133d8358694db236d3",
+      "change": "modified"
+    },
+    {
+      "path": "C:\\Users\\Nihil\\Desktop\\Github Repos\\Draco\\src\\main\\engine\\torrent-path.ts",
+      "relativePath": "src/main/engine/torrent-path.ts",
+      "lines": 15,
+      "sha256": "b84e7b9d9798e622fd2c3adab5ed2a8fa4625305a007882b3e82a6fe767a4588",
+      "change": "unchanged"
+    },
+    {
+      "path": "C:\\Users\\Nihil\\Desktop\\Github Repos\\Draco\\src\\main\\engine\\torrent-store.ts",
+      "relativePath": "src/main/engine/torrent-store.ts",
+      "lines": 175,
+      "sha256": "4b77a3f0ce23ee0ffb0e9ddfe479cdcf0bb33fc32c69c5b518624fea72c30b92",
+      "change": "unchanged"
+    },
+    {
+      "path": "C:\\Users\\Nihil\\Desktop\\Github Repos\\Draco\\src\\main\\engine\\torrent.ts",
+      "relativePath": "src/main/engine/torrent.ts",
+      "lines": 503,
+      "sha256": "83a7fa565b2f5a28d4d9610ad2545c8c5e97baa3fc80e53bb19112492c54d998",
+      "change": "modified"
+    },
+    {
+      "path": "C:\\Users\\Nihil\\Desktop\\Github Repos\\Draco\\src\\main\\engine\\worker.ts",
+      "relativePath": "src/main/engine/worker.ts",
+      "lines": 498,
+      "sha256": "7346ba2c213ef3ec3b915edc21c2c54fd56fc27c4428340f606f2377445dd95d",
+      "change": "modified"
+    },
+    {
+      "path": "C:\\Users\\Nihil\\Desktop\\Github Repos\\Draco\\src\\main\\engine\\workspace.ts",
+      "relativePath": "src/main/engine/workspace.ts",
+      "lines": 216,
+      "sha256": "55b059c371345b9c37da363d202cfbec9453f7f9f716a05268994ac4ace45d40",
+      "change": "unchanged"
+    },
+    {
+      "path": "C:\\Users\\Nihil\\Desktop\\Github Repos\\Draco\\src\\main\\fetch-guard.ts",
+      "relativePath": "src/main/fetch-guard.ts",
+      "lines": 155,
+      "sha256": "40d8bfe715d9963621a92daef5317c7b46224e79a612f78cb11081aeaa9eb73d",
+      "change": "modified"
+    },
+    {
+      "path": "C:\\Users\\Nihil\\Desktop\\Github Repos\\Draco\\src\\main\\hls\\archive-digest.ts",
+      "relativePath": "src/main/hls/archive-digest.ts",
+      "lines": 40,
+      "sha256": "a91870389e98e2f0d9838626060b2944550806048d49d61ca64d5aa6c0e82707",
+      "change": "unchanged"
+    },
+    {
+      "path": "C:\\Users\\Nihil\\Desktop\\Github Repos\\Draco\\src\\main\\hls\\dash.ts",
+      "relativePath": "src/main/hls/dash.ts",
+      "lines": 394,
+      "sha256": "21d9b9d65b632a0f7465e5dc527a241aa1dfeb72e6b176d10633c5ccd851ecd2",
+      "change": "unchanged"
+    },
+    {
+      "path": "C:\\Users\\Nihil\\Desktop\\Github Repos\\Draco\\src\\main\\hls\\encrypted-buffer.ts",
+      "relativePath": "src/main/hls/encrypted-buffer.ts",
+      "lines": 30,
+      "sha256": "15e9c91dc3ec3b790d5c5feba8b5d6c98404297cd0e8d0787748d391e7a6a4ef",
+      "change": "unchanged"
+    },
+    {
+      "path": "C:\\Users\\Nihil\\Desktop\\Github Repos\\Draco\\src\\main\\hls\\encrypted-pool.ts",
+      "relativePath": "src/main/hls/encrypted-pool.ts",
+      "lines": 70,
+      "sha256": "18f436c4c5565d7c6740544ca4d94ce0edca36157539f66f72f2bc6ef2bed9d3",
+      "change": "unchanged"
+    },
+    {
+      "path": "C:\\Users\\Nihil\\Desktop\\Github Repos\\Draco\\src\\main\\hls\\ffmpeg.ts",
+      "relativePath": "src/main/hls/ffmpeg.ts",
+      "lines": 409,
+      "sha256": "14113a8773882944fb409999f9e4bd0d435ae6fc674b6cce0ede501fd4fc040a",
+      "change": "modified"
+    },
+    {
+      "path": "C:\\Users\\Nihil\\Desktop\\Github Repos\\Draco\\src\\main\\hls\\mux.ts",
+      "relativePath": "src/main/hls/mux.ts",
+      "lines": 249,
+      "sha256": "5ca408e7885da926d4ae68f37cb457b0f8bd8386a954f78a0e7a78fc59a661fc",
+      "change": "modified"
+    },
+    {
+      "path": "C:\\Users\\Nihil\\Desktop\\Github Repos\\Draco\\src\\main\\hls\\playlist-parser.ts",
+      "relativePath": "src/main/hls/playlist-parser.ts",
+      "lines": 222,
+      "sha256": "3bb6c7c263ddffe7daf1c386f613170de77bfb0f8ad65e426159a839faccb772",
+      "change": "modified"
+    },
+    {
+      "path": "C:\\Users\\Nihil\\Desktop\\Github Repos\\Draco\\src\\main\\hls\\playlist.ts",
+      "relativePath": "src/main/hls/playlist.ts",
+      "lines": 261,
+      "sha256": "4fd95e31c1b95ccff74d8cea0c76294677fe92eb7900f7b32c22185dff6b53d7",
+      "change": "modified"
+    },
+    {
+      "path": "C:\\Users\\Nihil\\Desktop\\Github Repos\\Draco\\src\\main\\hls\\replace-executable.ts",
+      "relativePath": "src/main/hls/replace-executable.ts",
+      "lines": 18,
+      "sha256": "447144b3450ae7d7067be9f7c9fe3bd1d5123c22d3cdda7b21c83ad9950115b1",
+      "change": "unchanged"
+    },
+    {
+      "path": "C:\\Users\\Nihil\\Desktop\\Github Repos\\Draco\\src\\main\\hls\\runner.ts",
+      "relativePath": "src/main/hls/runner.ts",
+      "lines": 1269,
+      "sha256": "f3d381810ae9c17f6758d37eead8f952aa74853e12f3fe63bc77c35e5627323c",
+      "change": "modified"
+    },
+    {
+      "path": "C:\\Users\\Nihil\\Desktop\\Github Repos\\Draco\\src\\main\\hls\\stream.ts",
+      "relativePath": "src/main/hls/stream.ts",
+      "lines": 36,
+      "sha256": "fa953ec674d45ca36d517f3ff70e0cc6b5cb80e3993281673b2b3760a2a5e885",
+      "change": "unchanged"
+    },
+    {
+      "path": "C:\\Users\\Nihil\\Desktop\\Github Repos\\Draco\\src\\main\\icons.ts",
+      "relativePath": "src/main/icons.ts",
+      "lines": 207,
+      "sha256": "142ba2085392e786ff4735c66aaacec76b4fc95679101db5d7e73c2d1846665d",
+      "change": "modified"
+    },
+    {
+      "path": "C:\\Users\\Nihil\\Desktop\\Github Repos\\Draco\\src\\main\\index.ts",
+      "relativePath": "src/main/index.ts",
+      "lines": 1234,
+      "sha256": "41203ea7d0add373ea2359950f4ca1e5e0d4cce258e49245642b55ac5e38b8f8",
+      "change": "modified"
+    },
+    {
+      "path": "C:\\Users\\Nihil\\Desktop\\Github Repos\\Draco\\src\\main\\ipc.ts",
+      "relativePath": "src/main/ipc.ts",
+      "lines": 1756,
+      "sha256": "37e88b9651d14c610f444b5618f6cb4c9d5cecd3e67e4779d292aba027b908a4",
+      "change": "modified"
+    },
+    {
+      "path": "C:\\Users\\Nihil\\Desktop\\Github Repos\\Draco\\src\\main\\json-file.ts",
+      "relativePath": "src/main/json-file.ts",
+      "lines": 132,
+      "sha256": "102a42af47220c0c239d0293a00bfc5285d273564c52c5509708778f329824da",
+      "change": "modified"
+    },
+    {
+      "path": "C:\\Users\\Nihil\\Desktop\\Github Repos\\Draco\\src\\main\\khinsider.ts",
+      "relativePath": "src/main/khinsider.ts",
+      "lines": 349,
+      "sha256": "a02b92130a106f9a4ea2ef9fb6074eaf57871687f63f46dc238ff82a2841b280",
+      "change": "unchanged"
+    },
+    {
+      "path": "C:\\Users\\Nihil\\Desktop\\Github Repos\\Draco\\src\\main\\log.ts",
+      "relativePath": "src/main/log.ts",
+      "lines": 91,
+      "sha256": "0bf19add9d318eb165f99f904f739415a4e62056a11986dfe8efbc6613e7e677",
+      "change": "unchanged"
+    },
+    {
+      "path": "C:\\Users\\Nihil\\Desktop\\Github Repos\\Draco\\src\\main\\media\\subtitles.ts",
+      "relativePath": "src/main/media/subtitles.ts",
+      "lines": 162,
+      "sha256": "acae6cf5537b91007e9b0c3af3124e2e677b7dc871e9b1bb4a486352ea5ed735",
+      "change": "modified"
+    },
+    {
+      "path": "C:\\Users\\Nihil\\Desktop\\Github Repos\\Draco\\src\\main\\media-url.ts",
+      "relativePath": "src/main/media-url.ts",
+      "lines": 47,
+      "sha256": "fc0a541704437b5bc4343345498e229e3b333332201522db7d9e5676fdfb974e",
+      "change": "unchanged"
+    },
+    {
+      "path": "C:\\Users\\Nihil\\Desktop\\Github Repos\\Draco\\src\\main\\page-media.ts",
+      "relativePath": "src/main/page-media.ts",
+      "lines": 500,
+      "sha256": "3374eeaa25d9197cc0dd2ad1aa55d83cf82071d50a375e9911bee7bbc50995c9",
+      "change": "unchanged"
+    },
+    {
+      "path": "C:\\Users\\Nihil\\Desktop\\Github Repos\\Draco\\src\\main\\proc.ts",
+      "relativePath": "src/main/proc.ts",
+      "lines": 27,
+      "sha256": "06a5d4f896fd7d4aa87772d9160fe002ec26d4b96776d6e67183fbab33b2a665",
+      "change": "unchanged"
+    },
+    {
+      "path": "C:\\Users\\Nihil\\Desktop\\Github Repos\\Draco\\src\\main\\public-task.ts",
+      "relativePath": "src/main/public-task.ts",
+      "lines": 10,
+      "sha256": "5434c2504de6adb106570934a5727c800ffd0317b26bc9e357e07e149851b962",
+      "change": "unchanged"
+    },
+    {
+      "path": "C:\\Users\\Nihil\\Desktop\\Github Repos\\Draco\\src\\main\\queue\\scheduler-window.ts",
+      "relativePath": "src/main/queue/scheduler-window.ts",
+      "lines": 40,
+      "sha256": "748e2ceb16e81e5f14d5073718328f79cbc9e3587e4fc3bebe488f1567d9c0b6",
+      "change": "unchanged"
+    },
+    {
+      "path": "C:\\Users\\Nihil\\Desktop\\Github Repos\\Draco\\src\\main\\queue\\scheduler.ts",
+      "relativePath": "src/main/queue/scheduler.ts",
+      "lines": 488,
+      "sha256": "34f546e1a29b87b767e2996838f2018266c44920ba54e7b1b107c70269240ccf",
+      "change": "modified"
+    },
+    {
+      "path": "C:\\Users\\Nihil\\Desktop\\Github Repos\\Draco\\src\\main\\response-limit.ts",
+      "relativePath": "src/main/response-limit.ts",
+      "lines": 52,
+      "sha256": "980387521d41d9370218cf83091ae932fc899aa81af3fb9fa1e9329c95d237a8",
+      "change": "unchanged"
+    },
+    {
+      "path": "C:\\Users\\Nihil\\Desktop\\Github Repos\\Draco\\src\\main\\sealed-json.ts",
+      "relativePath": "src/main/sealed-json.ts",
+      "lines": 60,
+      "sha256": "0a2f1323d3e826f73c211a2ecc4f7641c60a05ee61a4fa669525dec21943abe5",
+      "change": "modified"
+    },
+    {
+      "path": "C:\\Users\\Nihil\\Desktop\\Github Repos\\Draco\\src\\main\\security\\scanner.ts",
+      "relativePath": "src/main/security/scanner.ts",
+      "lines": 59,
+      "sha256": "653937db6b81410664be6aa0fab6a97ae0d4c5d0ed64b38055e2cf154682c338",
+      "change": "unchanged"
+    },
+    {
+      "path": "C:\\Users\\Nihil\\Desktop\\Github Repos\\Draco\\src\\main\\shell-integration.ts",
+      "relativePath": "src/main/shell-integration.ts",
+      "lines": 273,
+      "sha256": "9e4a1fce853c23bdeb980b4e92ccbb50b9c63d3b2a6e59ddae0f391a0049c6ae",
+      "change": "unchanged"
+    },
+    {
+      "path": "C:\\Users\\Nihil\\Desktop\\Github Repos\\Draco\\src\\main\\site-grabber\\crawler.ts",
+      "relativePath": "src/main/site-grabber/crawler.ts",
+      "lines": 300,
+      "sha256": "15c22301c15517b995ed93dfc87ec0bdd079e78f402a45ba6e5d90bfb325ee3b",
+      "change": "modified"
+    },
+    {
+      "path": "C:\\Users\\Nihil\\Desktop\\Github Repos\\Draco\\src\\main\\site-grabber\\projects.ts",
+      "relativePath": "src/main/site-grabber/projects.ts",
+      "lines": 165,
+      "sha256": "c3b53baee392dc568e98b3ed724af43e4e79f665686c1962bd372753faf5f488",
+      "change": "modified"
+    },
+    {
+      "path": "C:\\Users\\Nihil\\Desktop\\Github Repos\\Draco\\src\\main\\store-sanitize-path.ts",
+      "relativePath": "src/main/store-sanitize-path.ts",
+      "lines": 10,
+      "sha256": "f272a5ee534ee2a58bc093da5be5f89e6b054755ed13260bd88e48b9f50c6daa",
+      "change": "modified"
+    },
+    {
+      "path": "C:\\Users\\Nihil\\Desktop\\Github Repos\\Draco\\src\\main\\store-sanitize.ts",
+      "relativePath": "src/main/store-sanitize.ts",
+      "lines": 619,
+      "sha256": "c9fdff3a72799ccc6359bf8c8bfd641b749c81a59db1d9182bc8235bc4e95d13",
+      "change": "unchanged"
+    },
+    {
+      "path": "C:\\Users\\Nihil\\Desktop\\Github Repos\\Draco\\src\\main\\store.ts",
+      "relativePath": "src/main/store.ts",
+      "lines": 432,
+      "sha256": "e44b6fe1d47de324858e69d8858403a83826702a65ab9f1272ae164148175f9b",
+      "change": "modified"
+    },
+    {
+      "path": "C:\\Users\\Nihil\\Desktop\\Github Repos\\Draco\\src\\main\\suno.ts",
+      "relativePath": "src/main/suno.ts",
+      "lines": 96,
+      "sha256": "4a5a2d8e7af791db9b10dabf63e11d13419324486712a879bd4ac67d95dc25f4",
+      "change": "modified"
+    },
+    {
+      "path": "C:\\Users\\Nihil\\Desktop\\Github Repos\\Draco\\src\\main\\thumbnail-cache.ts",
+      "relativePath": "src/main/thumbnail-cache.ts",
+      "lines": 38,
+      "sha256": "846f4563b5f599d13b2a9547fb50bdb97f0aee4e0de3c38c2e10f11e0e79b8de",
+      "change": "unchanged"
+    },
+    {
+      "path": "C:\\Users\\Nihil\\Desktop\\Github Repos\\Draco\\src\\main\\thumbnails.ts",
+      "relativePath": "src/main/thumbnails.ts",
+      "lines": 154,
+      "sha256": "6f22ce2eacbc3592d20bf6bda8ea5db708f17ba06b18d8a661d036b660e2185d",
+      "change": "unchanged"
+    },
+    {
+      "path": "C:\\Users\\Nihil\\Desktop\\Github Repos\\Draco\\src\\main\\tools-version.ts",
+      "relativePath": "src/main/tools-version.ts",
+      "lines": 64,
+      "sha256": "01bd971ebf586f21806db5a08b065fcc75d156939e17a911b4ad578a5aee02fb",
+      "change": "unchanged"
+    },
+    {
+      "path": "C:\\Users\\Nihil\\Desktop\\Github Repos\\Draco\\src\\main\\tools.ts",
+      "relativePath": "src/main/tools.ts",
+      "lines": 116,
+      "sha256": "e6e78a20ec82412e96d9867bd5dd110e1560f7de83f609f96cc006039be04a14",
+      "change": "unchanged"
+    },
+    {
+      "path": "C:\\Users\\Nihil\\Desktop\\Github Repos\\Draco\\src\\main\\transfer-list.ts",
+      "relativePath": "src/main/transfer-list.ts",
+      "lines": 148,
+      "sha256": "dba589844a0c801819ae0f036fd175a7fb42fc2fc21b639efcb331df9a56ad88",
+      "change": "modified"
+    },
+    {
+      "path": "C:\\Users\\Nihil\\Desktop\\Github Repos\\Draco\\src\\main\\tray.ts",
+      "relativePath": "src/main/tray.ts",
+      "lines": 59,
+      "sha256": "388991b1a00d99f20834a6b9d0afbc667516d6de54b74145953aa00feff6602d",
+      "change": "unchanged"
+    },
+    {
+      "path": "C:\\Users\\Nihil\\Desktop\\Github Repos\\Draco\\src\\main\\twitter.ts",
+      "relativePath": "src/main/twitter.ts",
+      "lines": 242,
+      "sha256": "e37cef798a6369dfcdce85fc53e3e38ebda23f269e2867b85779f20b27963e59",
+      "change": "modified"
+    },
+    {
+      "path": "C:\\Users\\Nihil\\Desktop\\Github Repos\\Draco\\src\\main\\update-version.ts",
+      "relativePath": "src/main/update-version.ts",
+      "lines": 24,
+      "sha256": "e8e46d523acfa6973fc223a6e494bdc88ebd1535aced3c5f12c8084007dd8e9f",
+      "change": "modified"
+    },
+    {
+      "path": "C:\\Users\\Nihil\\Desktop\\Github Repos\\Draco\\src\\main\\update.ts",
+      "relativePath": "src/main/update.ts",
+      "lines": 42,
+      "sha256": "90b07eabd8120153b0284ac45084ac6995bff865a7cb66a0fc46b5d3a63273dc",
+      "change": "unchanged"
+    },
+    {
+      "path": "C:\\Users\\Nihil\\Desktop\\Github Repos\\Draco\\src\\main\\windows.ts",
+      "relativePath": "src/main/windows.ts",
+      "lines": 542,
+      "sha256": "7c629c964df71659fcd6345e9f9cde7dea50b5334c4aaee3549292ba6c45c252",
+      "change": "unchanged"
+    },
+    {
+      "path": "C:\\Users\\Nihil\\Desktop\\Github Repos\\Draco\\src\\main\\youtube-error.ts",
+      "relativePath": "src/main/youtube-error.ts",
+      "lines": 94,
+      "sha256": "e859ad1ad20580d726904b63b5f3c2297eb26994cf78dc28e114bf607a1564e0",
+      "change": "unchanged"
+    },
+    {
+      "path": "C:\\Users\\Nihil\\Desktop\\Github Repos\\Draco\\src\\main\\youtube-ladder.ts",
+      "relativePath": "src/main/youtube-ladder.ts",
+      "lines": 650,
+      "sha256": "dbba93c7b52c94632353627961c98fceb34c4d89b3be70e27358d9987f03f9e5",
+      "change": "unchanged"
+    },
+    {
+      "path": "C:\\Users\\Nihil\\Desktop\\Github Repos\\Draco\\src\\main\\youtube-playlist.ts",
+      "relativePath": "src/main/youtube-playlist.ts",
+      "lines": 193,
+      "sha256": "90ab21517e9331eace7aff6c81d5dd879f5dd7e2ce526c5dac8f5166b3a9fae2",
+      "change": "unchanged"
+    },
+    {
+      "path": "C:\\Users\\Nihil\\Desktop\\Github Repos\\Draco\\src\\main\\youtube-runtime.ts",
+      "relativePath": "src/main/youtube-runtime.ts",
+      "lines": 17,
+      "sha256": "ca34e0723198e5e9fcc028e4539e88e4d2b3bfc6262ed3f330bfd693c558dfcb",
+      "change": "unchanged"
+    },
+    {
+      "path": "C:\\Users\\Nihil\\Desktop\\Github Repos\\Draco\\src\\main\\youtube-sessions.ts",
+      "relativePath": "src/main/youtube-sessions.ts",
+      "lines": 39,
+      "sha256": "64c5fd63544dac97474a63bdd8da63df57b09b0e36af34e8e415db6d627306dd",
+      "change": "unchanged"
+    },
+    {
+      "path": "C:\\Users\\Nihil\\Desktop\\Github Repos\\Draco\\src\\main\\youtube-url.ts",
+      "relativePath": "src/main/youtube-url.ts",
+      "lines": 100,
+      "sha256": "d880446d9af2927946d74965b7a39433261969014249311d617b1fe22da9ea47",
+      "change": "unchanged"
+    },
+    {
+      "path": "C:\\Users\\Nihil\\Desktop\\Github Repos\\Draco\\src\\main\\youtube.ts",
+      "relativePath": "src/main/youtube.ts",
+      "lines": 831,
+      "sha256": "91fc62e6932a73055dee30d4985c54b924d3bdcdc52510bd4f13017f8c965e74",
+      "change": "unchanged"
+    },
+    {
+      "path": "C:\\Users\\Nihil\\Desktop\\Github Repos\\Draco\\src\\main\\ytdlp-cookies.ts",
+      "relativePath": "src/main/ytdlp-cookies.ts",
+      "lines": 67,
+      "sha256": "6be5d07afa2e3c09249f3d582128e0504adfa0acba9c878da8c2376e144800f4",
+      "change": "unchanged"
+    },
+    {
+      "path": "C:\\Users\\Nihil\\Desktop\\Github Repos\\Draco\\src\\main\\ytdlp-digest.ts",
+      "relativePath": "src/main/ytdlp-digest.ts",
+      "lines": 52,
+      "sha256": "640ac7bb81d9f30bba5d98e531c9c63012dc10bac256390c437cf4decca99d53",
+      "change": "unchanged"
+    },
+    {
+      "path": "C:\\Users\\Nihil\\Desktop\\Github Repos\\Draco\\src\\preload\\index.ts",
+      "relativePath": "src/preload/index.ts",
+      "lines": 161,
+      "sha256": "c4d161730b3fae91954c6476d36cb7177e6a8a5c654d2debabbe4179484bb6da",
+      "change": "unchanged"
+    },
+    {
+      "path": "C:\\Users\\Nihil\\Desktop\\Github Repos\\Draco\\src\\renderer\\handoff.html",
+      "relativePath": "src/renderer/handoff.html",
+      "lines": 15,
+      "sha256": "82598db7ed86d9e92af9b3e61edb1353a2a6098e7b53e8be3ef550ef544756f2",
+      "change": "unchanged"
+    },
+    {
+      "path": "C:\\Users\\Nihil\\Desktop\\Github Repos\\Draco\\src\\renderer\\index.html",
+      "relativePath": "src/renderer/index.html",
+      "lines": 15,
+      "sha256": "ca0c4863e8ed72ff2dabd2f839626367e47aeb6f0b2da92d8133d25a165585e6",
+      "change": "unchanged"
+    },
+    {
+      "path": "C:\\Users\\Nihil\\Desktop\\Github Repos\\Draco\\src\\renderer\\progress.html",
+      "relativePath": "src/renderer/progress.html",
+      "lines": 15,
+      "sha256": "390975de6ae0cfea8710d5679a74286bd06d81c92d850fcbaaa7e96fc42e7fbc",
+      "change": "unchanged"
+    },
+    {
+      "path": "C:\\Users\\Nihil\\Desktop\\Github Repos\\Draco\\src\\renderer\\splash\\main.ts",
+      "relativePath": "src/renderer/splash/main.ts",
+      "lines": 93,
+      "sha256": "cfd5fcb222c0982d9531bdd5a2d7173b284f0c7fd9539da15b3c1f1d8d390a8a",
+      "change": "unchanged"
+    },
+    {
+      "path": "C:\\Users\\Nihil\\Desktop\\Github Repos\\Draco\\src\\renderer\\splash.html",
+      "relativePath": "src/renderer/splash.html",
+      "lines": 187,
+      "sha256": "eaff56da06046a6198654d4387623ff2cee1f8b4e300b9e7c7eeee9ce5248950",
+      "change": "unchanged"
+    },
+    {
+      "path": "C:\\Users\\Nihil\\Desktop\\Github Repos\\Draco\\src\\renderer\\src\\App.tsx",
+      "relativePath": "src/renderer/src/App.tsx",
+      "lines": 530,
+      "sha256": "4cdb3f1592c943c2c06994718d3e3bb10b3e06a69b799dc5e9a7bfed1aab91ba",
+      "change": "modified"
+    },
+    {
+      "path": "C:\\Users\\Nihil\\Desktop\\Github Repos\\Draco\\src\\renderer\\src\\components\\AddUrlDialog.tsx",
+      "relativePath": "src/renderer/src/components/AddUrlDialog.tsx",
+      "lines": 106,
+      "sha256": "2364770d592f3dc71fba6f0b85e4a6256e6902c422589e0e3972dfddb1b2376e",
+      "change": "unchanged"
+    },
+    {
+      "path": "C:\\Users\\Nihil\\Desktop\\Github Repos\\Draco\\src\\renderer\\src\\components\\CategoryIcon.tsx",
+      "relativePath": "src/renderer/src/components/CategoryIcon.tsx",
+      "lines": 20,
+      "sha256": "f077022a7d56e9fb5e1348f527849f663cbf0828e236a7afe1a20c15cb656d53",
+      "change": "unchanged"
+    },
+    {
+      "path": "C:\\Users\\Nihil\\Desktop\\Github Repos\\Draco\\src\\renderer\\src\\components\\ClipboardPanel.tsx",
+      "relativePath": "src/renderer/src/components/ClipboardPanel.tsx",
+      "lines": 184,
+      "sha256": "b900d7a3e1814bf838801747243100c889e94ed4e568788c6e80b8d30e30cfe7",
+      "change": "unchanged"
+    },
+    {
+      "path": "C:\\Users\\Nihil\\Desktop\\Github Repos\\Draco\\src\\renderer\\src\\components\\ConfirmDialog.tsx",
+      "relativePath": "src/renderer/src/components/ConfirmDialog.tsx",
+      "lines": 93,
+      "sha256": "ee454fd3547575239c2460e6b28a7ffbfe18d20695cd3e9a1ff813304c6eb948",
+      "change": "unchanged"
+    },
+    {
+      "path": "C:\\Users\\Nihil\\Desktop\\Github Repos\\Draco\\src\\renderer\\src\\components\\ContextMenu.tsx",
+      "relativePath": "src/renderer/src/components/ContextMenu.tsx",
+      "lines": 112,
+      "sha256": "bcd83f1ca6d7794d7bcad4d33721cb40bdf645155b23b405abe678ffbc704742",
+      "change": "unchanged"
+    },
+    {
+      "path": "C:\\Users\\Nihil\\Desktop\\Github Repos\\Draco\\src\\renderer\\src\\components\\Dialog.tsx",
+      "relativePath": "src/renderer/src/components/Dialog.tsx",
+      "lines": 202,
+      "sha256": "8533edf08ac9b34cb4d4cd56f47c73e2e5fcd4d518257acdc719995899fb6091",
+      "change": "unchanged"
+    },
+    {
+      "path": "C:\\Users\\Nihil\\Desktop\\Github Repos\\Draco\\src\\renderer\\src\\components\\DownloadTable.tsx",
+      "relativePath": "src/renderer/src/components/DownloadTable.tsx",
+      "lines": 996,
+      "sha256": "410a10c47e57005de4d8bef7b6c5d0764785f1c6cc730efbc9f18a5e1fd14936",
+      "change": "unchanged"
+    },
+    {
+      "path": "C:\\Users\\Nihil\\Desktop\\Github Repos\\Draco\\src\\renderer\\src\\components\\Dropzone.tsx",
+      "relativePath": "src/renderer/src/components/Dropzone.tsx",
+      "lines": 70,
+      "sha256": "7807988587e460976ff190318324127740b3e252cf06c85e569f29fd99b4a823",
+      "change": "modified"
+    },
+    {
+      "path": "C:\\Users\\Nihil\\Desktop\\Github Repos\\Draco\\src\\renderer\\src\\components\\ErrorBoundary.tsx",
+      "relativePath": "src/renderer/src/components/ErrorBoundary.tsx",
+      "lines": 65,
+      "sha256": "c24d97d3c86905b418564fd4c2b6412f2001e093eb37da41272195e8015349b6",
+      "change": "unchanged"
+    },
+    {
+      "path": "C:\\Users\\Nihil\\Desktop\\Github Repos\\Draco\\src\\renderer\\src\\components\\FileIcon.tsx",
+      "relativePath": "src/renderer/src/components/FileIcon.tsx",
+      "lines": 55,
+      "sha256": "aab60ebecc01f000d1e30a6523b8385d2e77c11ac3bf3b50ff3299bfbaf75af0",
+      "change": "unchanged"
+    },
+    {
+      "path": "C:\\Users\\Nihil\\Desktop\\Github Repos\\Draco\\src\\renderer\\src\\components\\GroupDetailDialog.tsx",
+      "relativePath": "src/renderer/src/components/GroupDetailDialog.tsx",
+      "lines": 370,
+      "sha256": "a734bb2df4067b7fd1fc36d74d0825e5046faf4f69a4cf0b0ddf1c8507095ee3",
+      "change": "modified"
+    },
+    {
+      "path": "C:\\Users\\Nihil\\Desktop\\Github Repos\\Draco\\src\\renderer\\src\\components\\HandoffWindow.tsx",
+      "relativePath": "src/renderer/src/components/HandoffWindow.tsx",
+      "lines": 716,
+      "sha256": "aafce3ef971ebe28969710b6df9c1fdbf09a5c54719bb3112f965fefabb49cd4",
+      "change": "modified"
+    },
+    {
+      "path": "C:\\Users\\Nihil\\Desktop\\Github Repos\\Draco\\src\\renderer\\src\\components\\Icons.tsx",
+      "relativePath": "src/renderer/src/components/Icons.tsx",
+      "lines": 337,
+      "sha256": "b9b175eea800a62de582432907ed652eef27c754cc028174601f8dffb3b93b88",
+      "change": "unchanged"
+    },
+    {
+      "path": "C:\\Users\\Nihil\\Desktop\\Github Repos\\Draco\\src\\renderer\\src\\components\\OptionsDialog.tsx",
+      "relativePath": "src/renderer/src/components/OptionsDialog.tsx",
+      "lines": 1599,
+      "sha256": "7d004e68c9197e7d795c893048be5b29939d3ecba414c9c781b3e099dba12d05",
+      "change": "modified"
+    },
+    {
+      "path": "C:\\Users\\Nihil\\Desktop\\Github Repos\\Draco\\src\\renderer\\src\\components\\PendingActionBar.tsx",
+      "relativePath": "src/renderer/src/components/PendingActionBar.tsx",
+      "lines": 69,
+      "sha256": "bf29e559e875919edf52c94c57459b0291a29c8494d8d01f206e46ee229b6125",
+      "change": "unchanged"
+    },
+    {
+      "path": "C:\\Users\\Nihil\\Desktop\\Github Repos\\Draco\\src\\renderer\\src\\components\\PlaylistDialog.tsx",
+      "relativePath": "src/renderer/src/components/PlaylistDialog.tsx",
+      "lines": 279,
+      "sha256": "cd6b19d9112056e029be3774304444aa437b840a34c2617b3793c9d43150ec0d",
+      "change": "unchanged"
+    },
+    {
+      "path": "C:\\Users\\Nihil\\Desktop\\Github Repos\\Draco\\src\\renderer\\src\\components\\ProgressBar.tsx",
+      "relativePath": "src/renderer/src/components/ProgressBar.tsx",
+      "lines": 84,
+      "sha256": "58f3a36102b03d5515e25ff51d6d1b5a09e285754daedffb363b23467549d9f5",
+      "change": "unchanged"
+    },
+    {
+      "path": "C:\\Users\\Nihil\\Desktop\\Github Repos\\Draco\\src\\renderer\\src\\components\\ProgressWindow.tsx",
+      "relativePath": "src/renderer/src/components/ProgressWindow.tsx",
+      "lines": 335,
+      "sha256": "d4e361741d9b90b2612ade4a59a5b487f390cfb5bb0143122ce48c641f88bd8d",
+      "change": "modified"
+    },
+    {
+      "path": "C:\\Users\\Nihil\\Desktop\\Github Repos\\Draco\\src\\renderer\\src\\components\\QueueIcon.tsx",
+      "relativePath": "src/renderer/src/components/QueueIcon.tsx",
+      "lines": 13,
+      "sha256": "35e7071e006414eec1ca28ce867661af5c29f927b455b3bf9f147dd9e778d362",
+      "change": "unchanged"
+    },
+    {
+      "path": "C:\\Users\\Nihil\\Desktop\\Github Repos\\Draco\\src\\renderer\\src\\components\\SaveAsDialog.tsx",
+      "relativePath": "src/renderer/src/components/SaveAsDialog.tsx",
+      "lines": 1102,
+      "sha256": "ba5df50d1ed1e45f1ca25f0ee1452f999e0d14f12bea0ac0ecab1679164a0cde",
+      "change": "modified"
+    },
+    {
+      "path": "C:\\Users\\Nihil\\Desktop\\Github Repos\\Draco\\src\\renderer\\src\\components\\SchedulerDialog.tsx",
+      "relativePath": "src/renderer/src/components/SchedulerDialog.tsx",
+      "lines": 435,
+      "sha256": "9bb9b0b38586eeb0a2b5c283695cefce55f5998ed2ae077fb99d74ba2e822a5f",
+      "change": "unchanged"
+    },
+    {
+      "path": "C:\\Users\\Nihil\\Desktop\\Github Repos\\Draco\\src\\renderer\\src\\components\\Sidebar.tsx",
+      "relativePath": "src/renderer/src/components/Sidebar.tsx",
+      "lines": 373,
+      "sha256": "41a7971ac6f09727bad17ddbc5a5ff23b76b8129f9bad2f12440ee347fb9387b",
+      "change": "unchanged"
+    },
+    {
+      "path": "C:\\Users\\Nihil\\Desktop\\Github Repos\\Draco\\src\\renderer\\src\\components\\SiteGrabberDialog.tsx",
+      "relativePath": "src/renderer/src/components/SiteGrabberDialog.tsx",
+      "lines": 115,
+      "sha256": "69ec2ef867f058b80ba8deb09ffc06e609ed464483b0690e60ff20d37cc29672",
+      "change": "unchanged"
+    },
+    {
+      "path": "C:\\Users\\Nihil\\Desktop\\Github Repos\\Draco\\src\\renderer\\src\\components\\StatusBar.tsx",
+      "relativePath": "src/renderer/src/components/StatusBar.tsx",
+      "lines": 178,
+      "sha256": "1858006aac0c653c68e5daeb9f8cb13849d83b22a965e78de842ea5f7da3413a",
+      "change": "unchanged"
+    },
+    {
+      "path": "C:\\Users\\Nihil\\Desktop\\Github Repos\\Draco\\src\\renderer\\src\\components\\TaskDetailDialog.tsx",
+      "relativePath": "src/renderer/src/components/TaskDetailDialog.tsx",
+      "lines": 782,
+      "sha256": "7c4084bfd32e67a208c214ecf46ee0f6c5d74493df96180d5cada8bd70e473e1",
+      "change": "modified"
+    },
+    {
+      "path": "C:\\Users\\Nihil\\Desktop\\Github Repos\\Draco\\src\\renderer\\src\\components\\TitleBar.tsx",
+      "relativePath": "src/renderer/src/components/TitleBar.tsx",
+      "lines": 74,
+      "sha256": "8ebbfa8dbb8e109b06e405a3d474c99a7f18bdbe49353645cc697af95364dba1",
+      "change": "unchanged"
+    },
+    {
+      "path": "C:\\Users\\Nihil\\Desktop\\Github Repos\\Draco\\src\\renderer\\src\\components\\Toasts.tsx",
+      "relativePath": "src/renderer/src/components/Toasts.tsx",
+      "lines": 65,
+      "sha256": "6ad4389ae47dc42e1fb9e5920c0e11e053bb1b22664786b0fbd17c5652544a7e",
+      "change": "unchanged"
+    },
+    {
+      "path": "C:\\Users\\Nihil\\Desktop\\Github Repos\\Draco\\src\\renderer\\src\\components\\Toggle.tsx",
+      "relativePath": "src/renderer/src/components/Toggle.tsx",
+      "lines": 43,
+      "sha256": "d4de3cab06cd892de26a898a74d69bfe65119e179d5b7b99b85c885992817613",
+      "change": "unchanged"
+    },
+    {
+      "path": "C:\\Users\\Nihil\\Desktop\\Github Repos\\Draco\\src\\renderer\\src\\components\\Toolbar.tsx",
+      "relativePath": "src/renderer/src/components/Toolbar.tsx",
+      "lines": 154,
+      "sha256": "429fa869b62411e6cc4d176a9478160e2425169f641098c808df19c16bb03d6c",
+      "change": "unchanged"
+    },
+    {
+      "path": "C:\\Users\\Nihil\\Desktop\\Github Repos\\Draco\\src\\renderer\\src\\components\\ToolUpdateDialog.tsx",
+      "relativePath": "src/renderer/src/components/ToolUpdateDialog.tsx",
+      "lines": 102,
+      "sha256": "0235f4ddb0a0a9f8936da3f514067470dec7d26669afd500deaa1b47303ac811",
+      "change": "unchanged"
+    },
+    {
+      "path": "C:\\Users\\Nihil\\Desktop\\Github Repos\\Draco\\src\\renderer\\src\\env.d.ts",
+      "relativePath": "src/renderer/src/env.d.ts",
+      "lines": 1,
+      "sha256": "65996936fbb042915f7b74a200fcdde7e410f32a669b1ab9597cfaa4b0faddb5",
+      "change": "unchanged"
+    },
+    {
+      "path": "C:\\Users\\Nihil\\Desktop\\Github Repos\\Draco\\src\\renderer\\src\\handoff.tsx",
+      "relativePath": "src/renderer/src/handoff.tsx",
+      "lines": 23,
+      "sha256": "634eda5bd84a53c3d2bad0e9ff9ede0c07db33a650fe71fcbb64e7ce1485683d",
+      "change": "unchanged"
+    },
+    {
+      "path": "C:\\Users\\Nihil\\Desktop\\Github Repos\\Draco\\src\\renderer\\src\\i18n.ts",
+      "relativePath": "src/renderer/src/i18n.ts",
+      "lines": 413,
+      "sha256": "5152be225ea8a400c8a6d17ef4c45a1de089b6a879ebf984c73742bf2d91a045",
+      "change": "modified"
+    },
+    {
+      "path": "C:\\Users\\Nihil\\Desktop\\Github Repos\\Draco\\src\\renderer\\src\\lib\\completion-sound.ts",
+      "relativePath": "src/renderer/src/lib/completion-sound.ts",
+      "lines": 15,
+      "sha256": "2989ba873ce384dbf289f045b127e32800ebb35efdb713d28fad07d61c9b0c25",
+      "change": "unchanged"
+    },
+    {
+      "path": "C:\\Users\\Nihil\\Desktop\\Github Repos\\Draco\\src\\renderer\\src\\lib\\format.ts",
+      "relativePath": "src/renderer/src/lib/format.ts",
+      "lines": 153,
+      "sha256": "cbcbba0c14f74c3c5c67cde40847e9f3a6cb14187d342e34fb511afafc713913",
+      "change": "unchanged"
+    },
+    {
+      "path": "C:\\Users\\Nihil\\Desktop\\Github Repos\\Draco\\src\\renderer\\src\\lib\\history.ts",
+      "relativePath": "src/renderer/src/lib/history.ts",
+      "lines": 45,
+      "sha256": "82e4b9d644f52f762b1d453a898f2c5612ddbe928a3c2035b5fbb6e13e822f0c",
+      "change": "unchanged"
+    },
+    {
+      "path": "C:\\Users\\Nihil\\Desktop\\Github Repos\\Draco\\src\\renderer\\src\\lib\\icons.ts",
+      "relativePath": "src/renderer/src/lib/icons.ts",
+      "lines": 106,
+      "sha256": "d3961393eccf8e2cfa62d845e000906115a670bd950cd257a0482a91fbaff4de",
+      "change": "unchanged"
+    },
+    {
+      "path": "C:\\Users\\Nihil\\Desktop\\Github Repos\\Draco\\src\\renderer\\src\\lib\\use-appearance.ts",
+      "relativePath": "src/renderer/src/lib/use-appearance.ts",
+      "lines": 26,
+      "sha256": "c08cfbb8097bf27d418e02c6c834ccdb216aedc9970f97617e9e2a71e5ee90e1",
+      "change": "added"
+    },
+    {
+      "path": "C:\\Users\\Nihil\\Desktop\\Github Repos\\Draco\\src\\renderer\\src\\main.tsx",
+      "relativePath": "src/renderer/src/main.tsx",
+      "lines": 32,
+      "sha256": "3b67af566a6bfd6aeafdc897ebbcc38e2cbf7066711d975b3a0506479160900f",
+      "change": "unchanged"
+    },
+    {
+      "path": "C:\\Users\\Nihil\\Desktop\\Github Repos\\Draco\\src\\renderer\\src\\progress.tsx",
+      "relativePath": "src/renderer/src/progress.tsx",
+      "lines": 23,
+      "sha256": "8b7c6556b8b19a8aeb1bf1a9c1b2815d09782fa112b276d3c51d7485d55dc7b2",
+      "change": "unchanged"
+    },
+    {
+      "path": "C:\\Users\\Nihil\\Desktop\\Github Repos\\Draco\\src\\renderer\\src\\store\\app.ts",
+      "relativePath": "src/renderer/src/store/app.ts",
+      "lines": 580,
+      "sha256": "b80c3e16db067df1e8d27fb5b7321dd5d2b2dd0a9238b65b155b0371591e04b7",
+      "change": "modified"
+    },
+    {
+      "path": "C:\\Users\\Nihil\\Desktop\\Github Repos\\Draco\\src\\renderer\\src\\store\\toasts.ts",
+      "relativePath": "src/renderer/src/store/toasts.ts",
+      "lines": 61,
+      "sha256": "716628fe76648a99624a8e1ba5b2da9a67973daa944b24aa5b08fd6e5e505677",
+      "change": "unchanged"
+    },
+    {
+      "path": "C:\\Users\\Nihil\\Desktop\\Github Repos\\Draco\\src\\renderer\\src\\styles\\theme.css",
+      "relativePath": "src/renderer/src/styles/theme.css",
+      "lines": 343,
+      "sha256": "106d1162e04a51b293f788aad58c844b6ae89634911f3e7dbc8a7214d2efd047",
+      "change": "unchanged"
+    },
+    {
+      "path": "C:\\Users\\Nihil\\Desktop\\Github Repos\\Draco\\src\\shared\\display-source.ts",
+      "relativePath": "src/shared/display-source.ts",
+      "lines": 11,
+      "sha256": "b47d8b287e347d653edd1d4b55ead73045f1baa329209feb1d556bb5ed749da3",
+      "change": "unchanged"
+    },
+    {
+      "path": "C:\\Users\\Nihil\\Desktop\\Github Repos\\Draco\\src\\shared\\groups.ts",
+      "relativePath": "src/shared/groups.ts",
+      "lines": 107,
+      "sha256": "e42fd3bc1f96120c32846cae1a603de915f738860e30412acd01b86e4a4ce18a",
+      "change": "unchanged"
+    },
+    {
+      "path": "C:\\Users\\Nihil\\Desktop\\Github Repos\\Draco\\src\\shared\\queue-order.ts",
+      "relativePath": "src/shared/queue-order.ts",
+      "lines": 21,
+      "sha256": "61e8926432dc01788f9d045066868f58aef54a6c9acd7f03a8ee9c445ffcffc2",
+      "change": "unchanged"
+    },
+    {
+      "path": "C:\\Users\\Nihil\\Desktop\\Github Repos\\Draco\\src\\shared\\quota.ts",
+      "relativePath": "src/shared/quota.ts",
+      "lines": 18,
+      "sha256": "11759f3963e6631a1ce3d6522785427d8ad34d9803a11ea2e8ce761b4329196d",
+      "change": "unchanged"
+    },
+    {
+      "path": "C:\\Users\\Nihil\\Desktop\\Github Repos\\Draco\\src\\shared\\recovery.ts",
+      "relativePath": "src/shared/recovery.ts",
+      "lines": 34,
+      "sha256": "5d682ac02af8edd189a3d77786876e8cbc28d4e1c53d14d0f3270f9944223af1",
+      "change": "unchanged"
+    },
+    {
+      "path": "C:\\Users\\Nihil\\Desktop\\Github Repos\\Draco\\src\\shared\\task-status.ts",
+      "relativePath": "src/shared/task-status.ts",
+      "lines": 7,
+      "sha256": "cc7a2f28fe58801c6663669fb2dcb8d97808b140f18ac7fe83de86917924aee7",
+      "change": "added"
+    },
+    {
+      "path": "C:\\Users\\Nihil\\Desktop\\Github Repos\\Draco\\src\\shared\\torrent-tree.ts",
+      "relativePath": "src/shared/torrent-tree.ts",
+      "lines": 62,
+      "sha256": "30ceb0cbb30a1a3c965e1c804fe9b7220d046e7f8c54381f64f059eafb8911c4",
+      "change": "unchanged"
+    },
+    {
+      "path": "C:\\Users\\Nihil\\Desktop\\Github Repos\\Draco\\src\\shared\\types.ts",
+      "relativePath": "src/shared/types.ts",
+      "lines": 1145,
+      "sha256": "35bb9f0b8ec5302afab7c8b0e1c8cd9a3718a38477fc9f836777b4556ee9b44f",
+      "change": "unchanged"
+    },
+    {
+      "path": "C:\\Users\\Nihil\\Desktop\\Github Repos\\Draco\\src\\shared\\x-post.ts",
+      "relativePath": "src/shared/x-post.ts",
+      "lines": 40,
+      "sha256": "24f6f0ddc4f641371e057721000e312e183a105c53c1381d2b74b8f30dc7157c",
+      "change": "unchanged"
+    },
+    {
+      "path": "C:\\Users\\Nihil\\Desktop\\Github Repos\\Draco\\src\\shared\\youtube-link.ts",
+      "relativePath": "src/shared/youtube-link.ts",
+      "lines": 169,
+      "sha256": "e170af196548449ba3dea7a6798e3eae58819eaebbf0a8ec75636e5af1ccd3b9",
+      "change": "unchanged"
+    },
+    {
+      "path": "C:\\Users\\Nihil\\Desktop\\Github Repos\\Draco\\host\\build.ps1",
+      "relativePath": "host/build.ps1",
+      "lines": 17,
+      "sha256": "0cff6dda10a381dbb39a36b528b04749446f4bab1b42654e7917ff47f55b196e",
+      "change": "not-in-baseline-snapshot"
+    },
+    {
+      "path": "C:\\Users\\Nihil\\Desktop\\Github Repos\\Draco\\host\\main.go",
+      "relativePath": "host/main.go",
+      "lines": 571,
+      "sha256": "9e345bbbcc6de37fcdb80768712dfb3b0ed18329644e8beb52ddf864acb765ba",
+      "change": "not-in-baseline-snapshot"
+    },
+    {
+      "path": "C:\\Users\\Nihil\\Desktop\\Github Repos\\Draco\\host\\main_test.go",
+      "relativePath": "host/main_test.go",
+      "lines": 62,
+      "sha256": "af1ab42a1863ae8ad39ed4b41a3687173821c250789e2f6b7d3ac5d73c3ffbf5",
+      "change": "not-in-baseline-snapshot"
+    },
+    {
+      "path": "C:\\Users\\Nihil\\Desktop\\Github Repos\\Draco\\tools\\audit-download.mjs",
+      "relativePath": "tools/audit-download.mjs",
+      "lines": 6,
+      "sha256": "ab2c78374b0507551bdb4cdc5d172c3068723a966f30b60544101ea5d703b826",
+      "change": "unchanged"
+    },
+    {
+      "path": "C:\\Users\\Nihil\\Desktop\\Github Repos\\Draco\\tools\\bench\\http-transfer.mjs",
+      "relativePath": "tools/bench/http-transfer.mjs",
+      "lines": 192,
+      "sha256": "8b64be0e0e439647ab096e03a200aef7e8afd798de894117dfd909bdcbfdfc1f",
+      "change": "unchanged"
+    },
+    {
+      "path": "C:\\Users\\Nihil\\Desktop\\Github Repos\\Draco\\tools\\bench\\list-profile.mjs",
+      "relativePath": "tools/bench/list-profile.mjs",
+      "lines": 138,
+      "sha256": "5ab655757fb9cad061b71c90eacfcbb7382d1d0be064cd604577cf9a17f1d914",
+      "change": "unchanged"
+    },
+    {
+      "path": "C:\\Users\\Nihil\\Desktop\\Github Repos\\Draco\\tools\\build-firefox-extension.mjs",
+      "relativePath": "tools/build-firefox-extension.mjs",
+      "lines": 41,
+      "sha256": "b19868235ad22426d1991407d602f1ba827e45729057aac7ae6ccb659fddcd18",
+      "change": "unchanged"
+    },
+    {
+      "path": "C:\\Users\\Nihil\\Desktop\\Github Repos\\Draco\\tools\\build-host.mjs",
+      "relativePath": "tools/build-host.mjs",
+      "lines": 30,
+      "sha256": "0d789850312bcc176b4da8450779974b6983521ac8c41d447963dbe4fc3ffc38",
+      "change": "unchanged"
+    },
+    {
+      "path": "C:\\Users\\Nihil\\Desktop\\Github Repos\\Draco\\tools\\build-support.mjs",
+      "relativePath": "tools/build-support.mjs",
+      "lines": 62,
+      "sha256": "b97b6acfd4659b1d64da45131a4fa8122001d6a9cb6e72393ffad93f23236637",
+      "change": "unchanged"
+    },
+    {
+      "path": "C:\\Users\\Nihil\\Desktop\\Github Repos\\Draco\\tools\\check-bundle.cjs",
+      "relativePath": "tools/check-bundle.cjs",
+      "lines": 37,
+      "sha256": "16b15595b6b829a288623abe7d3c10230798877ebff9064429d297ad798e4ad6",
+      "change": "unchanged"
+    },
+    {
+      "path": "C:\\Users\\Nihil\\Desktop\\Github Repos\\Draco\\tools\\check-native.cjs",
+      "relativePath": "tools/check-native.cjs",
+      "lines": 15,
+      "sha256": "0168fb774aa46df0f5637b827aa36196523209a56b776f142e52517c9985de41",
+      "change": "unchanged"
+    },
+    {
+      "path": "C:\\Users\\Nihil\\Desktop\\Github Repos\\Draco\\tools\\dl.ts",
+      "relativePath": "tools/dl.ts",
+      "lines": 178,
+      "sha256": "07ce8b158c6af99938491644e4f0c1aac8c7b3ce7ab42903a11efc4515127d6d",
+      "change": "unchanged"
+    },
+    {
+      "path": "C:\\Users\\Nihil\\Desktop\\Github Repos\\Draco\\tools\\dl_yt.ts",
+      "relativePath": "tools/dl_yt.ts",
+      "lines": 99,
+      "sha256": "f9c6719c867167232c19cfea6c0a987836bce15240bac5deebf0007a0bb282a2",
+      "change": "unchanged"
+    },
+    {
+      "path": "C:\\Users\\Nihil\\Desktop\\Github Repos\\Draco\\tools\\e2e-native-handoff.mjs",
+      "relativePath": "tools/e2e-native-handoff.mjs",
+      "lines": 73,
+      "sha256": "072354b413ae6ec7e349d1eeee1d084a7313113f5bff85326a9721ff5c3a4f04",
+      "change": "unchanged"
+    },
+    {
+      "path": "C:\\Users\\Nihil\\Desktop\\Github Repos\\Draco\\tools\\gen-extension-key.mjs",
+      "relativePath": "tools/gen-extension-key.mjs",
+      "lines": 71,
+      "sha256": "2acaf4b13a3b229f7f91d885150951d7a96c954b772819262a22bd30ece13654",
+      "change": "unchanged"
+    },
+    {
+      "path": "C:\\Users\\Nihil\\Desktop\\Github Repos\\Draco\\tools\\prepare-runtime.mjs",
+      "relativePath": "tools/prepare-runtime.mjs",
+      "lines": 110,
+      "sha256": "9e81a790f0fcac831ed297de837365b53b00cb76ba7a88e6dfa2e895ffd093a2",
+      "change": "modified"
+    },
+    {
+      "path": "C:\\Users\\Nihil\\Desktop\\Github Repos\\Draco\\tools\\register-host.ps1",
+      "relativePath": "tools/register-host.ps1",
+      "lines": 150,
+      "sha256": "23f0ae8da3f034ef64ee6afbcef3aee24463d682569b8139dc493e66e9a4284c",
+      "change": "modified"
+    },
+    {
+      "path": "C:\\Users\\Nihil\\Desktop\\Github Repos\\Draco\\tools\\smoke-packaged-bridge.mjs",
+      "relativePath": "tools/smoke-packaged-bridge.mjs",
+      "lines": 155,
+      "sha256": "64541bcbaf87429228aade3865c8e750bb4990754d06bdea3e868be2485535f0",
+      "change": "unchanged"
+    },
+    {
+      "path": "C:\\Users\\Nihil\\Desktop\\Github Repos\\Draco\\tools\\smoke-packaged-profile.mjs",
+      "relativePath": "tools/smoke-packaged-profile.mjs",
+      "lines": 133,
+      "sha256": "7dcb7800c8185a756e4279d2c02c56c4e598cb160d5f531f212d75e20072b372",
+      "change": "unchanged"
+    },
+    {
+      "path": "C:\\Users\\Nihil\\Desktop\\Github Repos\\Draco\\tools\\smoke-safe-storage.mjs",
+      "relativePath": "tools/smoke-safe-storage.mjs",
+      "lines": 50,
+      "sha256": "df12f0fc8723abe7187e239f12a131ec1de3d6f36ed1ed74f1ac09b3e2c1654c",
+      "change": "unchanged"
+    },
+    {
+      "path": "C:\\Users\\Nihil\\Desktop\\Github Repos\\Draco\\tools\\verify-package.mjs",
+      "relativePath": "tools/verify-package.mjs",
+      "lines": 56,
+      "sha256": "3046914216ab70d898fc19861c763a516835de8f1ec2ae85a1f252dec87b916a",
+      "change": "unchanged"
+    },
+    {
+      "path": "C:\\Users\\Nihil\\Desktop\\Github Repos\\Draco\\extension\\background.js",
+      "relativePath": "extension/background.js",
+      "lines": 1557,
+      "sha256": "1f6b243d1e38ac1d99561aa0f56c315a8049a35e328df787449580503dcd8be5",
+      "change": "modified"
+    },
+    {
+      "path": "C:\\Users\\Nihil\\Desktop\\Github Repos\\Draco\\extension\\content.js",
+      "relativePath": "extension/content.js",
+      "lines": 1040,
+      "sha256": "f546b0dd98f5aace67e9930477842ae5820c23efee7f3f3d430a251b1d30dd2f",
+      "change": "modified"
+    },
+    {
+      "path": "C:\\Users\\Nihil\\Desktop\\Github Repos\\Draco\\extension\\popup.html",
+      "relativePath": "extension/popup.html",
+      "lines": 62,
+      "sha256": "1316317ae2b086b937c96f8181e830c829ebba4d21802ac96472cbbfe867d550",
+      "change": "unchanged"
+    },
+    {
+      "path": "C:\\Users\\Nihil\\Desktop\\Github Repos\\Draco\\extension\\popup.js",
+      "relativePath": "extension/popup.js",
+      "lines": 89,
+      "sha256": "18e43c0a5dfb7ac5b4f96ee3dc7fbc36cf72fed4633e83f847b50e43bb3c81d4",
+      "change": "unchanged"
+    },
+    {
+      "path": "C:\\Users\\Nihil\\Desktop\\Github Repos\\Draco\\package.json",
+      "relativePath": "package.json",
+      "sha256": "2d77267b75241ecdb329fcaa622b06f0edc36693e839a0cefbb84ca7482e1571",
+      "change": "modified"
+    },
+    {
+      "path": "C:\\Users\\Nihil\\Desktop\\Github Repos\\Draco\\package-lock.json",
+      "relativePath": "package-lock.json",
+      "sha256": "c62ce1e497c1bd25f8c4d9e6f3c47fdb08ff490848c675050489c83903489527",
+      "change": "modified"
+    },
+    {
+      "path": "C:\\Users\\Nihil\\Desktop\\Github Repos\\Draco\\electron-builder.yml",
+      "relativePath": "electron-builder.yml",
+      "sha256": "2868e616ed1d2891b5ef42d74997401195c742b0dcba61cd9676f49837cad973",
+      "change": "unchanged"
+    },
+    {
+      "path": "C:\\Users\\Nihil\\Desktop\\Github Repos\\Draco\\electron.vite.config.ts",
+      "relativePath": "electron.vite.config.ts",
+      "sha256": "faafe0609df7e2e8e0408ab7f872503534ec0a9a83cb2cac490429358604aa48",
+      "change": "unchanged"
+    },
+    {
+      "path": "C:\\Users\\Nihil\\Desktop\\Github Repos\\Draco\\tsconfig.node.json",
+      "relativePath": "tsconfig.node.json",
+      "sha256": "52acc6ec4e26a3313d392e3a6503d65ca747ab93b123bf3c95ab186ad994b73e",
+      "change": "unchanged"
+    },
+    {
+      "path": "C:\\Users\\Nihil\\Desktop\\Github Repos\\Draco\\tsconfig.web.json",
+      "relativePath": "tsconfig.web.json",
+      "sha256": "b302c3c5c3cc086ef8f0e51d01c3313a5bdcf80b9605e2b7cef3e0326776da9e",
+      "change": "unchanged"
+    }
+  ]
+}

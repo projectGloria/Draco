@@ -11,6 +11,7 @@ export async function streamResponseBody(
 ): Promise<number> {
   const reader = body.getReader()
   let received = 0
+  let completed = false
   try {
     for (;;) {
       if (signal.aborted) throw new Error('aborted')
@@ -22,8 +23,14 @@ export async function streamResponseBody(
       onProgress?.(received)
       await consume(chunk.length)
     }
+    completed = true
     return received
   } finally {
+    // Any early exit (abort, disk full, quota exceeded) must cancel the
+    // stream, not just release the lock: otherwise undici keeps the socket
+    // and keeps buffering the body until the body timeout, pinning pool
+    // connections precisely when many transfers are failing at once.
+    if (!completed) await reader.cancel().catch(() => {})
     reader.releaseLock()
   }
 }

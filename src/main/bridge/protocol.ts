@@ -31,6 +31,8 @@ export interface ConfigMessage {
 export interface DownloadMessage {
   type: 'download'
   requestId?: string
+  /** Browser-side time limit for holding a paused download. */
+  handoffExpiresAt?: number
   url: string
   filename?: string
   referer?: string
@@ -44,6 +46,13 @@ export interface DownloadMessage {
    * window - forty Save As dialogs in a row is not a feature.
    */
   bulk?: boolean
+}
+
+/** Resolve ownership of a download held paused during confirmation. */
+export interface HandoffStatusMessage {
+  type: 'handoffStatus' | 'handoffCancel'
+  requestId?: string
+  handoffId: string
 }
 
 /**
@@ -122,6 +131,7 @@ export type HostMessage =
   | PingMessage
   | ConfigMessage
   | DownloadMessage
+  | HandoffStatusMessage
   | MediaMessage
   | DownloadBatchMessage
   | YouTubeMessage
@@ -131,6 +141,9 @@ export interface HostReply {
   ok: boolean
   /** Only meaningful for `download`: whether Draco took the job. */
   taken?: boolean
+  /** Confirmation is open; the browser must retain its paused download. */
+  pending?: boolean
+  handoffId?: string
   /** Only meaningful for `downloadBatch`: how many of the items were queued. */
   queued?: number
   error?: string
@@ -250,8 +263,11 @@ export function validateHostMessage(value: unknown): HostMessage {
   const stringField = (name: string, max = 16_384): string | undefined => {
     const v = message[name]
     if (v === undefined || v === null) return undefined
-    if (typeof v !== 'string' || v.length > max) throw new Error(`Invalid ${name}`)
-    return v
+    if (typeof v !== 'string') throw new Error(`Invalid ${name}`)
+    // Page-controlled strings (titles, MIME types) are truncated, not
+    // rejected: a pathological document.title must not sink a whole handoff
+    // that is otherwise valid.
+    return v.length > max ? v.slice(0, max) : v
   }
   const urlField = (name: string): string => {
     const v = stringField(name, 32_768)
@@ -280,6 +296,14 @@ export function validateHostMessage(value: unknown): HostMessage {
     case 'ping':
     case 'config':
       return { type, ...(requestId ? { requestId } : {}) } as HostMessage
+    case 'handoffStatus':
+    case 'handoffCancel': {
+      const handoffId = message.handoffId
+      if (typeof handoffId !== 'string' || !/^[A-Za-z0-9._:-]{1,128}$/.test(handoffId)) {
+        throw new Error('Invalid handoffId')
+      }
+      return { type, handoffId, ...(requestId ? { requestId } : {}) }
+    }
     case 'download': {
       const size = message.size
       if (size !== undefined && size !== null && (typeof size !== 'number' || !Number.isSafeInteger(size) || size < 0)) {
@@ -287,9 +311,16 @@ export function validateHostMessage(value: unknown): HostMessage {
       }
       const bulk = message.bulk
       if (bulk !== undefined && typeof bulk !== 'boolean') throw new Error('Invalid bulk flag')
+      const handoffExpiresAt = message.handoffExpiresAt
+      if (handoffExpiresAt !== undefined &&
+          (typeof handoffExpiresAt !== 'number' || !Number.isSafeInteger(handoffExpiresAt) ||
+           handoffExpiresAt < 0 || handoffExpiresAt > Date.now() + 10 * 60_000)) {
+        throw new Error('Invalid handoffExpiresAt')
+      }
       return {
         type,
         ...(requestId ? { requestId } : {}),
+        handoffExpiresAt: handoffExpiresAt as number | undefined,
         url: urlField('url'),
         filename: stringField('filename', 512),
         referer: optionalUrl('referer'),

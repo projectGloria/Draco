@@ -1,7 +1,10 @@
 import { useMemo, useState } from 'react'
 import type { DownloadTask } from '@shared/types'
+import { displaySource } from '@shared/display-source'
+import { useT } from '../i18n'
 import { formatBytes, formatEta, formatSpeed, formatWhen, percent } from '../lib/format'
 import { summarizeGroup } from '@shared/groups'
+import { canPauseTask } from '@shared/task-status'
 import { useApp } from '../store/app'
 import { reportError, toast } from '../store/toasts'
 import ContextMenu, { type MenuItem, type MenuPosition } from './ContextMenu'
@@ -30,6 +33,7 @@ export default function GroupDetailDialog({
   groupId: string
   onClose(): void
 }): React.ReactElement | null {
+  const t = useT()
   const tasks = useApp((state) => state.tasks)
   const members = useMemo(() => tasks.filter((task) => task.groupId === groupId), [tasks, groupId])
   const [tab, setTab] = useState<GroupTab>('content')
@@ -42,7 +46,7 @@ export default function GroupDetailDialog({
   if (!summary) return null
 
   const ids = members.map((task) => task.id)
-  const running = members.some((task) => task.status === 'downloading' || task.status === 'queued')
+  const running = members.some((task) => canPauseTask(task.status))
   const done = summary.size ? percent(summary.received, summary.size) : null
   const sourceUrl = members.find((task) => task.sourceUrl)?.sourceUrl ?? summary.url
 
@@ -58,7 +62,7 @@ export default function GroupDetailDialog({
 
   return (
     <Dialog
-      title={summary.groupName || 'Page downloads'}
+      title={summary.groupName || t('pageDownloads')}
       subtitle={sourceUrl}
       width={920}
       onClose={onClose}
@@ -68,22 +72,22 @@ export default function GroupDetailDialog({
           <GhostButton
             onClick={() => {
               void window.api.copyToClipboard(sourceUrl)
-              toast('info', 'Source URL copied')
+              toast('info', t('sourceUrlCopied'))
             }}
           >
-            Copy source URL
+            {t('copySourceUrl')}
           </GhostButton>
-          <GhostButton onClick={() => void window.api.revealFile(ids[0])}>Open folder</GhostButton>
+          <GhostButton onClick={() => void window.api.revealFile(ids[0])}>{t('openFolder')}</GhostButton>
           <GhostButton
             onClick={() => {
               const call = running ? window.api.pauseTasks(ids) : window.api.startTasks(ids)
-              void call.catch((err) => reportError('Command failed', err))
+              void call.catch((err) => reportError(t('commandFailed'), err))
             }}
             disabled={members.every((task) => task.status === 'done')}
           >
-            {running ? `Stop ${ids.length}` : `Resume ${ids.length}`}
+            {running ? t('stopCount', { count: ids.length }) : t('resumeCount', { count: ids.length })}
           </GhostButton>
-          <PrimaryButton onClick={onClose}>Close</PrimaryButton>
+          <PrimaryButton onClick={onClose}>{t('close')}</PrimaryButton>
         </>
       }
     >
@@ -162,45 +166,48 @@ export default function GroupDetailDialog({
 }
 
 function GroupContent({ members }: { members: DownloadTask[] }): React.ReactElement {
+  const t = useT()
   const [menu, setMenu] = useState<{ at: MenuPosition; task: DownloadTask } | null>(null)
   const [active, setActive] = useState<string | null>(null)
 
   const open = (task: DownloadTask): void => {
     if (task.status !== 'done') {
-      toast('info', 'That file has not finished downloading yet')
+      toast('info', t('notFinishedYet'))
       return
     }
     void window.api.openFile(task.id).catch((error) => reportError('Could not open the file', error))
   }
 
   const items = (task: DownloadTask): MenuItem[] => {
-    const running = task.status === 'downloading' || task.status === 'queued'
+    const running = canPauseTask(task.status)
     return [
-      { label: 'Open', disabled: task.status !== 'done', onClick: () => open(task) },
-      { label: 'Open folder', onClick: () => void window.api.revealFile(task.id) },
+      { label: t('open'), disabled: task.status !== 'done', onClick: () => open(task) },
+      { label: t('openFolder'), onClick: () => void window.api.revealFile(task.id) },
       {},
       {
-        label: running ? 'Stop' : 'Resume',
+        label: running ? t('stop') : t('resume'),
         disabled: task.status === 'done',
         onClick: () => {
           const call = running ? window.api.pauseTasks([task.id]) : window.api.startTasks([task.id])
-          void call.catch((error) => reportError('Command failed', error))
+          void call.catch((error) => reportError(t('commandFailed'), error))
         }
       },
       {
-        label: 'Copy URL',
+        label: t('copyUrl'),
         onClick: () => {
           void window.api.copyToClipboard(task.url)
-          toast('info', 'URL copied')
+          toast('info', t('urlCopied'))
         }
       },
       {},
       {
-        label: 'Remove from this group',
+        label: t('removeFromGroup'),
         danger: true,
+        // Detach the row from the batch without touching the download itself;
+        // removeTasks would have deleted it from the list entirely.
         onClick: () => void window.api
-          .removeTasks([task.id], false)
-          .catch((error) => reportError('Could not remove that file', error))
+          .updateTask(task.id, { groupId: null })
+          .catch((error) => reportError(t('removeFromFileFailed'), error))
       }
     ]
   }
@@ -230,7 +237,7 @@ function GroupContent({ members }: { members: DownloadTask[] }): React.ReactElem
         >
           <span className="flex items-center gap-2 min-w-0">
             <FileIcon name={task.filename} className="w-4 h-4 shrink-0" />
-            <span className="truncate" title={task.filename + '\n' + task.url}>{task.filename}</span>
+            <span className="truncate" title={task.filename + '\n' + displaySource(task.url)}>{task.filename}</span>
           </span>
           <span className="text-right tnum text-faint">{formatBytes(task.size ?? task.expectedSize ?? null)}</span>
           <span className="flex items-center gap-2">

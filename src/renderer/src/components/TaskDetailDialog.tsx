@@ -1,7 +1,10 @@
-import { useEffect, useState } from 'react'
-import type { DownloadTask, Segment } from '@shared/types'
+import { useEffect, useRef, useState } from 'react'
+import type { DownloadTask, Segment, TaskLiveDetail } from '@shared/types'
+import { displaySource } from '@shared/display-source'
 import { formatBytes, formatEta, formatSpeed, formatWhen, percent } from '../lib/format'
+import { useT } from '../i18n'
 import { HISTORY_SAMPLES, speedHistory } from '../lib/history'
+import { recoveryHint } from '@shared/recovery'
 import { categoryName, useApp } from '../store/app'
 import { reportError, toast } from '../store/toasts'
 import Dialog, { GhostButton, PrimaryButton } from './Dialog'
@@ -20,6 +23,54 @@ type TorrentTab = 'general' | 'trackers' | 'peers' | 'sources' | 'content'
  * ones that were split off mid-flight from a connection that was falling behind.
  */
 
+/**
+ * Per-connection and per-peer diagnostics, polled while this dialog is open.
+ *
+ * They are deliberately not on the progress feed - see `TaskProgress` - so this
+ * is the one place that pays for them. Once a second is faster than anyone can
+ * read a peer table and slow enough that a large torrent's panel costs nothing
+ * noticeable; the poll is also what keeps the task marked as watched in main,
+ * which is what makes the runner rebuild the panel at all.
+ */
+const DETAIL_POLL_MS = 1000
+
+/**
+ * Polls for as long as the dialog is open, whatever the task's status.
+ *
+ * Deliberately not gated on the download still running: a finished torrent that
+ * is seeding is `done` and has the liveliest peer table in the app, and it is
+ * one round trip a second for one task either way.
+ */
+function useLiveDetail(id: string): TaskLiveDetail | null {
+  const [detail, setDetail] = useState<TaskLiveDetail | null>(null)
+
+  useEffect(() => {
+    let cancelled = false
+    let timer: ReturnType<typeof setTimeout> | null = null
+
+    const poll = async (): Promise<void> => {
+      try {
+        const next = await window.api.taskDetail(id)
+        if (!cancelled) setDetail(next)
+      } catch {
+        // A task that went away mid-poll is not worth a message; the dialog
+        // closes itself when the row leaves the list.
+      }
+      // Rescheduled after the answer rather than on an interval, so a slow
+      // round trip cannot stack requests on top of each other.
+      if (!cancelled) timer = setTimeout(() => void poll(), DETAIL_POLL_MS)
+    }
+
+    void poll()
+    return () => {
+      cancelled = true
+      if (timer) clearTimeout(timer)
+    }
+  }, [id])
+
+  return detail
+}
+
 export default function TaskDetailDialog({
   id,
   onClose
@@ -27,38 +78,61 @@ export default function TaskDetailDialog({
   id: string
   onClose(): void
 }): React.ReactElement | null {
-  const task = useApp((s) => s.tasks.find((t) => t.id === id))
+  const storedTask = useApp((s) => s.tasks.find((t) => t.id === id))
   const categories = useApp((s) => s.categories)
   const queues = useApp((s) => s.queues)
 
-  const [filename, setFilename] = useState(task?.filename ?? '')
-  const [description, setDescription] = useState(task?.description ?? '')
-  const [queueId, setQueueId] = useState(task?.queueId ?? '')
+  const [filename, setFilename] = useState(storedTask?.filename ?? '')
+  const [description, setDescription] = useState(storedTask?.description ?? '')
+  const [queueId, setQueueId] = useState(storedTask?.queueId ?? '')
+  const previousTask = useRef(storedTask)
+  const t = useT()
   const [torrentTab, setTorrentTab] = useState<TorrentTab>('general')
 
-  if (!task) return null
+  const detail = useLiveDetail(id)
 
-  const running = task.status === 'downloading' || task.status === 'queued'
+  useEffect(() => {
+    if (!storedTask) { onClose(); return }
+    const previous = previousTask.current
+    // A probe can settle the name after this dialog opened. Follow server
+    // changes for untouched fields without discarding the user's own edits.
+    setFilename((current) => current === (previous?.filename ?? '') ? storedTask.filename : current)
+    setDescription((current) => current === (previous?.description ?? '') ? storedTask.description : current)
+    setQueueId((current) => current === (previous?.queueId ?? '') ? storedTask.queueId ?? '' : current)
+    previousTask.current = storedTask
+  }, [storedTask, onClose])
+
+  if (!storedTask) return null
+
+  // The list feed carries everything except the diagnostics; the poll carries
+  // only those. Merged here so the rest of this component reads one object.
+  const task: DownloadTask = detail
+    ? { ...storedTask, segments: detail.segments, torrentInfo: detail.torrentInfo }
+    : storedTask
+
+  const running = task.status === 'downloading' || task.status === 'probing' || task.status === 'queued' ||
+    task.status === 'processing' || task.status === 'scanning'
   const dirty =
     filename !== task.filename || description !== task.description || (queueId || null) !== task.queueId
+  const hint = recoveryHint(task)
 
   async function save(): Promise<void> {
     try {
       await window.api.updateTask(id, {
-        filename: filename.trim(),
-        description,
-        queueId: queueId || null
+        ...(task.kind !== 'torrent' && filename.trim() !== task.filename ? { filename: filename.trim() } : {}),
+        ...(description !== task.description ? { description } : {}),
+        ...((queueId || null) !== task.queueId ? { queueId: queueId || null } : {})
       })
-      toast('success', 'Saved')
+      toast('success', t('saved'))
     } catch (err) {
-      reportError('Could not save', err)
+      reportError(t('saveFailed'), err)
     }
   }
 
   return (
     <Dialog
       title={task.filename}
-      subtitle={task.url}
+      subtitle={displaySource(task.url)}
       width={task.kind === 'torrent' ? 920 : 740}
       onClose={onClose}
       footer={
@@ -66,23 +140,27 @@ export default function TaskDetailDialog({
           <GhostButton
             onClick={() => {
               void window.api.copyToClipboard(task.url)
-              toast('info', 'URL copied')
+              toast('info', t('urlCopied'))
             }}
           >
-            Copy URL
+            {t('copyUrl')}
           </GhostButton>
-          <GhostButton onClick={() => void window.api.revealFile(id)}>Open folder</GhostButton>
+          <GhostButton onClick={() => void window.api.revealFile(id)}>{t('openFolder')}</GhostButton>
           <GhostButton
             onClick={() => {
-              const call = running ? window.api.pauseTasks([id]) : window.api.startTasks([id])
-              void call.catch((err) => reportError('Command failed', err))
+              const call = running
+                ? window.api.pauseTasks([id])
+                : task.status === 'missing'
+                  ? window.api.redownload(id)
+                  : window.api.startTasks([id])
+              void call.catch((err) => reportError(t('commandFailed'), err))
             }}
             disabled={task.status === 'done'}
           >
-            {running ? 'Stop' : 'Resume'}
+            {running ? t('stop') : task.status === 'missing' ? t('redownload') : task.status === 'error' ? t('retry') : t('resume')}
           </GhostButton>
           <PrimaryButton onClick={() => void save()} disabled={!dirty}>
-            Save
+            {t('save')}
           </PrimaryButton>
         </>
       }
@@ -95,11 +173,11 @@ export default function TaskDetailDialog({
         <>
       <div className="mt-5">
         <SectionLabel>
-          Connections
+          {t('connections')}
           <span className="text-faint font-normal normal-case tracking-normal ml-2">
-            {task.segments.filter((s) => s.active).length} of {task.segments.length} active
+            {t('activeOf', { active: task.segments.filter((s) => s.active).length, total: task.segments.length })}
             {' · '}
-            {task.resumable ? 'server supports resume' : 'server does not support resume'}
+            {task.resumable ? t('resumeSupported') : t('resumeNotSupported')}
           </span>
         </SectionLabel>
 
@@ -136,16 +214,18 @@ export default function TaskDetailDialog({
 
       <div className="mt-5 grid grid-cols-2 gap-3">
         <div className="col-span-2">
-          <label className="label">File name</label>
+          <label className="label">{t('fileName')}</label>
           <input
             value={filename}
+            disabled={task.kind === 'torrent'}
             onChange={(event) => setFilename(event.target.value)}
             spellCheck={false}
             className="field text-[12.5px]"
           />
+          {task.kind === 'torrent' && <p className="mt-1.5 text-[11px] text-faint">{t('torrentNameFixed')}</p>}
         </div>
         <div>
-          <label className="label">Queue</label>
+          <label className="label">{t('queue')}</label>
           <select
             value={queueId}
             onChange={(event) => setQueueId(event.target.value)}
@@ -160,19 +240,21 @@ export default function TaskDetailDialog({
           </select>
         </div>
         <div>
-          <label className="label">Description</label>
+          <label className="label">{t('description')}</label>
           <input
             value={description}
             onChange={(event) => setDescription(event.target.value)}
-            placeholder="Optional"
+            placeholder={t('optional')}
             className="field text-[12.5px]"
           />
         </div>
       </div>
 
-      {task.error && (
-        <div className="mt-4 rounded-lg px-3 py-2.5 text-[11.5px] leading-relaxed border border-[rgba(248,113,113,0.25)] bg-[rgba(248,113,113,0.08)] text-err">
-          {task.error}
+      {hint && (
+        <div role="alert" className="mt-4 rounded-lg px-3 py-2.5 text-[11.5px] leading-relaxed border border-[rgba(248,113,113,0.25)] bg-[rgba(248,113,113,0.08)]">
+          <div className="font-semibold text-err">{t('nextStep')}</div>
+          <div className="mt-1">{t(hint)}</div>
+          {task.error && <div className="mt-2 text-faint break-words">{task.error}</div>}
         </div>
       )}
     </Dialog>
@@ -188,27 +270,28 @@ function TorrentDetails({
   tab: TorrentTab
   onTabChange(tab: TorrentTab): void
 }): React.ReactElement {
+  const t = useT()
   const info = task.torrentInfo
   const tabs: Array<{ id: TorrentTab; label: string; icon: React.ReactElement }> = [
-    { id: 'general', label: 'General', icon: <InfoIcon className="w-3.5 h-3.5" /> },
+    { id: 'general', label: t('tabGeneral'), icon: <InfoIcon className="w-3.5 h-3.5" /> },
     {
       id: 'trackers',
-      label: `Trackers${info ? ` (${info.trackers.length})` : ''}`,
+      label: `${t('trackers')}${info ? ` (${info.trackers.length})` : ''}`,
       icon: <TrackerIcon className="w-3.5 h-3.5" />
     },
     {
       id: 'peers',
-      label: `Peers${info ? ` (${info.peers.length})` : ''}`,
+      label: `${t('peers')}${info ? ` (${info.peers.length})` : ''}`,
       icon: <UsersIcon className="w-3.5 h-3.5" />
     },
     {
       id: 'sources',
-      label: `HTTP Sources${info ? ` (${info.sources.length})` : ''}`,
+      label: `${t('tabSources')}${info ? ` (${info.sources.length})` : ''}`,
       icon: <LinkIcon className="w-3.5 h-3.5" />
     },
     {
       id: 'content',
-      label: `Content${info ? ` (${info.files.length})` : ''}`,
+      label: `${t('tabContent')}${info ? ` (${info.files.length})` : ''}`,
       icon: <ListIcon className="w-3.5 h-3.5" />
     }
   ]
@@ -237,7 +320,7 @@ function TorrentDetails({
       <div className="min-h-[245px] max-h-[330px] overflow-auto p-3">
         {!info ? (
           <div className="h-[220px] grid place-items-center text-[12px] text-faint">
-            Torrent details will appear after metadata is received.
+            {t('torrentDetailsPending')}
           </div>
         ) : tab === 'general' ? (
           <TorrentGeneral task={task} />
@@ -264,17 +347,18 @@ function TorrentDetails({
 }
 
 function TorrentGeneral({ task }: { task: DownloadTask }): React.ReactElement {
+  const t = useT()
   const info = task.torrentInfo!
   return (
     <div className="grid grid-cols-3 gap-x-5 gap-y-4 text-[11.5px]">
-      <Fact label="Info hash" value={info.infoHash} wide />
-      <Fact label="Selected size" value={formatBytes(task.size)} />
-      <Fact label="Downloaded" value={formatBytes(task.received)} />
-      <Fact label="Uploaded" value={formatBytes(info.uploaded)} />
-      <Fact label="Share ratio" value={info.ratio.toFixed(2)} />
-      <Fact label="Connected peers" value={String(info.peers.length)} />
-      <Fact label="Trackers" value={String(info.trackers.length)} />
-      <Fact label="HTTP sources" value={String(info.sources.length)} />
+      <Fact label={t('infoHash')} value={info.infoHash} wide />
+      <Fact label={t('selectedSize')} value={formatBytes(task.size)} />
+      <Fact label={t('downloaded')} value={formatBytes(task.received)} />
+      <Fact label={t('uploaded')} value={formatBytes(info.uploaded)} />
+      <Fact label={t('shareRatio')} value={info.ratio.toFixed(2)} />
+      <Fact label={t('connectedPeers')} value={String(info.peers.length)} />
+      <Fact label={t('trackers')} value={String(info.trackers.length)} />
+      <Fact label={t('httpSources')} value={String(info.sources.length)} />
     </div>
   )
 }
@@ -327,7 +411,12 @@ function TorrentPeers({ task }: { task: DownloadTask }): React.ReactElement {
 }
 
 function TorrentContent({ task }: { task: DownloadTask }): React.ReactElement {
-  const files = task.torrentInfo!.files
+  const t = useT()
+  // The wanted-set arrives immediately in tasks:changed; diagnostics are
+  // polled once a second. Reading the old diagnostic flag lost a second click
+  // made before that poll and made successful selections appear to revert.
+  const wanted = task.selectedFiles ? new Set(task.selectedFiles) : null
+  const files = task.torrentInfo!.files.map((file) => ({ ...file, selected: !wanted || wanted.has(file.path) }))
   const [menu, setMenu] = useState<{ at: MenuPosition; path: string } | null>(null)
   /**
    * The row the user has clicked. `file.selected` is a different thing - it is
@@ -340,10 +429,10 @@ function TorrentContent({ task }: { task: DownloadTask }): React.ReactElement {
   const openItem = async (path: string): Promise<void> => {
     try {
       if (!(await window.api.openTorrentItem(task.id, path))) {
-        toast('info', 'That file is not available on disk yet')
+        toast('info', t('fileNotOnDisk'))
       }
     } catch (error) {
-      reportError('Could not open the torrent file', error)
+      reportError(t('openTorrentFileFailed'), error)
     }
   }
 
@@ -353,7 +442,7 @@ function TorrentContent({ task }: { task: DownloadTask }): React.ReactElement {
         toast('info', 'That file is not available on disk yet')
       }
     } catch (error) {
-      reportError('Could not show the torrent file', error)
+      reportError(t('showTorrentFileFailed'), error)
     }
   }
 
@@ -364,13 +453,15 @@ function TorrentContent({ task }: { task: DownloadTask }): React.ReactElement {
    */
   const applySelection = async (next: Set<string>): Promise<void> => {
     if (next.size === 0) {
-      toast('info', 'Keep at least one file - use Remove to drop the whole torrent')
+      toast('info', t('keepOneFileHint'))
       return
     }
     try {
-      await window.api.setTorrentFiles(task.id, [...next])
+      if (!await window.api.setTorrentFiles(task.id, [...next])) {
+        toast('info', t('torrentSelectionFailed'))
+      }
     } catch (error) {
-      reportError('Could not change the torrent selection', error)
+      reportError(t('torrentSelectionFailed'), error)
     }
   }
 
@@ -438,7 +529,7 @@ function TorrentContent({ task }: { task: DownloadTask }): React.ReactElement {
               type="checkbox"
               className="w-3.5 h-3.5 accent-[var(--accent)] cursor-pointer"
               checked={file.selected}
-              title={file.selected ? 'Downloading this file' : 'Skipping this file'}
+              title={file.selected ? t('downloadingFile') : t('skippingFile')}
               onChange={() => toggleFile(file.path)}
               // The row's own click handlers select and open; the box only ever
               // changes what is wanted.
@@ -460,18 +551,18 @@ function TorrentContent({ task }: { task: DownloadTask }): React.ReactElement {
           at={menu.at}
           onClose={() => setMenu(null)}
           items={[
-            { label: 'Open', onClick: () => void openItem(menu.path) },
-            { label: 'Show in Explorer', onClick: () => void revealItem(menu.path) },
+            { label: t('open'), onClick: () => void openItem(menu.path) },
+            { label: t('showInExplorer'), onClick: () => void revealItem(menu.path) },
             {},
             {
               label: files.find((file) => file.path === menu.path)?.selected
-                ? 'Skip this file'
-                : 'Download this file',
+                ? t('skipFile')
+                : t('downloadFile'),
               onClick: () => toggleFile(menu.path)
             },
             {},
             {
-              label: 'Copy relative path',
+              label: t('copyRelativePath'),
               onClick: () => void window.api.copyToClipboard(menu.path)
             }
           ]}
@@ -496,6 +587,7 @@ function Overview({
   task: DownloadTask
   categoryLabel: string
 }): React.ReactElement {
+  const t = useT()
   const done = task.size ? percent(task.received, task.size) : null
 
   return (
@@ -521,12 +613,12 @@ function Overview({
       <ProgressBar percent={done} status={task.status} height={8} />
 
       <div className="mt-3 grid grid-cols-4 gap-3 text-[11.5px]">
-        <Fact label="Status" value={task.status} />
-        <Fact label="Connections" value={String(task.connections)} />
-        <Fact label="Category" value={categoryLabel || '—'} />
-        <Fact label="Added" value={formatWhen(task.createdAt)} />
-        <Fact label="Saved in" value={task.dir} wide />
-        <Fact label="Server" value={task.finalUrl || task.url} wide />
+        <Fact label={t('status')} value={task.status} />
+        <Fact label={t('connections')} value={String(task.connections)} />
+        <Fact label={t('category')} value={categoryLabel || '—'} />
+        <Fact label={t('added')} value={formatWhen(task.createdAt)} />
+        <Fact label={t('savedIn')} value={task.dir} wide />
+        <Fact label={t('server')} value={displaySource(task.finalUrl || task.url)} wide />
       </div>
     </div>
   )
@@ -594,6 +686,7 @@ function SegmentRow({
   segment: Segment
   status: DownloadTask['status']
 }): React.ReactElement {
+  const t = useT()
   const end = segment.end
   const span = end < 0 ? null : end - segment.start + 1
   const written = segment.position - segment.start
@@ -613,9 +706,9 @@ function SegmentRow({
 
       <span
         className="tnum text-faint w-[150px] text-right shrink-0"
-        title={end < 0 ? 'This connection is fetching a playlist piece' : 'Byte range'}
+        title={end < 0 ? t('streamingSegmentTitle') : t('byteRangeTitle')}
       >
-        {end < 0 ? 'streaming' : `${formatBytes(segment.start)} – ${formatBytes(end)}`}
+        {end < 0 ? t('streaming') : `${formatBytes(segment.start)} – ${formatBytes(end)}`}
       </span>
       <span className="tnum w-[74px] text-right shrink-0">{formatBytes(written)}</span>
     </div>

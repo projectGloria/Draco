@@ -1,20 +1,18 @@
 import { randomUUID } from 'node:crypto'
-import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
-import { dirname } from 'node:path'
 import { safeStorage } from 'electron'
 import type { Credentials } from './engine/auth.ts'
 import type { SiteCredential } from '@shared/types'
 import { getPaths } from './bootstrap/paths.ts'
 import { logger } from './log.ts'
+import { readJsonOrThrowIfPresent, writeJsonAtomic } from './json-file.ts'
 
 const log = logger('credentials')
 
 /**
  * Passwords for sites that ask for one.
  *
- * Kept apart from `store.ts` for a reason that is not tidiness: everything in
- * that store is plain JSON the user can read and edit, and a password must not
- * be. Each secret is sealed with `safeStorage`, which on Windows is DPAPI keyed
+ * Kept apart from the task and settings stores. Each secret is sealed with
+ * `safeStorage`, which on Windows is DPAPI keyed
  * to the logged-in account - so the file is useless if it is copied off the
  * machine, and Draco itself never holds a decrypted password longer than the
  * request it is answering.
@@ -43,6 +41,13 @@ const FILE_VERSION = 1
 
 let entries: StoredCredential[] = []
 let loaded = false
+let mutations: Promise<unknown> = Promise.resolve()
+
+function changeCredentials<T>(change: () => Promise<T>): Promise<T> {
+  const result = mutations.then(change)
+  mutations = result.catch(() => {})
+  return result
+}
 
 function filePath(): string {
   return getPaths().credentialsFile
@@ -54,49 +59,38 @@ export function hostOf(value: string): string | null {
     // Accept a bare hostname as well as a URL - the Options list is a place
     // where typing "files.example.com" is the obvious thing to do.
     const url = /^[a-z][a-z0-9+.-]*:\/\//i.test(value) ? new URL(value) : new URL(`https://${value}`)
-    return url.hostname.toLowerCase() || null
+    if (url.protocol !== 'http:' && url.protocol !== 'https:') return null
+    return url.host.toLowerCase() || null
   } catch {
     return null
   }
 }
 
 export async function loadCredentials(): Promise<void> {
-  loaded = true
-  try {
-    const parsed = JSON.parse(await readFile(filePath(), 'utf8')) as CredentialFile
-    if (parsed?.version !== FILE_VERSION || !Array.isArray(parsed.entries)) {
-      entries = []
-      return
-    }
-    entries = parsed.entries.filter(
-      (entry): entry is StoredCredential =>
+  loaded = false
+  const parsed = await readJsonOrThrowIfPresent<CredentialFile>(filePath())
+  if (parsed === null) {
+    entries = []
+    loaded = true
+    return
+  }
+  if (parsed.version !== FILE_VERSION || !Array.isArray(parsed.entries) || !parsed.entries.every(
+      (entry) =>
         typeof entry?.id === 'string' &&
         typeof entry.host === 'string' &&
         typeof entry.username === 'string' &&
         typeof entry.secret === 'string'
-    )
-    log.info(`${entries.length} saved site credential(s)`)
-  } catch {
-    // No file yet, or one that cannot be read. Either way there is nothing to
-    // recover and startup must not stop for it.
-    entries = []
+  )) {
+    throw new Error('Could not read saved state: saved site credentials have an invalid format')
   }
+  entries = parsed.entries.map((entry) => ({ ...entry, realm: typeof entry.realm === 'string' ? entry.realm : '' }))
+  loaded = true
+  log.info(`${entries.length} saved site credential(s)`)
 }
 
-async function persist(): Promise<void> {
-  const path = filePath()
-  await mkdir(dirname(path), { recursive: true })
-  // Temp-and-rename, the same discipline as the journal and the store: a crash
-  // mid-write must not leave a file that loses every other saved password.
-  const tmp = `${path}.${randomUUID()}.tmp`
-  const body: CredentialFile = { version: FILE_VERSION, entries }
-  try {
-    await writeFile(tmp, JSON.stringify(body), 'utf8')
-    await rename(tmp, path)
-  } catch (error) {
-    await rm(tmp, { force: true }).catch(() => {})
-    throw error
-  }
+async function persist(nextEntries: StoredCredential[]): Promise<void> {
+  const body: CredentialFile = { version: FILE_VERSION, entries: nextEntries }
+  await writeJsonAtomic(filePath(), body)
 }
 
 /** What the renderer is allowed to see: everything except the password. */
@@ -104,7 +98,7 @@ export function listCredentials(): SiteCredential[] {
   return entries.map((entry) => ({
     id: entry.id,
     host: entry.host,
-    realm: entry.realm,
+    realm: entry.realm ?? '',
     username: entry.username,
     createdAt: entry.createdAt
   }))
@@ -131,26 +125,31 @@ export async function saveCredential(input: {
 
   // One entry per host and realm: saving again is correcting a password, not
   // collecting another one that will silently never be tried.
-  const existing = entries.find((entry) => entry.host === host && entry.realm === realm)
-  const entry: StoredCredential = existing
-    ? { ...existing, username, secret }
-    : { id: randomUUID(), host, realm, username, secret, createdAt: Date.now() }
-
-  entries = existing
-    ? entries.map((row) => (row.id === existing.id ? entry : row))
-    : [...entries, entry]
-  await persist()
-  log.info(`saved credentials for ${host}${realm ? ` (${realm})` : ''}`)
-
-  return { id: entry.id, host, realm, username, createdAt: entry.createdAt }
+  return changeCredentials(async () => {
+    if (!loaded) await loadCredentials()
+    const existing = entries.find((entry) => entry.host === host && entry.realm === realm)
+    const entry: StoredCredential = existing
+      ? { ...existing, username, secret }
+      : { id: randomUUID(), host, realm, username, secret, createdAt: Date.now() }
+    const nextEntries = existing
+      ? entries.map((row) => (row.id === existing.id ? entry : row))
+      : [...entries, entry]
+    await persist(nextEntries)
+    entries = nextEntries
+    log.info(`saved credentials for ${host}${realm ? ` (${realm})` : ''}`)
+    return { id: entry.id, host, realm, username, createdAt: entry.createdAt }
+  })
 }
 
 export async function removeCredential(id: string): Promise<boolean> {
-  const before = entries.length
-  entries = entries.filter((entry) => entry.id !== id)
-  if (entries.length === before) return false
-  await persist()
-  return true
+  return changeCredentials(async () => {
+    if (!loaded) await loadCredentials()
+    const nextEntries = entries.filter((entry) => entry.id !== id)
+    if (nextEntries.length === entries.length) return false
+    await persist(nextEntries)
+    entries = nextEntries
+    return true
+  })
 }
 
 /**

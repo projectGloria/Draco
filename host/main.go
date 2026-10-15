@@ -27,15 +27,19 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
+	"unsafe"
 )
 
 const (
 	pipePath = `\\.\pipe\draco`
 
-	// Chrome's own limit on a single native message.
+	// Chrome's own limit on a single native message. This also caps frames on
+	// the pipe to the app, which accepts up to the same size - the 1MB ceiling
+	// applies only to what this host writes back to Chrome.
 	maxFrame = 64 * 1024 * 1024
 	// Chrome limits native messages sent *to* the extension to 1MB.
 	maxWriteFrame = 1024 * 1024
@@ -90,7 +94,7 @@ func main() {
 		allowLaunch := shouldLaunchForMessage(msg)
 		if err := conn.write(msg, allowLaunch); err != nil {
 			logf("relay failed: %v", err)
-			if err := writeFrame(os.Stdout, errorReply(err)); err != nil {
+			if err := writeFrame(os.Stdout, errorReply(err), maxWriteFrame); err != nil {
 				logf("failed to write relay error to stdout: %v", err)
 				return
 			}
@@ -100,14 +104,14 @@ func main() {
 		reply, err := conn.read()
 		if err != nil {
 			logf("failed to read from pipe: %v", err)
-			if err := writeFrame(os.Stdout, errorReply(err)); err != nil {
+			if err := writeFrame(os.Stdout, errorReply(err), maxWriteFrame); err != nil {
 				logf("failed to write pipe error to stdout: %v", err)
 				return
 			}
 			continue
 		}
 
-		if err := writeFrame(os.Stdout, reply); err != nil {
+		if err := writeFrame(os.Stdout, reply, maxWriteFrame); err != nil {
 			logf("failed to write to stdout: %v", err)
 			os.Exit(1)
 		}
@@ -136,8 +140,8 @@ func readFrame(r io.Reader) ([]byte, error) {
 	return body, nil
 }
 
-func writeFrame(w io.Writer, body []byte) error {
-	if uint64(len(body)) > uint64(maxWriteFrame) {
+func writeFrame(w io.Writer, body []byte, limit uint64) error {
+	if uint64(len(body)) > limit {
 		return fmt.Errorf("frame of %d bytes exceeds the limit", len(body))
 	}
 	var header [4]byte
@@ -199,7 +203,7 @@ func shouldLaunchForMessage(body []byte) bool {
 	// cold-started the download manager. Priming is an optimisation for an app
 	// that is already running; when it is not, the "youtube" message that a
 	// real button press sends starts it.
-	case "download", "downloadBatch", "media", "youtube":
+	case "download", "downloadBatch", "media", "youtube", "handoffStatus", "handoffCancel":
 		return true
 	default:
 		return false
@@ -250,7 +254,7 @@ func (c *connection) write(msg []byte, allowLaunch bool) error {
 		return err
 	}
 
-	err = writeFrame(p, msg)
+	err = writeFrame(p, msg, maxFrame)
 	if err != nil {
 		c.close()
 	}
@@ -263,28 +267,185 @@ func (c *connection) read() ([]byte, error) {
 		return nil, err
 	}
 
+	type readResult struct {
+		body []byte
+		err  error
+	}
+
 	// Bounded. A yt-dlp extraction can legitimately take tens of seconds, so the
 	// ceiling is generous - but an app that accepted a frame and never answered
 	// used to block this host forever, and Chrome's port with it.
-	_ = p.SetReadDeadline(time.Now().Add(replyBudget))
-	reply, err := readFrame(p)
-	// The connection is reused for later messages, so the deadline has to come
-	// off again or the next read inherits an instant expiry.
-	_ = p.SetReadDeadline(time.Time{})
-	if err != nil {
+	// On Windows, SetReadDeadline is not supported on synchronous named pipe files,
+	// so we read in a goroutine and close the pipe on timeout to unblock it.
+	ch := make(chan readResult, 1)
+	go func() {
+		reply, rErr := readFrame(p)
+		ch <- readResult{body: reply, err: rErr}
+	}()
+
+	select {
+	case res := <-ch:
+		if res.err != nil {
+			c.close()
+		}
+		return res.body, res.err
+	case <-time.After(replyBudget):
 		c.close()
+		return nil, errors.New("timeout waiting for reply from Draco")
 	}
-	return reply, err
 }
 
-// dial opens the named pipe.
+// dial opens the named pipe, proves the process serving it is Draco, and
+// authenticates with the install's pipe secret.
+//
+// The pipe name is well known and Windows' default pipe DACL is not actually
+// user-scoped, so another local user can pre-create the name ("squatting") and
+// harvest every frame the host sends. Two checks prevent that: the server
+// process's image must be the configured app executable, and the first frame
+// sent must be the shared secret the app wrote for this install. The app, for
+// its part, drops any socket whose first frame is not that secret.
 func (c *connection) dialLocked() error {
-	pipe, err := os.OpenFile(pipePath, os.O_RDWR, 0)
+	pipe, err := os.OpenFile(bridgePipePath(), os.O_RDWR, 0)
 	if err != nil {
 		return err
 	}
+
+	expected, expectErr := expectedAppPath()
+	if err := verifyPipeServer(pipe, expected); err != nil {
+		pipe.Close()
+		logf("pipe server verification failed: %v", err)
+		return err
+	} else if expectErr != nil {
+		// Without a known app path there is nothing to compare the server image
+		// against. The secret still guards the channel, so continue rather than
+		// break the portable fallback.
+		logf("could not determine the expected app path; skipped server image check: %v", expectErr)
+	}
+
+	if err := greetPipe(pipe); err != nil {
+		pipe.Close()
+		logf("pipe authentication failed: %v", err)
+		return err
+	}
+
 	c.pipe = pipe
 	return nil
+}
+
+// Smoke runs inherit an isolated pipe name from the test harness. A malformed
+// override must never silently connect a diagnostic host to the user's app.
+func bridgePipePath() string {
+	value := os.Getenv("DRACO_SMOKE_PIPE")
+	if value == "" {
+		return pipePath
+	}
+	const prefix = `\\.\pipe\draco-smoke-`
+	suffix := strings.TrimPrefix(value, prefix)
+	if suffix == value || len(suffix) < 8 || len(suffix) > 64 {
+		return ""
+	}
+	for _, char := range suffix {
+		if !((char >= 'a' && char <= 'z') || (char >= '0' && char <= '9') || char == '-') {
+			return ""
+		}
+	}
+	return value
+}
+
+var (
+	kernel32                        = syscall.NewLazyDLL("kernel32.dll")
+	procGetNamedPipeServerProcessId = kernel32.NewProc("GetNamedPipeServerProcessId")
+	procOpenProcess                 = kernel32.NewProc("OpenProcess")
+	procQueryFullProcessImageNameW  = kernel32.NewProc("QueryFullProcessImageNameW")
+	procCloseHandle                 = kernel32.NewProc("CloseHandle")
+)
+
+const processQueryLimitedInformation = 0x1000
+
+// verifyPipeServer refuses to talk to a pipe whose server process is not the
+// app executable. Same-user impostors are out of scope (they could do anything
+// already); this stops a different local user - or any unrelated process -
+// from impersonating Draco and collecting the browser's frames.
+func verifyPipeServer(pipe *os.File, expectedPath string) error {
+	if expectedPath == "" {
+		return nil
+	}
+
+	handle := syscall.Handle(pipe.Fd())
+	var pid uint32
+	r1, _, callErr := procGetNamedPipeServerProcessId.Call(uintptr(handle), uintptr(unsafe.Pointer(&pid)))
+	if r1 == 0 {
+		return fmt.Errorf("could not query the pipe server process: %v", callErr)
+	}
+
+	proc, _, callErr := procOpenProcess.Call(processQueryLimitedInformation, 0, uintptr(pid))
+	if proc == 0 {
+		return fmt.Errorf("could not open the pipe server process %d: %v", pid, callErr)
+	}
+	defer procCloseHandle.Call(proc)
+
+	buf := make([]uint16, 1024)
+	size := uint32(len(buf))
+	r1, _, callErr = procQueryFullProcessImageNameW.Call(proc, 0, uintptr(unsafe.Pointer(&buf[0])), uintptr(unsafe.Pointer(&size)))
+	if r1 == 0 {
+		return fmt.Errorf("could not read the pipe server image name: %v", callErr)
+	}
+
+	image := syscall.UTF16ToString(buf[:size])
+	cleanImage := filepath.Clean(image)
+	cleanExpected := filepath.Clean(expectedPath)
+	if strings.EqualFold(cleanImage, cleanExpected) {
+		return nil
+	}
+	if evalImage, err := filepath.EvalSymlinks(cleanImage); err == nil {
+		if evalExpected, err := filepath.EvalSymlinks(cleanExpected); err == nil {
+			if strings.EqualFold(evalImage, evalExpected) {
+				return nil
+			}
+		}
+	}
+	return fmt.Errorf("pipe is served by %q, not the app", image)
+}
+
+// expectedAppPath is the executable the app recorded for itself, or the
+// packaged-layout sibling when no config exists.
+func expectedAppPath() (string, error) {
+	if cfg, err := appConfig(); err == nil {
+		return cfg.AppPath, nil
+	}
+	return appPath()
+}
+
+// greetPipe sends the install's secret as the first frame. The app drops any
+// socket that does not produce it within a few seconds of connecting.
+func greetPipe(pipe *os.File) error {
+	secret, err := pipeSecret()
+	if err != nil {
+		return err
+	}
+	hello, err := json.Marshal(map[string]any{"v": 1, "secret": secret})
+	if err != nil {
+		return err
+	}
+	return writeFrame(pipe, hello, maxFrame)
+}
+
+// pipeSecret reads the per-install secret the app persists under its user
+// profile, which only that user's processes can read.
+func pipeSecret() (string, error) {
+	dir, err := os.UserConfigDir()
+	if err != nil {
+		return "", err
+	}
+	raw, err := os.ReadFile(filepath.Join(dir, "Draco", "pipe-secret"))
+	if err != nil {
+		return "", fmt.Errorf("could not read the pipe secret: %w", err)
+	}
+	secret := strings.TrimSpace(string(raw))
+	if secret == "" {
+		return "", errors.New("the pipe secret is empty")
+	}
+	return secret, nil
 }
 
 // launchAndDial retries the pipe after starting Draco.

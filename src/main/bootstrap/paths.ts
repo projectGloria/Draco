@@ -20,6 +20,7 @@ export interface AppPaths {
   /** Streams the extension spotted, kept between runs so the panel survives a restart. */
   mediaFile: string
   clipboardFile: string
+  browserHandoffsFile: string
   siteProjectsFile: string
   /** Empty stand-in files the shell is asked for a file-type icon against. */
   iconCache: string
@@ -27,6 +28,8 @@ export interface AppPaths {
   torrents: string
   ffmpegExe: string
   ytDlpExe: string
+  bundledFfmpegExe: string
+  bundledYtDlpExe: string
   defaultDownloadDir: string
   /** The folder the user points chrome://extensions -> Load unpacked at. */
   extensionDir: string
@@ -78,11 +81,14 @@ export function getPaths(): AppPaths {
     quotaFile: join(root, 'quota.json'),
     mediaFile: join(root, 'media.json'),
     clipboardFile: join(root, 'clipboard.json'),
+    browserHandoffsFile: join(root, 'browser-handoffs.json'),
     siteProjectsFile: join(root, 'site-projects.json'),
     iconCache: join(root, 'icon-cache'),
     torrents: join(root, 'torrents'),
     ffmpegExe: join(bin, 'ffmpeg.exe'),
     ytDlpExe: join(bin, 'yt-dlp.exe'),
+    bundledFfmpegExe: join(resourceRoot, app.isPackaged ? 'runtime' : 'resources/runtime', 'ffmpeg.exe'),
+    bundledYtDlpExe: join(resourceRoot, app.isPackaged ? 'runtime' : 'resources/runtime', 'yt-dlp.exe'),
     defaultDownloadDir: join(app.getPath('downloads'), 'Draco'),
     extensionDir: join(resourceRoot, 'extension'),
     firefoxExtensionDir: join(resourceRoot, 'extension-firefox'),

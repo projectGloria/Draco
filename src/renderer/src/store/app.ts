@@ -7,9 +7,11 @@ import type {
   DownloadTask,
   IntegrationStatus,
   PendingAction,
+  PlaylistProgress,
   Queue,
   Settings,
-  SortDirection
+  SortDirection,
+  TaskProgress
 } from '@shared/types'
 import { pruneHistory, recordSpeed } from '../lib/history'
 import { reportError } from './toasts'
@@ -21,7 +23,8 @@ import { reportError } from './toasts'
  */
 
 /**
- * `all` | `unfinished` | `finished` | `grabber` | `cat:<id>` | `queue:<id>`.
+ * `all` | `active` | `queued` | `attention` | `unfinished` |
+ * `finished` | `grabber` | `cat:<id>` | `queue:<id>`.
  * Kept as a string because it round-trips through settings.json.
  */
 export type SidebarKey = string
@@ -38,6 +41,7 @@ function provisionalSettings(): Settings {
     theme: 'dark',
     downloadDir: '',
     checkDiskSpace: true,
+    completionSound: true,
     showDropzone: false,
     catMode: false,
     maxConcurrentTasks: 3,
@@ -95,6 +99,8 @@ function provisionalSettings(): Settings {
 
 interface AppState {
   ready: boolean
+  initializing: boolean
+  initError: string | null
   tasks: DownloadTask[]
   clipboardItems: ClipboardItem[]
   /** Changes only when task membership or non-progress metadata changes. */
@@ -104,19 +110,26 @@ interface AppState {
   settings: Settings
   integration: IntegrationStatus | null
   pending: PendingAction | null
+  /**
+   * Playlist expansions still resolving, by group id. Each entry is a separate
+   * yt-dlp lookup, so a long listing takes minutes and needs to say so.
+   */
+  playlists: Record<string, PlaylistProgress>
   /** Task ids, in click order; the last one anchors shift-select. */
   selection: string[]
   sidebar: SidebarKey
 
   init(): Promise<void>
   refreshIntegration(): Promise<void>
+  saveCategories(categories: Category[]): Promise<boolean>
 
   setSidebar(key: SidebarKey): void
   setSelection(ids: string[]): void
   clickRow(id: string, modifiers: { ctrl: boolean; shift: boolean }, visible: DownloadTask[]): void
   selectAll(visible: DownloadTask[]): void
 
-  patchSettings(patch: Partial<Settings>): Promise<void>
+  /** True only after the settings write commits successfully. */
+  patchSettings(patch: Partial<Settings>): Promise<boolean>
   setColumnWidth(id: ColumnId, width: number): void
   toggleColumn(id: ColumnId): void
   setSort(column: ColumnId): void
@@ -133,22 +146,60 @@ let settingsWriteTimer: ReturnType<typeof setTimeout> | null = null
  * inside the same 400 ms lost the width.
  */
 let settingsWritePatch: Partial<Settings> = {}
+let settingsWriteTail: Promise<void> = Promise.resolve()
+let settingsEditVersion = 0
+let committedSettings: Settings | null = null
 
 function persistSoon(patch: Partial<Settings>): void {
+  settingsEditVersion++
   settingsWritePatch = { ...settingsWritePatch, ...patch }
   if (settingsWriteTimer) clearTimeout(settingsWriteTimer)
   settingsWriteTimer = setTimeout(() => {
     settingsWriteTimer = null
     const pending = settingsWritePatch
     settingsWritePatch = {}
-    void window.api.saveSettings(pending).catch(() => {})
+    // A later immediate edit can change columns while this timer waits.
+    const current = useApp.getState().settings
+    if (pending.columns) pending.columns = current.columns
+    if (pending.sortColumn) {
+      pending.sortColumn = current.sortColumn
+      pending.sortDirection = current.sortDirection
+    }
+    void useApp.getState().patchSettings(pending)
   }, 400)
 }
 
+/**
+ * Whether a progress update changes anything the list actually draws.
+ *
+ * Every field of `TaskProgress` is compared, because every one of them is
+ * rendered somewhere - the row, the status bar totals, or the group summary.
+ * The point is not to guess which matter but to notice the very common case
+ * where none of them moved.
+ */
+function progressDiffers(task: DownloadTask, update: TaskProgress): boolean {
+  return (
+    task.received !== update.received ||
+    task.size !== update.size ||
+    task.speed !== update.speed ||
+    task.eta !== update.eta ||
+    task.status !== update.status ||
+    task.error !== update.error ||
+    task.detail !== update.detail
+  )
+}
+
 let initialized = false
+let initPromise: Promise<void> | null = null
+let taskEventVersion = 0
+let queueEventVersion = 0
+let clipboardEventVersion = 0
+const startupProgress = new Map<string, TaskProgress>()
 
 export const useApp = create<AppState>((set, get) => ({
   ready: false,
+  initializing: false,
+  initError: null,
   tasks: [],
   clipboardItems: [],
   taskListVersion: 0,
@@ -157,69 +208,125 @@ export const useApp = create<AppState>((set, get) => ({
   settings: provisionalSettings(),
   integration: null,
   pending: null,
+  playlists: {},
   selection: [],
   sidebar: 'all',
 
   async init() {
-    if (initialized) return
-    initialized = true
+    if (get().ready) return
+    if (initPromise) return initPromise
+    set({ initializing: true, initError: null })
 
-    // Subscribe before the first read, so an event that lands between the two
-    // is not dropped on the floor.
-    window.api.onTasksChanged((tasks) => {
-      const live = new Set(tasks.map((t) => t.id))
-      pruneHistory(live)
-      set((state) => ({
-        tasks,
-        taskListVersion: state.taskListVersion + 1,
-        selection: state.selection.filter((id) => live.has(id))
-      }))
-    })
+    // Keep subscriptions across retries; subscribing again would apply each
+    // event twice and make task-list versions and selection unreliable.
+    if (!initialized) {
+      initialized = true
+      window.api.onTasksChanged((tasks) => {
+        taskEventVersion++
+        startupProgress.clear()
+        const live = new Set(tasks.map((t) => t.id))
+        pruneHistory(live)
+        set((state) => ({
+          tasks,
+          taskListVersion: state.taskListVersion + 1,
+          selection: state.selection.filter((id) => live.has(id))
+        }))
+      })
 
-    window.api.onProgress((updates) => {
-      set((state) => {
-        const byId = new Map(updates.map((u) => [u.id, u]))
-        for (const update of updates) recordSpeed(update.id, update.speed)
-
-        return {
-          tasks: state.tasks.map((task) => {
-            const update = byId.get(task.id)
-            return update ? { ...task, ...update } : task
-          })
+      window.api.onProgress((updates) => {
+        if (!get().ready) {
+          for (const update of updates) startupProgress.set(update.id, update)
         }
+        set((state) => {
+          const byId = new Map(updates.map((u) => [u.id, u]))
+
+          // Rebuilding the array unconditionally invalidated every downstream
+          // memo four times a second - the row order, the group summaries, the
+          // sidebar counts - even on a tick where nothing drawn had moved. A
+          // paused list, or one whose only running task is a torrent between
+          // pieces, now costs nothing at all.
+          let changed = false
+          const tasks = state.tasks.map((task) => {
+            const update = byId.get(task.id)
+            if (update) recordSpeed(update.id, update.speed)
+            if (!update || !progressDiffers(task, update)) return task
+            changed = true
+            return { ...task, ...update }
+          })
+
+          return changed ? { tasks } : {}
+        })
       })
-    })
 
-    window.api.onQueuesChanged((queues) => set({ queues }))
-    window.api.onPendingAction((pending) => set({ pending }))
-    window.api.onClipboardItemsChanged((clipboardItems) => set({ clipboardItems }))
-
-    try {
-      const [settings, tasks, categories, queues, clipboardItems] = await Promise.all([
-        window.api.getSettings(),
-        window.api.listTasks(),
-        window.api.listCategories(),
-        window.api.listQueues(),
-        window.api.listClipboardItems()
-      ])
-
-      applyAccent(settings.accent)
-      set({
-        settings,
-        tasks,
-        taskListVersion: 1,
-        categories,
-        queues,
-        clipboardItems,
-        sidebar: settings.sidebarSelection || 'all',
-        ready: true
+      // `total: 0` is the end of an expansion, however it ended - finished,
+      // failed, or called off - so the line comes down rather than sticking.
+      window.api.onPlaylistProgress((progress) => {
+        set((state) => {
+          const next = { ...state.playlists }
+          if (progress.total === 0) delete next[progress.groupId]
+          else next[progress.groupId] = progress
+          return { playlists: next }
+        })
       })
-    } catch (err) {
-      reportError('Could not load the download list', err)
-      set({ ready: true })
+
+      window.api.onQueuesChanged((queues) => {
+        queueEventVersion++
+        set({ queues })
+      })
+      window.api.onPendingAction((pending) => set({ pending }))
+      window.api.onClipboardItemsChanged((clipboardItems) => {
+        clipboardEventVersion++
+        set({ clipboardItems })
+      })
     }
 
-    void get().refreshIntegration()
+    const taskVersionAtRead = taskEventVersion
+    const queueVersionAtRead = queueEventVersion
+    const clipboardVersionAtRead = clipboardEventVersion
+    initPromise = (async () => {
+      try {
+        const [settings, tasks, categories, queues, clipboardItems] = await Promise.all([
+          window.api.getSettings(),
+          window.api.listTasks(),
+          window.api.listCategories(),
+          window.api.listQueues(),
+          window.api.listClipboardItems()
+        ])
+
+        committedSettings = settings
+        applyAccent(settings.accent)
+        set((state) => ({
+          settings,
+          tasks: taskEventVersion === taskVersionAtRead
+            ? tasks.map((task) => {
+                const progress = startupProgress.get(task.id)
+                return progress ? { ...task, ...progress } : task
+              })
+            : state.tasks,
+          taskListVersion: taskEventVersion === taskVersionAtRead
+            ? state.taskListVersion + 1 : state.taskListVersion,
+          categories,
+          queues: queueEventVersion === queueVersionAtRead ? queues : state.queues,
+          clipboardItems: clipboardEventVersion === clipboardVersionAtRead
+            ? clipboardItems : state.clipboardItems,
+          sidebar: settings.sidebarSelection || 'all',
+          ready: true,
+          initError: null
+        }))
+        startupProgress.clear()
+        void get().refreshIntegration()
+      } catch (err) {
+        set({
+          ready: false,
+          initError: err instanceof Error ? err.message : String(err)
+        })
+      } finally {
+        set({ initializing: false })
+        initPromise = null
+      }
+    })()
+
+    return initPromise
   },
 
   async refreshIntegration() {
@@ -229,6 +336,23 @@ export const useApp = create<AppState>((set, get) => ({
       // The Options dialog shows "unknown" rather than an error card; a browser
       // link that is not wired up yet is a normal state, not a failure.
       set({ integration: null })
+    }
+  },
+
+  async saveCategories(categories) {
+    try {
+      // Categories have no broadcast feed. Use the sanitized committed reply
+      // so the sidebar and every destination picker reflect this save at once.
+      const saved = await window.api.saveCategories(categories)
+      set({ categories: saved })
+      const sidebar = get().sidebar
+      if (sidebar.startsWith('cat:') && !saved.some((category) => `cat:${category.id}` === sidebar)) {
+        get().setSidebar('all')
+      }
+      return true
+    } catch (err) {
+      reportError('Could not save categories', err)
+      return false
     }
   },
 
@@ -275,15 +399,27 @@ export const useApp = create<AppState>((set, get) => ({
 
   async patchSettings(patch) {
     // Applied locally first so the UI never lags a checkbox behind a disk write.
+    const editVersion = ++settingsEditVersion
     set((state) => ({ settings: { ...state.settings, ...patch } }))
     if (patch.accent) applyAccent(patch.accent)
 
+    const operation = settingsWriteTail.then(() => window.api.saveSettings(patch))
+    settingsWriteTail = operation.then(() => {}, () => {})
     try {
-      const saved = await window.api.saveSettings(patch)
-      applyAccent(saved.accent)
-      set({ settings: saved })
+      const saved = await operation
+      committedSettings = saved
+      if (editVersion === settingsEditVersion) {
+        applyAccent(saved.accent)
+        set({ settings: saved })
+      }
+      return true
     } catch (err) {
+      if (editVersion === settingsEditVersion && committedSettings) {
+        applyAccent(committedSettings.accent)
+        set({ settings: committedSettings })
+      }
       reportError('Could not save settings', err)
+      return false
     }
   },
 
@@ -350,21 +486,18 @@ function hexToRgb(hex: string): { r: number; g: number; b: number } | null {
 
 export function filterTasks(
   tasks: DownloadTask[],
-  sidebar: SidebarKey,
-  search: string
+  sidebar: SidebarKey
 ): DownloadTask[] {
-  const needle = search.trim().toLowerCase()
 
   return tasks.filter((task) => {
+    if (sidebar === 'active' && !['probing', 'downloading', 'processing', 'scanning'].includes(task.status)) return false
+    if (sidebar === 'queued' && task.status !== 'queued') return false
+    if (sidebar === 'attention' && task.status !== 'error' && task.status !== 'missing') return false
     if (sidebar === 'unfinished' && task.status === 'done') return false
     if (sidebar === 'finished' && task.status !== 'done') return false
     if (sidebar.startsWith('cat:') && task.categoryId !== sidebar.slice(4)) return false
     if (sidebar.startsWith('queue:') && task.queueId !== sidebar.slice(6)) return false
 
-    if (needle) {
-      const haystack = task.filename + ' ' + task.url + ' ' + task.description
-      if (!haystack.toLowerCase().includes(needle)) return false
-    }
     return true
   })
 }
@@ -372,13 +505,19 @@ export function filterTasks(
 /** Ordering used by the status column, so "downloading" sorts above "done". */
 const STATUS_RANK: Record<DownloadTask['status'], number> = {
   downloading: 0,
-  probing: 1,
-  queued: 2,
-  paused: 3,
-  error: 4,
-  missing: 5,
-  done: 6
+  processing: 1,
+  scanning: 2,
+  probing: 3,
+  queued: 4,
+  paused: 5,
+  error: 6,
+  missing: 7,
+  done: 8
 }
+
+// Reusing the collator avoids rebuilding locale/numeric comparison state for
+// every pair in a name sort. A 1,000-row sort invokes this thousands of times.
+const NAME_COLLATOR = new Intl.Collator(undefined, { numeric: true })
 
 export function sortTasks(
   tasks: DownloadTask[],
@@ -388,6 +527,11 @@ export function sortTasks(
   const sign = direction === 'asc' ? 1 : -1
 
   return [...tasks].sort((a, b) => {
+    // Missing values are not a duration and stay below known ETAs even when
+    // the user asks to see the longest remaining downloads first.
+    if (column === 'eta' && (a.eta === null || b.eta === null)) {
+      if (a.eta !== b.eta) return a.eta === null ? 1 : -1
+    }
     const result = compare(a, b, column)
     // A stable tiebreak on creation time keeps rows from swapping places on
     // every progress tick when their sort key is equal.
@@ -398,7 +542,7 @@ export function sortTasks(
 function compare(a: DownloadTask, b: DownloadTask, column: ColumnId): number {
   switch (column) {
     case 'name':
-      return a.filename.localeCompare(b.filename, undefined, { numeric: true })
+      return NAME_COLLATOR.compare(a.filename, b.filename)
     case 'size':
       return (a.size ?? -1) - (b.size ?? -1)
     case 'progress':

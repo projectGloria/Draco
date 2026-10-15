@@ -10,7 +10,10 @@ export function normalizeDownloadDirectory(value: string): string {
   if (/^[a-z]:$/i.test(input)) input += '\\'
 
   const normalized = win32.normalize(input)
-  if (!win32.isAbsolute(normalized)) {
+  // A leading slash alone is rooted on the process's current drive, so
+  // isAbsolute("\\Downloads") is insufficient for a persisted destination.
+  const root = win32.parse(normalized).root
+  if (!win32.isAbsolute(normalized) || root === '\\') {
     throw new Error('Download directory must be an absolute Windows path')
   }
   return normalized

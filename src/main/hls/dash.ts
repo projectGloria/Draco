@@ -2,11 +2,13 @@ import { basename, extname, join } from 'node:path'
 import { rm, stat } from 'node:fs/promises'
 import type { DownloadTask } from '@shared/types'
 import { QuotaExceededError } from '../engine/limiter.ts'
+import { splitConnectionBudget } from '../engine/connection-budget.ts'
 import { TaskRunner, quotaDetail } from '../engine/task.ts'
 import type { Runner } from '../engine/runner.ts'
 import type { RunnerContext } from '../engine/manager.ts'
-import { discardReservedPath, moveFile, uniquePath } from '../engine/naming.ts'
+import { discardReservedPath, halfSuffix, moveFile, uniquePath } from '../engine/naming.ts'
 import { AbortedError } from '../engine/worker.ts'
+import { verifyExpectedChecksum } from '../engine/checksum.ts'
 import { ensureFfmpeg } from './ffmpeg.ts'
 import { mux } from './mux.ts'
 
@@ -28,6 +30,7 @@ export class DashRunner implements Runner {
   private reservedTarget: string | null = null
   /** Set when a child stopped on the transfer quota rather than on a failure. */
   private quotaError: QuotaExceededError | null = null
+  private lifecyclePromise: Promise<void> | null = null
   running = false
 
   constructor(task: DownloadTask, context: RunnerContext) {
@@ -36,7 +39,7 @@ export class DashRunner implements Runner {
 
     const videoTask: DownloadTask = JSON.parse(JSON.stringify(task))
     videoTask.id = task.id + '-v'
-    videoTask.filename = task.filename + '.v.mp4'
+    videoTask.filename = task.filename + halfSuffix('v', 'mp4', task.youtube?.videoFormatId)
     // The halves' names are this runner's contract with itself: `adoptFinishedHalf`
     // and the mux both address them by name. Unlocked, `TaskRunner` would replace
     // the name with whatever Content-Disposition said - `videoplayback.mp4` on a
@@ -45,18 +48,27 @@ export class DashRunner implements Runner {
     videoTask.size = null
     videoTask.received = 0
     videoTask.segments = []
+    // The user's digest describes the muxed output, not either input stream.
+    videoTask.expectedChecksum = undefined
     if (task.youtube) videoTask.youtube = { ...task.youtube, role: 'video' }
 
     const audioTask: DownloadTask = JSON.parse(JSON.stringify(task))
     audioTask.id = task.id + '-a'
     audioTask.url = task.audioUrl!
-    audioTask.filename = task.filename + '.a.m4a'
+    audioTask.filename = task.filename + halfSuffix('a', 'm4a', task.youtube?.audioFormatId)
     audioTask.filenameLocked = true
     audioTask.size = null
     audioTask.received = 0
     audioTask.segments = []
+    audioTask.expectedChecksum = undefined
     if (task.youtube?.audioFormatId) {
       audioTask.youtube = { ...task.youtube, role: 'audio' }
+    }
+
+    if (task.expectedSize) {
+      this.task.size = task.expectedSize
+      videoTask.expectedSize = Math.round(task.expectedSize * 0.88)
+      audioTask.expectedSize = task.expectedSize - videoTask.expectedSize
     }
 
     const childContext: RunnerContext = {
@@ -71,15 +83,21 @@ export class DashRunner implements Runner {
         // Stop the sibling, but do not abort the parent controller. An abort
         // is a user pause in the parent's catch path and would hide this real
         // child failure by leaving the composite task stuck on "probing".
-        if (childTask.id === videoTask.id) void this.audioRunner?.pause()
-        else void this.videoRunner?.pause()
+        // A failed checkpoint is already reported by the child's lifecycle.
+        // Observe the pause rejection too so it cannot escape as an unhandled
+        // promise rejection while the parent waits for both children.
+        if (childTask.id === videoTask.id) void this.audioRunner?.pause().catch(() => {})
+        else void this.videoRunner?.pause().catch(() => {})
       },
       onProbed: () => {}
     }
 
+    const budget = splitConnectionBudget(context.maxConnections, context.connectionCeiling)
+
     const config = {
-      maxConnections: Math.max(1, Math.floor(context.maxConnections / 2)),
-      minSplitSize: 1024 * 1024,
+      maxConnections: budget.video,
+      connectionCeiling: budget.videoCeiling,
+      minSplitSize: context.minSplitSize,
       retryLimit: context.retryLimit,
       timeoutMs: context.timeoutMs,
       // The halves are ordinary downloads and their partials belong in the same
@@ -91,26 +109,53 @@ export class DashRunner implements Runner {
     }
 
     this.videoRunner = new TaskRunner(videoTask, config, childContext)
-    this.audioRunner = new TaskRunner(audioTask, config, childContext)
+    this.audioRunner = new TaskRunner(
+      audioTask,
+      { ...config, maxConnections: budget.audio, connectionCeiling: budget.audioCeiling },
+      childContext
+    )
   }
 
   async start(): Promise<void> {
-    if (this.running) return
+    if (this.running) {
+      await this.lifecyclePromise
+      return
+    }
     this.running = true
     this.muxing = false
     this.quotaError = null
     this.controller = new AbortController()
 
+    const lifecycle = this.runLifecycle()
+    this.lifecyclePromise = lifecycle
+    try {
+      await lifecycle
+    } finally {
+      this.lifecyclePromise = null
+      this.running = false
+    }
+  }
+
+  private async runLifecycle(): Promise<void> {
     try {
       this.task.status = 'probing'
       this.deps.onUpdate(this.task)
 
+      // A pause that landed while start() was suspended above this line must
+      // not launch two fresh child downloads that would then run for hours
+      // before the aborted check below ever fired.
+      if (this.controller.signal.aborted) throw new AbortedError()
+
       // Start both runners concurrently - unless a half is already sitting there
       // finished from an attempt whose mux failed.
-      const vPromise = (await this.adoptFinishedHalf(this.videoRunner))
+      const [videoDone, audioDone] = await Promise.all([
+        this.adoptFinishedHalf(this.videoRunner), this.adoptFinishedHalf(this.audioRunner)
+      ])
+      if (this.controller.signal.aborted) throw new AbortedError()
+      const vPromise = videoDone
         ? Promise.resolve()
         : this.videoRunner.start()
-      const aPromise = (await this.adoptFinishedHalf(this.audioRunner))
+      const aPromise = audioDone
         ? Promise.resolve()
         : this.audioRunner.start()
 
@@ -147,8 +192,6 @@ export class DashRunner implements Runner {
 
       const videoPath = join(this.task.dir, this.videoRunner.task.filename)
       const audioPath = join(this.task.dir, this.audioRunner.task.filename)
-      const wouldBeTarget = join(this.task.dir, this.task.filename)
-      await discardReservedPath(wouldBeTarget)
       const targetPath = await uniquePath(this.task.dir, this.task.filename)
       this.reservedTarget = targetPath
       const muxTemp = muxTempPath(targetPath)
@@ -164,6 +207,12 @@ export class DashRunner implements Runner {
       })
 
       if (this.controller.signal.aborted) throw new AbortedError()
+      if (this.task.expectedChecksum) {
+        this.task.detail = 'Verifying checksum...'
+        this.deps.onUpdate(this.task)
+        await verifyExpectedChecksum(muxTemp, this.task.expectedChecksum, this.controller.signal)
+      }
+      if (this.controller.signal.aborted) throw new AbortedError()
       await moveFile(muxTemp, targetPath)
 
       await rm(videoPath, { force: true }).catch(() => {})
@@ -175,7 +224,8 @@ export class DashRunner implements Runner {
       this.task.detail = null
       this.task.speed = 0
       this.task.eta = null
-      this.task.size = this.videoRunner.task.size! + this.audioRunner.task.size!
+      const finalStat = await stat(targetPath).catch(() => null)
+      this.task.size = finalStat?.size ?? (this.videoRunner.task.size! + this.audioRunner.task.size!)
       this.task.received = this.task.size
       this.task.segments = []
 
@@ -208,8 +258,6 @@ export class DashRunner implements Runner {
         this.task.eta = null
         this.deps.onFinished(this.task, err as Error)
       }
-    } finally {
-      this.running = false
     }
   }
 
@@ -223,6 +271,11 @@ export class DashRunner implements Runner {
    * landed them beside as `… (1)`. The retry then needed three copies of the
    * video to succeed where two had not fit, so freeing "enough" space never
    * helped.
+   *
+   * What makes "the file exists" safe to trust is that `halfSuffix` puts the
+   * itag in the name: a half left behind by an attempt that ran at a different
+   * quality has a different filename and is not a candidate here. Read the
+   * comment on that function before widening what this will adopt.
    */
   private async adoptFinishedHalf(runner: TaskRunner): Promise<boolean> {
     const path = join(this.task.dir, runner.task.filename)
@@ -247,7 +300,10 @@ export class DashRunner implements Runner {
     this.task.eta = null
     this.controller.abort()
 
-    await Promise.allSettled([this.videoRunner.pause(), this.audioRunner.pause()])
+    const stops = await Promise.allSettled([this.videoRunner.pause(), this.audioRunner.pause()])
+    // Removal must wait for the parent mux and file cleanup too, not just the
+    // HTTP children. Otherwise it can delete files an active mux still uses.
+    await this.lifecyclePromise
     // Each child publishes a final update as it stops. Keep that update from
     // recombining their transient states into "probing" after the user chose
     // Pause for the parent task.
@@ -256,6 +312,8 @@ export class DashRunner implements Runner {
     this.task.eta = null
     this.task.detail = null
     this.deps.onUpdate(this.task)
+    const failures = stops.filter((stop): stop is PromiseRejectedResult => stop.status === 'rejected')
+    if (failures.length > 0) throw new AggregateError(failures.map((stop) => stop.reason), 'Could not save both media checkpoints')
   }
 
   tick(): void {
@@ -274,13 +332,15 @@ export class DashRunner implements Runner {
         this.task.detail = null
       } else {
         const states = [this.videoRunner.task.status, this.audioRunner.task.status]
-        this.task.status = states.includes('downloading') ? 'downloading' : 'probing'
+        const bothDone = states.every((s) => s === 'done')
+        this.task.status = bothDone || states.includes('downloading') ? 'downloading' : 'probing'
 
         // Before any bytes move, the only thing worth saying is what the children
         // are waiting on - resolving a YouTube URL, most of the time - and the
         // parent is the task the list and the progress window are looking at.
-        this.task.detail =
-          this.task.status === 'downloading'
+        this.task.detail = bothDone
+          ? 'Preparing to mux…'
+          : this.task.status === 'downloading'
             ? null
             : (this.videoRunner.task.detail ?? this.audioRunner.task.detail)
       }
@@ -292,8 +352,11 @@ export class DashRunner implements Runner {
     const aSize = this.audioRunner.task.size
     if (vSize !== null && aSize !== null) {
       this.task.size = vSize + aSize
+    } else if (vSize !== null) {
+      const audioEstimate = this.audioRunner.task.expectedSize ?? Math.round(vSize * 0.1)
+      this.task.size = vSize + audioEstimate
     } else {
-      this.task.size = null
+      this.task.size = this.task.expectedSize ?? null
     }
 
     this.task.speed = this.muxing
@@ -306,8 +369,15 @@ export class DashRunner implements Runner {
       this.task.eta = null
     }
 
-    // Pass up the segments for visualization
-    this.task.segments = [...this.videoRunner.task.segments, ...this.audioRunner.task.segments]
+    // Offset audio segments by video size so they tile continuously in FileMap
+    const vOffset = vSize ?? (this.task.expectedSize ? Math.round(this.task.expectedSize * 0.88) : 0)
+    const offsetAudioSegments = this.audioRunner.task.segments.map((s) => ({
+      ...s,
+      start: s.start + vOffset,
+      end: s.end < 0 ? (aSize !== null ? aSize - 1 + vOffset : -1) : s.end + vOffset,
+      position: s.position + vOffset
+    }))
+    this.task.segments = [...this.videoRunner.task.segments, ...offsetAudioSegments]
   }
 
   async resetForRestart(): Promise<boolean> {

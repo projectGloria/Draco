@@ -1,11 +1,16 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type { ClipboardItem, DuplicateMatch, MediaVariant, NewDownload, ProbeResult, RequestHeaders, YouTubeResolution } from '@shared/types'
-import { formatBytes, formatWhen, hostOf, looksLikeYouTubeInput } from '../lib/format'
+import { formatBytes, formatWhen, hostOf, looksLikePlaylistInput, looksLikeYouTubeInput } from '../lib/format'
+import { useT } from '../i18n'
 import { useApp } from '../store/app'
 import { reportError } from '../store/toasts'
 import Dialog, { GhostButton, PrimaryButton } from './Dialog'
 import FileIcon from './FileIcon'
-import { FolderIcon, TorrentIcon } from './Icons'
+import { ChevronIcon, FolderIcon, TorrentIcon } from './Icons'
+import { buildTorrentTree, selectTorrentPaths, type TorrentTreeNode } from '@shared/torrent-tree'
+import { isXPage, xPostUrl } from '@shared/x-post'
+import { youtubeThumbnailUrl } from '@shared/youtube-link'
+import { useThumbnail } from '../lib/icons'
 
 /**
  * IDM's "Download File Info" step: what the server said about the file, and
@@ -26,6 +31,7 @@ export default function SaveAsDialog({
   fromBrowser,
   clipboardItem,
   onAdded,
+  onPlaylist,
   onClose
 }: {
   url: string
@@ -36,10 +42,13 @@ export default function SaveAsDialog({
   fromBrowser?: boolean
   clipboardItem?: ClipboardItem
   onAdded?(): void
+  /** Hands a playlist link on to the dialog that can actually expand it. */
+  onPlaylist?(url: string): void
   onClose(): void
 }): React.ReactElement {
   const categories = useApp((s) => s.categories)
   const queues = useApp((s) => s.queues)
+  const t = useT()
 
   const [probe, setProbe] = useState<ProbeResult | null>(clipboardItem?.probe ?? null)
   const [probeError, setProbeError] = useState<string | null>(null)
@@ -77,13 +86,42 @@ export default function SaveAsDialog({
   const [detectedMedia, setDetectedMedia] = useState(clipboardItem?.kind === 'media')
   /** An existing row this download would repeat. Advisory only. */
   const [duplicate, setDuplicate] = useState<DuplicateMatch | null>(null)
+  const [adding, setAdding] = useState(false)
+  const submission = useRef(false)
   const torrentSelectionEmpty = selectedFiles !== null && selectedFiles.size === 0
   const torrentMode = isTorrentInput(url) || probe?.torrentFiles !== undefined
-  const youtubeMode = looksLikeYouTubeInput(url)
-  const mediaMode = youtubeMode || detectedMedia || clipboardItem?.kind === 'media'
-  const pageAssetMode = mediaMode && !youtubeMode
+  /*
+   * A playlist or channel link is explicitly not this dialog's job.
+   *
+   * `looksLikeYouTubeInput` is true for one, so without this check the effect
+   * below called `resolveYouTube`, which runs yt-dlp with `--no-playlist`. For
+   * `/playlist?list=...` that comes back with no formats at all and the user
+   * saw "YouTube may be requiring an additional browser/PO token" - a message
+   * about something that had not happened. For `/watch?v=X&list=...` it quietly
+   * resolved video X alone and the other thirty-nine were simply lost.
+   *
+   * `App` routes these to `PlaylistDialog` before they get here; this is the
+   * backstop, so a new entry point that forgets fails visibly and recoverably
+   * rather than silently.
+   */
+  const playlistMode = looksLikePlaylistInput(url)
+  const youtubeMode = !playlistMode && looksLikeYouTubeInput(url)
+  const xPostMode = Boolean(xPostUrl(url))
+  const mediaMode = youtubeMode || isXPage(url) || detectedMedia || clipboardItem?.kind === 'media'
+  const previewUrl = mediaMode ? youtube?.thumbnailUrl ?? youtubeThumbnailUrl(url) : null
+  const preview = useThumbnail(previewUrl)
+  const xPostHasAssets = Boolean(
+    xPostMode &&
+    youtube?.variants.some(
+      (v) =>
+        (v.container && ['jpg', 'jpeg', 'png', 'webp', 'gif'].includes(v.container.toLowerCase())) ||
+        v.label.startsWith('Photo') ||
+        v.label.startsWith('Video ')
+    )
+  )
+  const pageAssetMode = (mediaMode && !youtubeMode && !xPostMode) || xPostHasAssets
   const youtubeVariant = youtube?.variants[youtubeVariantIndex] ?? null
-  const cannotStart = torrentSelectionEmpty ||
+  const cannotStart = adding || playlistMode || torrentSelectionEmpty ||
     (pageAssetMode ? selectedMediaIndices.size === 0 : mediaMode && !youtubeVariant)
 
   useEffect(() => {
@@ -110,6 +148,9 @@ export default function SaveAsDialog({
 
   useEffect(() => {
     let cancelled = false
+
+    // Nothing to resolve: the notice below offers the playlist dialog instead.
+    if (playlistMode) return
 
     // YouTube extraction results are a stable quality ladder, but ordinary
     // pages are snapshots of mutable HTML. Always re-scan those when opened;
@@ -202,7 +243,7 @@ export default function SaveAsDialog({
     return () => {
       cancelled = true
     }
-  }, [url, headers, youtubeMode, mediaMode, clipboardItem, preparedMedia, probeRetry])
+  }, [url, headers, playlistMode, youtubeMode, mediaMode, clipboardItem, preparedMedia, probeRetry])
 
   async function browse(): Promise<void> {
     const chosen = await window.api.chooseDirectory(dir ?? undefined)
@@ -210,6 +251,18 @@ export default function SaveAsDialog({
   }
 
   async function start(autoStart: boolean): Promise<void> {
+    if (submission.current || cannotStart) return
+    submission.current = true
+    setAdding(true)
+    try {
+      await add(autoStart)
+    } finally {
+      submission.current = false
+      setAdding(false)
+    }
+  }
+
+  async function add(autoStart: boolean): Promise<void> {
     if (pageAssetMode) {
       if (!youtube || selectedMediaIndices.size === 0) return
       const groupName = pageGroupName(youtube.title, url)
@@ -221,6 +274,7 @@ export default function SaveAsDialog({
         .map(({ variant }): NewDownload => ({
           url: variant.url || url,
           sourceUrl: url,
+          thumbnailUrl: youtube.thumbnailUrl,
           groupId,
           groupName: grouped ? groupName : undefined,
           groupFolder: grouped ? groupName : undefined,
@@ -253,7 +307,7 @@ export default function SaveAsDialog({
         onAdded?.()
         onClose()
       } catch (err) {
-        reportError('Could not add the downloads', err)
+        reportError(t('addFailed'), err)
       }
       return
     }
@@ -263,6 +317,7 @@ export default function SaveAsDialog({
     const input: NewDownload = {
       url: youtubeVariant?.url || url,
       sourceUrl: mediaMode ? url : undefined,
+      thumbnailUrl: youtube?.thumbnailUrl,
       audioUrl: youtubeVariant?.audioUrl ?? null,
       audioTracks: youtubeVariant?.audioTracks,
       youtube: youtubeVariant?.youtube
@@ -274,7 +329,7 @@ export default function SaveAsDialog({
             role: youtubeVariant.youtube.role ?? 'video'
           }
         : undefined,
-      filename: filename.trim() || undefined,
+      filename: torrentMode ? undefined : filename.trim() || undefined,
       dir: dir ?? undefined,
       categoryId: categoryId || null,
       queueId: queueId || null,
@@ -293,34 +348,75 @@ export default function SaveAsDialog({
       onAdded?.()
       onClose()
     } catch (err) {
-      reportError('Could not add the download', err)
+      reportError(t('addOneFailed'), err)
     }
   }
 
   return (
     <Dialog
-      title={torrentMode ? 'Add torrent' : youtubeMode ? 'Download YouTube video' : mediaMode ? 'Download media' : fromBrowser ? 'Download file info' : 'Save as'}
+      title={playlistMode
+        ? t('playlistTitle')
+        : torrentMode
+          ? t('addTorrentTitle')
+          : youtubeMode
+            ? t('youtubeTitle')
+            : mediaMode
+              ? t('mediaTitle')
+              : fromBrowser
+                ? t('fileInfoTitle')
+                : t('saveAsTitle')}
       subtitle={hostOf(url) || url}
       width={torrentMode ? 1100 : pageAssetMode ? 760 : 560}
       onClose={onClose}
       footer={
         <>
-          <GhostButton onClick={onClose}>Cancel</GhostButton>
-          <GhostButton disabled={cannotStart} onClick={() => void start(false)}>
-            {pageAssetMode ? `Add ${selectedMediaIndices.size} later` : 'Download later'}
-          </GhostButton>
-          <PrimaryButton disabled={cannotStart} onClick={() => void start(true)}>
-            {pageAssetMode ? `Start ${selectedMediaIndices.size} download${selectedMediaIndices.size === 1 ? '' : 's'}` : 'Start download'}
-          </PrimaryButton>
+          <GhostButton onClick={onClose}>{t('cancel')}</GhostButton>
+          {playlistMode && onPlaylist ? (
+            <PrimaryButton
+              onClick={() => {
+                onPlaylist(url)
+                onClose()
+              }}
+            >
+              {t('openAsPlaylist')}
+            </PrimaryButton>
+          ) : (
+            <>
+              <GhostButton disabled={cannotStart} onClick={() => void start(false)}>
+                {pageAssetMode ? t('addLaterCount', { count: selectedMediaIndices.size }) : t('downloadLater')}
+              </GhostButton>
+              <PrimaryButton disabled={cannotStart} onClick={() => void start(true)}>
+                {pageAssetMode ? t('startCount', { count: selectedMediaIndices.size }) : t('startDownload')}
+              </PrimaryButton>
+            </>
+          )}
         </>
       }
     >
+      {mediaMode && (
+        <div className="mb-3.5 flex items-center gap-3 rounded-lg border border-line bg-white/[0.02] p-2">
+          <div className="w-[112px] h-[72px] shrink-0 overflow-hidden rounded-md bg-white/[0.04] grid place-items-center">
+            {preview ? <img src={preview} alt="Media preview" className="w-full h-full object-cover" /> : <FileIcon name={filename} className="w-7 h-7" />}
+          </div>
+          <div className="min-w-0 text-[12.5px] font-semibold line-clamp-2 break-words" title={youtube?.title || filename}>
+            {youtube?.title || filename || hostOf(url)}
+          </div>
+        </div>
+      )}
+      {playlistMode && (
+        <div className="rounded-lg px-3 py-2.5 text-[12.5px] leading-relaxed border border-[rgba(56,189,248,0.25)] bg-[rgba(56,189,248,0.08)]">
+          {t('playlistNotice')}
+        </div>
+      )}
+
       {duplicate && (
         <div className="mb-3.5 rounded-lg px-3 py-2.5 text-[11.5px] leading-relaxed border border-[rgba(250,204,21,0.25)] bg-[rgba(250,204,21,0.08)] flex items-center gap-3">
           <span className="min-w-0 flex-1 text-warn">
             {duplicate.status === 'done'
-              ? `Already downloaded as ${duplicate.filename}${duplicate.completedAt ? ` on ${formatWhen(duplicate.completedAt)}` : ''}.`
-              : `Already in the list as ${duplicate.filename} (${duplicate.status}).`}
+              ? (duplicate.completedAt
+                  ? t('duplicateDoneAt', { name: duplicate.filename, when: formatWhen(duplicate.completedAt) })
+                  : t('duplicateDone', { name: duplicate.filename }))
+              : t('duplicateInList', { name: duplicate.filename, status: duplicate.status })}
           </span>
           {duplicate.status === 'done' && (
             <button
@@ -328,7 +424,7 @@ export default function SaveAsDialog({
               className="shrink-0 text-[11px] text-muted hover:text-ink underline underline-offset-2"
               onClick={() => void window.api.revealFile(duplicate.taskId)}
             >
-              Show me
+              {t('showMe')}
             </button>
           )}
         </div>
@@ -344,16 +440,16 @@ export default function SaveAsDialog({
         <div className="space-y-3.5 min-w-0">
         {mediaMode && (
           <div>
-            <label className="label">{pageAssetMode ? 'Page contents' : 'Quality'}</label>
+            <label className="label">{pageAssetMode ? t('pageContents') : t('quality')}</label>
             {probeError ? (
               <div className="rounded-lg px-3 py-2.5 text-[11.5px] leading-relaxed border border-[rgba(251,191,36,0.25)] bg-[rgba(251,191,36,0.08)] text-warn">
-                Could not find downloadable media: {probeError}
+                {t('noMediaFound', { error: probeError })}
               </div>
             ) : !youtube ? (
               <MediaLoadingState phase={pageAssetMode ? 'page' : 'qualities'} />
             ) : youtube.variants.length === 0 ? (
               <div className="field text-[12.5px] text-warn">
-                {pageAssetMode ? 'No downloadable files were found.' : 'No downloadable qualities were found.'}
+                {pageAssetMode ? t('noDownloadableFiles') : t('noDownloadableQualities')}
               </div>
             ) : pageAssetMode ? (
               <PageAssetSelection
@@ -382,9 +478,10 @@ export default function SaveAsDialog({
           </div>
         )}
         {!pageAssetMode && <div>
-          <label className="label">File name</label>
+          <label className="label">{t('fileName')}</label>
           <input
             value={filename}
+            disabled={torrentMode}
             onChange={(event) => {
               touched.current = true
               setFilename(event.target.value)
@@ -392,17 +489,18 @@ export default function SaveAsDialog({
             spellCheck={false}
             className="field text-[12.5px]"
           />
+          {torrentMode && <p className="mt-1.5 text-[11px] text-faint">{t('torrentNameFixed')}</p>}
         </div>}
 
         <div>
-          <label className="label">Save to</label>
+          <label className="label">{t('saveTo')}</label>
           <button
             onClick={() => void browse()}
             className="field text-left text-[12.5px] flex items-center gap-2 hover:bg-white/[0.06] transition-colors"
           >
             <FolderIcon className="w-4 h-4 text-faint shrink-0" />
             <span className={'truncate ' + (dir ? '' : 'text-faint')}>
-              {dir ?? 'Automatic — filed into its category folder'}
+              {dir ?? t('automaticCategory')}
             </span>
           </button>
           {dir && (
@@ -410,20 +508,20 @@ export default function SaveAsDialog({
               onClick={() => setDir(null)}
               className="mt-1.5 text-[11px] text-faint hover:text-ink transition-colors"
             >
-              Use the category folder instead
+              {t('useCategoryFolder')}
             </button>
           )}
         </div>
 
         <div className="grid grid-cols-2 max-[560px]:grid-cols-1 gap-3">
           <div>
-            <label className="label">Category</label>
+            <label className="label">{t('category')}</label>
             <select
               value={categoryId}
               onChange={(event) => setCategoryId(event.target.value)}
               className="field text-[12.5px]"
             >
-              <option value="">Automatic (by extension)</option>
+              <option value="">{t('automaticByExtension')}</option>
               {categories.map((category) => (
                 <option key={category.id} value={category.id}>
                   {category.name}
@@ -433,13 +531,13 @@ export default function SaveAsDialog({
           </div>
 
           <div>
-            <label className="label">Queue</label>
+            <label className="label">{t('queue')}</label>
             <select
               value={queueId}
               onChange={(event) => setQueueId(event.target.value)}
               className="field text-[12.5px]"
             >
-              <option value="">None</option>
+              <option value="">{t('none')}</option>
               {queues.map((queue) => (
                 <option key={queue.id} value={queue.id}>
                   {queue.name}
@@ -450,36 +548,36 @@ export default function SaveAsDialog({
         </div>
 
         <div>
-          <label className="label">Description</label>
+          <label className="label">{t('description')}</label>
           <input
             value={description}
             onChange={(event) => setDescription(event.target.value)}
-            placeholder="Optional"
+            placeholder={t('optional')}
             className="field text-[12.5px]"
           />
         </div>
 
         {!pageAssetMode && <div className="grid grid-cols-2 gap-3">
           <div>
-            <label className="label">Checksum (optional)</label>
+            <label className="label">{t('checksumOptional')}</label>
             <input
               value={expectedChecksum}
               onChange={(event) => setExpectedChecksum(event.target.value)}
-              placeholder="MD5, SHA-1, or SHA-256 hash"
+              placeholder={t('checksumPlaceholder')}
               spellCheck={false}
               className="field text-[12.5px] font-mono placeholder:font-sans"
             />
           </div>
           <div>
-            <label className="label">Post-Processing</label>
+            <label className="label">{t('postProcessing')}</label>
             <select
               value={postProcess}
               onChange={(event) => setPostProcess(event.target.value as any)}
               className="field text-[12.5px]"
             >
-              <option value="none">None</option>
-              <option value="mp4">Convert to MP4 (FFmpeg)</option>
-              <option value="mp3">Convert to MP3 (FFmpeg)</option>
+              <option value="none">{t('none')}</option>
+              <option value="mp4">{t('convertMp4')}</option>
+              <option value="mp3">{t('convertMp3')}</option>
             </select>
           </div>
         </div>}
@@ -488,7 +586,7 @@ export default function SaveAsDialog({
 
           {fromBrowser && (
             <div className="text-faint text-[11px] text-center italic mt-2">
-              If you cancel, you will have to restart the download yourself.
+              {t('cancelRestartHint')}
             </div>
           )}
         </div>
@@ -531,6 +629,7 @@ function PageAssetSelection({
   selected: Set<number>
   onSelectionChange(next: Set<number>): void
 }): React.ReactElement {
+  const t = useT()
   const [query, setQuery] = useState('')
   const [sizeDirection, setSizeDirection] = useState<'none' | 'desc' | 'asc'>('none')
   const selectedSize = variants.reduce(
@@ -556,10 +655,10 @@ function PageAssetSelection({
     <section className="border border-line rounded-lg bg-white/[0.02] overflow-hidden">
       <div className="px-3.5 py-2.5 bg-white/[0.04] border-b border-line flex items-center gap-3">
         <div className="min-w-0 flex-1">
-          <div className="text-[12px] font-semibold">Page downloads</div>
+          <div className="text-[12px] font-semibold">{t('pageDownloads')}</div>
           <div className="text-[10.5px] text-faint tnum mt-0.5">
-            {selected.size} of {variants.length} selected
-            {selectedSize > 0 ? ` · ${formatBytes(selectedSize)}${unknownSizes ? ' + unknown' : ''}` : ''}
+            {t('selectedOfSize', { selected: selected.size, total: variants.length })}
+            {selectedSize > 0 ? ` · ${formatBytes(selectedSize)}${unknownSizes ? t('plusUnknown') : ''}` : ''}
           </div>
         </div>
         <div className="flex items-center gap-2 text-[10px] uppercase tracking-[0.3px]">
@@ -567,7 +666,7 @@ function PageAssetSelection({
             className="text-faint hover:text-ink transition-colors"
             onClick={() => onSelectionChange(new Set([...selected, ...visible.map(({ index }) => index)]))}
           >
-            {filtered ? 'Select matches' : 'Select all'}
+            {filtered ? t('selectMatches') : t('selectAll')}
           </button>
           <button
             className="text-faint hover:text-ink transition-colors"
@@ -577,7 +676,7 @@ function PageAssetSelection({
               onSelectionChange(next)
             }}
           >
-            {filtered ? 'Clear matches' : 'Select none'}
+            {filtered ? t('clearMatches') : t('selectNone')}
           </button>
         </div>
       </div>
@@ -586,7 +685,7 @@ function PageAssetSelection({
         <input
           value={query}
           onChange={(event) => setQuery(event.target.value)}
-          placeholder="Search fetched files (try flac, mp3, jpg)…"
+          placeholder={t('searchFetchedPlaceholder')}
           className="field !py-1.5 text-[11.5px]"
           spellCheck={false}
         />
@@ -594,20 +693,20 @@ function PageAssetSelection({
 
       <div className="grid grid-cols-[24px_minmax(0,1fr)_90px_70px] px-3 py-2 border-b border-line text-[10px] uppercase tracking-[0.4px] text-faint">
         <span />
-        <span>Asset</span>
+        <span>{t('asset')}</span>
         <button
           className="text-right hover:text-ink transition-colors"
-          title="Order by size"
+          title={t('orderBySize')}
           onClick={() => setSizeDirection((current) => current === 'none' ? 'desc' : current === 'desc' ? 'asc' : 'none')}
         >
-          Size {sizeDirection === 'desc' ? '↓' : sizeDirection === 'asc' ? '↑' : '↕'}
+          {t('size')} {sizeDirection === 'desc' ? '↓' : sizeDirection === 'asc' ? '↑' : '↕'}
         </button>
-        <span className="text-right">Format</span>
+        <span className="text-right">{t('format')}</span>
       </div>
 
       <div className="max-h-[300px] overflow-y-auto p-1.5 text-[11.5px]">
         {visible.length === 0 && (
-          <div className="py-8 text-center text-faint">No fetched files match “{query}”.</div>
+          <div className="py-8 text-center text-faint">{t('noFetchedMatch', { query })}</div>
         )}
         {visible.map(({ variant, index }) => {
           const name = mediaVariantName(variant)
@@ -641,16 +740,17 @@ function PageAssetSelection({
 }
 
 function MediaLoadingState({ phase }: { phase: 'page' | 'qualities' | 'file' }): React.ReactElement {
+  const t = useT()
   const title = phase === 'page'
-    ? 'Inspecting page and embedded players'
+    ? t('inspectingPage')
     : phase === 'qualities'
-      ? 'Reading available qualities'
-      : 'Connecting and reading file details'
+      ? t('readingQualities')
+      : t('connectingDetails')
   const detail = phase === 'page'
-    ? 'Following media sources, checking formats, and measuring file sizes…'
+    ? t('inspectingPageDetail')
     : phase === 'qualities'
-      ? 'Building the best-quality download ladder…'
-      : 'Checking the server, file size, type, and resume support…'
+      ? t('readingQualitiesDetail')
+      : t('connectingDetailsDetail')
   return (
     <div className="media-loader rounded-xl border border-line overflow-hidden px-5 py-5 flex items-center gap-4">
       <div className="relative w-11 h-11 shrink-0" aria-hidden="true">
@@ -735,21 +835,67 @@ function TorrentContents({
   onSelectionChange(next: Set<string>): void
   onRetry(): void
 }): React.ReactElement {
+  const t = useT()
   const [query, setQuery] = useState('')
   const [sizeDirection, setSizeDirection] = useState<'none' | 'desc' | 'asc'>('none')
+  const [collapsed, setCollapsed] = useState<Set<string>>(() => new Set())
   const selectedCount = selectedFiles?.size ?? 0
   const selectedSize = files?.reduce(
     (sum, file) => sum + (selectedFiles?.has(file.path) ? file.size : 0),
     0
   ) ?? 0
-  const visibleFiles = useMemo(() => (files ?? [])
-    .filter((file) => !query.trim() || file.path.toLowerCase().includes(query.trim().toLowerCase()))
-    .map((file, index) => ({ file, index }))
-    .sort((a, b) => {
-      if (sizeDirection === 'none') return a.index - b.index
-      return sizeDirection === 'asc' ? a.file.size - b.file.size : b.file.size - a.file.size
-    })
-    .map(({ file }) => file), [files, query, sizeDirection])
+  const tree = useMemo(() => buildTorrentTree(files ?? [], query, sizeDirection), [files, query, sizeDirection])
+  // Searching reveals matching descendants without losing the user's collapsed folders.
+  const searching = query.trim().length > 0
+  const renderNodes = (nodes: TorrentTreeNode[], depth = 0): React.ReactNode => nodes.map((node) => {
+    const folder = node.kind === 'folder'
+    const expanded = searching || !collapsed.has(node.key)
+    const count = node.filePaths.reduce((sum, path) => sum + (selectedFiles?.has(path) ? 1 : 0), 0)
+    const checked = count === node.filePaths.length
+    const mixed = count > 0 && !checked
+    return (
+      <li key={node.key}>
+        <div
+          className="grid grid-cols-[16px_18px_18px_minmax(0,1fr)_80px] items-center gap-1.5 pr-2 py-1.5 hover:bg-white/[0.04] rounded"
+          style={{ paddingLeft: 6 + depth * 16 }}
+        >
+          {folder ? (
+            <button
+              type="button"
+              className="text-faint hover:text-ink disabled:opacity-50"
+              aria-label={node.name}
+              aria-expanded={expanded}
+              disabled={searching}
+              onClick={() => setCollapsed((current) => {
+                const next = new Set(current)
+                if (next.has(node.key)) next.delete(node.key)
+                else next.add(node.key)
+                return next
+              })}
+            >
+              <ChevronIcon open={expanded} className="w-3.5 h-3.5" />
+            </button>
+          ) : <span />}
+          <label className="contents cursor-pointer">
+            <input
+              type="checkbox"
+              checked={checked}
+              aria-checked={mixed ? 'mixed' : checked}
+              aria-label={node.name}
+              ref={(input) => { if (input) input.indeterminate = mixed }}
+              onChange={(event) => onSelectionChange(selectTorrentPaths(selectedFiles ?? new Set(), node.filePaths, event.target.checked))}
+            />
+            {folder
+              ? <FolderIcon className="w-4 h-4 text-[var(--accent)]" />
+              : <FileIcon name={node.name} className="w-4 h-4" />}
+            <span className={`truncate ${folder ? 'font-semibold' : ''}`} title={node.key.slice(node.key.indexOf(':') + 1)}>{node.name}</span>
+            <span className="text-faint tnum text-right">{formatBytes(node.size)}</span>
+          </label>
+        </div>
+        {folder && expanded && <ul>{renderNodes(node.children, depth + 1)}</ul>}
+      </li>
+    )
+  })
 
   return (
     <section className="min-w-0 min-h-[480px] max-h-[62vh] border border-line rounded-lg bg-white/[0.02] overflow-hidden flex flex-col">
@@ -758,11 +904,11 @@ function TorrentContents({
           <TorrentIcon className="w-4 h-4" />
         </span>
         <div className="min-w-0 flex-1">
-          <div className="text-[12px] font-semibold">Torrent contents</div>
+          <div className="text-[12px] font-semibold">{t('torrentContents')}</div>
           <div className="text-[10.5px] text-faint tnum mt-0.5">
             {files && selectedFiles
-              ? `${selectedCount} of ${files.length} selected · ${formatBytes(selectedSize)}`
-              : 'Waiting for metadata'}
+              ? `${t('selectedOfSize', { selected: selectedCount, total: files.length })} · ${formatBytes(selectedSize)}`
+              : t('waitingMetadata')}
           </div>
         </div>
         {files && selectedFiles && (
@@ -771,13 +917,13 @@ function TorrentContents({
               className="text-faint hover:text-ink transition-colors"
               onClick={() => onSelectionChange(new Set(files.map((file) => file.path)))}
             >
-              Select all
+              {t('selectAll')}
             </button>
             <button
               className="text-faint hover:text-ink transition-colors"
               onClick={() => onSelectionChange(new Set())}
             >
-              Select none
+              {t('selectNone')}
             </button>
           </div>
         )}
@@ -788,7 +934,7 @@ function TorrentContents({
           <input
             value={query}
             onChange={(event) => setQuery(event.target.value)}
-            placeholder="Search torrent files…"
+            placeholder={t('searchTorrentPlaceholder')}
             className="field !py-1.5 text-[11.5px]"
             spellCheck={false}
           />
@@ -796,12 +942,12 @@ function TorrentContents({
       )}
 
       <div className="grid grid-cols-[minmax(0,1fr)_100px] px-3 py-2 border-b border-line text-[10px] uppercase tracking-[0.4px] text-faint shrink-0">
-        <span>Name</span>
+        <span>{t('name')}</span>
         <button
           className="text-right hover:text-ink transition-colors"
           onClick={() => setSizeDirection((current) => current === 'none' ? 'desc' : current === 'desc' ? 'asc' : 'none')}
         >
-          Size {sizeDirection === 'desc' ? '↓' : sizeDirection === 'asc' ? '↑' : '↕'}
+          {t('size')} {sizeDirection === 'desc' ? '↓' : sizeDirection === 'asc' ? '↑' : '↕'}
         </button>
       </div>
 
@@ -809,41 +955,22 @@ function TorrentContents({
         {error ? (
           <div className="h-full grid place-items-center px-8 text-center text-warn leading-relaxed">
             <div>
-              Could not load torrent contents.<br />{error}
+              {t('loadTorrentFailed')}<br />{error}
               <button onClick={onRetry} className="block mx-auto mt-4 px-3 py-1.5 rounded-lg border border-line text-ink bg-white/[0.05] hover:bg-white/[0.1]">
-                Try metadata again
+                {t('tryMetadataAgain')}
               </button>
             </div>
           </div>
         ) : !files || !selectedFiles ? (
           <div className="h-full grid place-items-center px-8 text-center text-faint leading-relaxed">
-            Finding peers and reading torrent metadata…
+            {t('findingPeers')}
           </div>
         ) : files.length === 0 ? (
-          <div className="h-full grid place-items-center text-faint">This torrent contains no files.</div>
-        ) : visibleFiles.length === 0 ? (
-          <div className="h-full grid place-items-center text-faint">No torrent files match “{query}”.</div>
+          <div className="h-full grid place-items-center text-faint">{t('emptyTorrent')}</div>
+        ) : tree.length === 0 ? (
+          <div className="h-full grid place-items-center text-faint">{t('noTorrentMatch', { query })}</div>
         ) : (
-          visibleFiles.map((file) => (
-            <label
-              key={file.path}
-              className="grid grid-cols-[18px_18px_minmax(0,1fr)_100px] items-center gap-2 px-2 py-2 hover:bg-white/[0.04] rounded cursor-pointer"
-            >
-              <input
-                type="checkbox"
-                checked={selectedFiles.has(file.path)}
-                onChange={(event) => {
-                  const next = new Set(selectedFiles)
-                  if (event.target.checked) next.add(file.path)
-                  else next.delete(file.path)
-                  onSelectionChange(next)
-                }}
-              />
-              <FileIcon name={file.path} className="w-4 h-4" />
-              <span className="truncate" title={file.path}>{file.path}</span>
-              <span className="text-faint tnum text-right">{formatBytes(file.size)}</span>
-            </label>
-          ))
+          <ul>{renderNodes(tree)}</ul>
         )}
       </div>
     </section>
@@ -859,15 +986,14 @@ function ServerInfo({
   error: string | null
   knownSize: number | null
 }): React.ReactElement {
+  const t = useT()
   if (error) {
     const sessionRequired = /\b(?:401|403|forbidden|unauthorized|browser session|captcha|cloudflare)\b/i.test(error)
     return (
       <div className="rounded-lg px-3 py-2.5 text-[11.5px] leading-relaxed border border-[rgba(251,191,36,0.25)] bg-[rgba(251,191,36,0.08)] text-warn">
-        Could not read the file details: {error}
+        {t('couldNotReadDetails', { error })}
         <div className="text-faint mt-1">
-          {sessionRequired
-            ? 'This address requires the active browser session. Start playback in your browser, then use Draco’s video Download button so it can capture the stream URL and session headers.'
-            : 'You can still start the download — the engine will try again on its own.'}
+          {sessionRequired ? t('sessionRequiredHint') : t('stillStartHint')}
         </div>
       </div>
     )
@@ -880,22 +1006,22 @@ function ServerInfo({
   if (probe.torrentFiles) {
     return (
       <div className="rounded-lg px-3 py-2.5 border border-line bg-white/[0.02] grid grid-cols-3 gap-y-1.5 text-[11.5px]">
-        <Fact label="Total size" value={formatBytes(probe.size ?? knownSize)} />
-        <Fact label="Files" value={String(probe.torrentFiles.length)} />
-        <Fact label="Type" value="BitTorrent" tone="ok" />
+        <Fact label={t('totalSize')} value={formatBytes(probe.size ?? knownSize)} />
+        <Fact label={t('files')} value={String(probe.torrentFiles.length)} />
+        <Fact label={t('type')} value="BitTorrent" tone="ok" />
       </div>
     )
   }
 
   return (
     <div className="rounded-lg px-3 py-2.5 border border-line bg-white/[0.02] grid grid-cols-3 gap-y-1.5 text-[11.5px]">
-      <Fact label="Size" value={formatBytes(probe.size ?? knownSize)} />
+      <Fact label={t('size')} value={formatBytes(probe.size ?? knownSize)} />
       <Fact
-        label="Resume"
-        value={probe.resumable ? 'Supported' : 'Not supported'}
+        label={t('resumeSupport')}
+        value={probe.resumable ? t('supported') : t('notSupported')}
         tone={probe.resumable ? 'ok' : 'warn'}
       />
-      <Fact label="Type" value={probe.mimeType ?? '—'} />
+      <Fact label={t('type')} value={probe.mimeType ?? '—'} />
     </div>
   )
 }

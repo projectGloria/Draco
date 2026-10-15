@@ -69,24 +69,80 @@ const TIERS = [4320, 2160, 1440, 1080, 720, 480, 360, 240, 144]
 /**
  * The rung a frame belongs to, measured the way YouTube measures it.
  *
- * Quality is named after the short side, not the height: a Short at 1080x1920
- * is 1080p everywhere in YouTube's own UI, and calling it 4K because it happens
- * to be 1920 pixels tall would be nonsense. For ordinary landscape video the
- * short side *is* the height and nothing changes.
+ * Which axis names the quality depends on which way up the video is, and both
+ * directions have been got wrong here:
+ *
+ * - Portrait. A Short at 1080x1920 is 1080p everywhere in YouTube's own UI, so
+ *   the short side - the width - is the name. Calling it 4K because it happens
+ *   to be 1920 pixels tall would be nonsense.
+ *
+ * - Landscape. Taking the short side here is what broke letterboxed video. A
+ *   2.40:1 film is encoded with the bars cropped off, so YouTube's 1080p
+ *   rendition of it is 1920x798 - and `min(1920, 798)` is 798, which snaps to
+ *   720p. The whole ladder of a widescreen video shifted down one rung, and a
+ *   video YouTube was plainly offering in 1080p could only be downloaded at
+ *   "720p". So the rung comes from whichever is larger: the real height, or the
+ *   height this width would have at 16:9. A 4:3 video keeps its own height
+ *   (640x480 stays 480p), and an ordinary 16:9 frame is unaffected either way.
  *
  * Nearest rung rather than a fixed cutoff, so the odd heights that non-16:9
  * sources produce land where a person would put them: 1072 is 1080p, 640 is
  * 720p rather than being demoted two rungs by an arbitrary threshold.
  */
 export function tierFor(height: number | null, width: number | null = null): number | null {
-  const side = width && height ? Math.min(width, height) : height
-  if (!side || side <= 0) return null
+  if (!height || height <= 0) return null
+
+  const side = !width || width <= 0
+    ? height
+    : height > width
+      ? width
+      : Math.max(height, Math.round((width * 9) / 16))
 
   let best = TIERS[TIERS.length - 1]
   for (const tier of TIERS) {
     if (Math.abs(tier - side) < Math.abs(best - side)) best = tier
   }
   return best
+}
+
+/**
+ * How many rungs below the requested quality a substitute actually landed.
+ *
+ * Zero means the same rung or better. This exists because a substitution is
+ * only reasonable while it stays near what was asked for: `substituteVideo`
+ * will walk all the way down the ladder rather than fail, and when YouTube is
+ * withholding everything but itag 18 that walk turns a 2160p request into a
+ * 360p file still named `… 2160p.mp4`. Nothing about that is visible to the
+ * person who chose 2160p, which is what makes it worth measuring.
+ */
+export function rungsBelow(wantedHeight: number | null, offeredHeight: number | null): number {
+  const wanted = tierFor(wantedHeight)
+  const offered = tierFor(offeredHeight)
+  if (wanted === null || offered === null) return 0
+
+  const wantedIndex = TIERS.indexOf(wanted)
+  const offeredIndex = TIERS.indexOf(offered)
+  if (wantedIndex < 0 || offeredIndex < 0) return 0
+
+  // TIERS runs highest first, so a larger index is a lower rung.
+  return Math.max(0, offeredIndex - wantedIndex)
+}
+
+/**
+ * The rungs a ladder actually offers, highest first, as labels.
+ *
+ * Shown to the user when a substitution is refused: "2160p is not on offer" is
+ * only half an answer, and the other half - what *is* on offer - is the part
+ * that tells them whether the problem is this video or their whole setup.
+ */
+export function offeredTiers(formats: YtDlpFormat[]): string[] {
+  const tiers = new Set<number>()
+  for (const format of directFormats(formats)) {
+    if (!format.vcodec || format.vcodec === 'none') continue
+    const tier = tierFor(format.height ?? null, format.width ?? null)
+    if (tier !== null) tiers.add(tier)
+  }
+  return [...tiers].sort((a, b) => b - a).map((tier) => tierLabel(tier, null))
 }
 
 export function tierLabel(tier: number, fps: number | null): string {
@@ -147,12 +203,15 @@ export function buildVariants(formats: SourceFormat[]): MediaVariant[] {
   // adaptive winning wherever it exists because its bitrate is higher.
   const candidates = real.filter((f) => f.hasVideo && (f.height ?? 0) > 0)
 
+  const hasAnyAudio = real.some((f) => f.hasAudio)
+
   const best = new Map<number, SourceFormat>()
   for (const format of candidates) {
     const tier = tierFor(format.height, format.width)
     if (tier === null) continue
-    // A video-only format is unusable without audio to pair with it.
-    if (!format.hasAudio && !bestAudio) continue
+    // A video-only format only requires audio pairing if the source actually offers audio.
+    // Silent videos, screen captures, and Twitter GIFs have no audio track at all.
+    if (!format.hasAudio && !bestAudio && hasAnyAudio) continue
 
     const existing = best.get(tier)
     if (!existing || betterVideo(format, existing) < 0) best.set(tier, format)
@@ -321,6 +380,14 @@ export function directFormats(formats: YtDlpFormat[]): YtDlpFormat[] {
   return formats.filter(
     (candidate) => Boolean(candidate.url) && /^https?:/i.test(candidate.url!) && isDirectDownload(candidate)
   )
+}
+
+/** Compare only formats Draco can download, not manifest entries without usable media URLs. */
+export function bestDirectVideoHeight(formats: YtDlpFormat[]): number {
+  return directFormats(formats).reduce((best, format) =>
+    format.vcodec && format.vcodec !== 'none'
+      ? Math.max(best, tierFor(format.height ?? null, format.width ?? null) ?? 0)
+      : best, 0)
 }
 
 /**

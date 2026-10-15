@@ -69,9 +69,10 @@ export function buildDisplayRows(rows: DownloadTask[]): DisplayRow[] {
  * anything still moving outranks anything finished, and one failure is worth
  * saying even when the other forty-eight files arrived.
  */
-const GROUP_STATUS_ORDER: TaskStatus[] = ['downloading', 'probing', 'error', 'queued', 'paused', 'missing', 'done']
+const GROUP_STATUS_ORDER: TaskStatus[] = ['downloading', 'probing', 'processing', 'scanning', 'error', 'queued', 'paused', 'missing', 'done']
 
 export function summarizeGroup(groupId: string, tasks: DownloadTask[]): DownloadTask {
+  if (tasks.length === 0) throw new Error('Cannot summarize an empty group')
   // The confirmed size when there is one, the advertised size until then. A
   // total built only from what has been probed climbs as the batch runs, and
   // the percentage against it swings - 30%, 69%, 65% - which is worse than

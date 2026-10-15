@@ -6,6 +6,8 @@ import { compareVersions } from '../src/main/update-version.ts'
 import { couldBeHtmlPageUrl, isSunoUrl, isSupportedMediaPageUrl } from '../src/main/media-url.ts'
 import { isSupportedYouTubeUrl, preparedYouTubeUrl, youtubeFormatId } from '../src/main/youtube-url.ts'
 import { isPrivateHost, validateUrl } from '../src/main/engine/create.ts'
+import { isXPage, xPostUrl, xStatusId } from '../src/shared/x-post.ts'
+import { tokenForTweet } from '../src/main/twitter.ts'
 
 /** The small decisions that sit on the edge of the engine. */
 
@@ -67,12 +69,35 @@ describe('compareVersions', () => {
 
   it('treats missing parts as zero and ignores build metadata', () => {
     strictEqual(compareVersions('1.2', '1.2.0'), 0)
-    strictEqual(compareVersions('1.2.3-beta.1', '1.2.3'), 0, 'a pre-release tag does not make it newer')
+    strictEqual(compareVersions('1.2.3-beta.1', '1.2.3'), -1, 'a pre-release comes before the stable release')
     strictEqual(compareVersions('1.2.3+build9', '1.2.3'), 0)
+  })
+
+  it('orders prerelease identifiers using semantic version precedence', () => {
+    strictEqual(compareVersions('1.2.3', '1.2.3-beta.9'), 1)
+    strictEqual(compareVersions('1.2.3-beta.10', '1.2.3-beta.9'), 1)
+    strictEqual(compareVersions('1.2.3-alpha', '1.2.3-beta'), -1)
+    strictEqual(compareVersions('1.2.3-beta', '1.2.3-beta.1'), -1)
+    strictEqual(compareVersions('1.2.3-1', '1.2.3-alpha'), -1)
   })
 })
 
 describe('media page URLs', () => {
+  it('resolves only one X status, never a feed or unrelated status link', () => {
+    strictEqual(xPostUrl('https://x.com/alice/status/12345?source=home'), 'https://x.com/alice/status/12345')
+    strictEqual(xPostUrl('https://mobile.twitter.com/bob/status/67890/video/1'), 'https://x.com/bob/status/67890')
+    strictEqual(xPostUrl('https://x.com/i/web/status/1234567890'), 'https://x.com/i/status/1234567890')
+    strictEqual(xPostUrl('https://vxtwitter.com/jack/status/20'), 'https://x.com/jack/status/20')
+    strictEqual(xPostUrl('https://fixupx.com/jack/status/20'), 'https://x.com/jack/status/20')
+    strictEqual(xStatusId('https://x.com/alice/status/12345'), '12345')
+    strictEqual(xStatusId('https://x.com/i/web/status/1891234567890'), '1891234567890')
+    strictEqual(tokenForTweet('20').length > 0, true)
+    strictEqual(xPostUrl('https://x.com/home'), null)
+    strictEqual(xPostUrl('https://notx.com/alice/status/12345'), null)
+    strictEqual(isXPage('https://x.com/home'), true)
+    strictEqual(isSupportedMediaPageUrl('https://x.com/alice/status/12345'), true)
+    strictEqual(isSupportedMediaPageUrl('https://x.com/home'), false)
+  })
   it('accepts only pages that could hold a video', () => {
     strictEqual(couldBeHtmlPageUrl('https://example.test/watch/123'), true)
     strictEqual(couldBeHtmlPageUrl('https://example.test/clip.mp4'), false, 'that is the media itself')

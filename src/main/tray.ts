@@ -49,6 +49,7 @@ export function createTray(handlers: TrayHandlers): Tray {
   )
 
   tray.on('click', handlers.onShow)
+  tray.on('double-click', handlers.onShow)
   return tray
 }
 

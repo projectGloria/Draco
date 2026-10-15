@@ -12,12 +12,8 @@ import { latestYtDlpVersion, locateYtDlp, reinstallYtDlp, ytDlpVersion } from '.
 const log = logger('tools')
 
 /**
- * The two binaries Draco fetches but does not ship.
- *
- * Neither is bundled and neither was ever updated, which matters most for
- * yt-dlp: YouTube changes underneath it and a copy from three months ago starts
- * answering "no downloadable formats" - and the error the user is shown says to
- * update yt-dlp, which until now there was no way to do from inside the app.
+ * The installer supplies both binaries. Updates are stored in userData and
+ * override the bundled versions without modifying the installation directory.
  *
  * Only a copy in `%APPDATA%/Draco/bin` is Draco's to replace. One found on PATH
  * belongs to whatever installed it, and updating that behind the user's back
@@ -25,7 +21,7 @@ const log = logger('tools')
  */
 const TOOLS = {
   ffmpeg: {
-    name: 'ffmpeg',
+    name: 'FFmpeg',
     purpose: 'Merges video and audio, and finishes playlist downloads',
     locate: locateFfmpeg,
     installed: ffmpegVersion,
@@ -43,6 +39,8 @@ const TOOLS = {
 } as const satisfies Record<ToolId, unknown>
 
 export const TOOL_IDS = Object.keys(TOOLS) as ToolId[]
+const statusCache = new Map<ToolId, { at: number; status: ToolStatus }>()
+const STATUS_TTL_MS = 60_000
 
 /**
  * What is installed, what is published, and whether the gap is Draco's to close.
@@ -55,6 +53,8 @@ export async function getToolStatus(checkLatest: boolean): Promise<ToolStatus[]>
 }
 
 async function statusOf(id: ToolId, checkLatest: boolean): Promise<ToolStatus> {
+  const cached = statusCache.get(id)
+  if (!checkLatest && cached && Date.now() - cached.at < STATUS_TTL_MS) return { ...cached.status }
   const tool = TOOLS[id]
   const base: ToolStatus = {
     id,
@@ -71,16 +71,15 @@ async function statusOf(id: ToolId, checkLatest: boolean): Promise<ToolStatus> {
   try {
     const found = await tool.locate()
     if (!found) {
-      // Not an error: both are fetched on first use, so "not there yet" is the
-      // normal state of an install that has not needed one.
+      // Development checkouts can omit the bundle and fetch tools on first use.
       return base
     }
 
     const installedVersion = await tool.installed(found.path)
-    const latestVersion = checkLatest ? await tool.latest() : null
+    const latestVersion = checkLatest ? await tool.latest() : cached?.status.latestVersion ?? null
     const behind = compareToolVersions(installedVersion, latestVersion)
 
-    return {
+    const status = {
       ...base,
       path: found.path,
       managed: found.managed,
@@ -91,6 +90,8 @@ async function statusOf(id: ToolId, checkLatest: boolean): Promise<ToolStatus> {
       // a working binary.
       updateAvailable: found.managed && behind !== null && behind < 0
     }
+    statusCache.set(id, { at: Date.now(), status })
+    return status
   } catch (err) {
     return { ...base, error: err instanceof Error ? err.message : String(err) }
   }
@@ -108,6 +109,7 @@ export async function updateTool(id: ToolId): Promise<ToolStatus> {
 
   log.info(`updating ${tool.name} from ${before.installedVersion ?? 'nothing'}`)
   await tool.update()
+  statusCache.delete(id)
   const after = await statusOf(id, true)
   log.info(`${tool.name} is now ${after.installedVersion ?? 'unknown'}`)
   return after

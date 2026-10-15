@@ -1,3 +1,4 @@
+import { playCompletionSound } from './lib/completion-sound'
 import { useEffect, useMemo, useCallback, useState } from 'react'
 import { filterTasks, sortTasks, useApp } from './store/app'
 import { reportError, toast } from './store/toasts'
@@ -20,7 +21,10 @@ import ToolUpdateDialog from './components/ToolUpdateDialog'
 import Toolbar, { type ToolbarActions } from './components/Toolbar'
 import Dropzone from './components/Dropzone'
 import PlaylistDialog from './components/PlaylistDialog'
-import { resolvedLanguage, useT } from './i18n'
+import { useT } from './i18n'
+import { useAppearance } from './lib/use-appearance'
+import { buildDisplayRows } from '@shared/groups'
+import { orderedQueueIds } from '@shared/queue-order'
 import { looksLikePlaylistInput, looksLikeTorrentInput, looksLikeYouTubeInput } from './lib/format'
 import type { ClipboardItem, ToolStatus } from '@shared/types'
 
@@ -48,15 +52,21 @@ export default function App(): React.ReactElement {
   }
 
   const init = useApp((s) => s.init)
+  const ready = useApp((s) => s.ready)
+  const initializing = useApp((s) => s.initializing)
+  const initError = useApp((s) => s.initError)
   const tasks = useApp((s) => s.tasks)
+  const categories = useApp((s) => s.categories)
+  const queues = useApp((s) => s.queues)
   const taskListVersion = useApp((s) => s.taskListVersion)
   const settings = useApp((s) => s.settings)
   const sidebar = useApp((s) => s.sidebar)
+  const setSidebar = useApp((s) => s.setSidebar)
+  const activeQueue = queues.find((queue) => sidebar === `queue:${queue.id}`)
   const selection = useApp((s) => s.selection)
   const setSelection = useApp((s) => s.setSelection)
   const pending = useApp((s) => s.pending)
 
-  const [search, setSearch] = useState('')
   const [addOpen, setAddOpen] = useState(false)
   const [saveAsUrl, setSaveAsUrl] = useState<string | null>(null)
   /** A playlist or channel link, which stands for many downloads rather than one. */
@@ -72,18 +82,21 @@ export default function App(): React.ReactElement {
   const [detailId, setDetailId] = useState<string | null>(null)
   const [groupDetailId, setGroupDetailId] = useState<string | null>(null)
   const [schedulerOpen, setSchedulerOpen] = useState(false)
+  const [schedulerQueueId, setSchedulerQueueId] = useState<string | undefined>()
   const [siteGrabberOpen, setSiteGrabberOpen] = useState(false)
   const [optionsOpen, setOptionsOpen] = useState(false)
   const [confirm, setConfirm] = useState<ConfirmRequest | null>(null)
   const [toolUpdates, setToolUpdates] = useState<ToolStatus[] | null>(null)
   const [draggingUrl, setDraggingUrl] = useState(false)
   const t = useT()
+  useAppearance(settings)
 
   useEffect(() => {
     void init()
 
     // Toasts raised by the main process - a browser handoff arriving, a queue
     // starting - are the only way those events are visible from in here.
+    const offCompletionSound = window.api.onDownloadComplete(playCompletionSound)
     const offToast = window.api.onToast((incoming) => {
       toast(incoming.kind === 'error' ? 'danger' : incoming.kind, incoming.message)
     })
@@ -101,8 +114,10 @@ export default function App(): React.ReactElement {
         .takePendingOpens()
         .then((urls) => {
           if (urls.length === 0) return
-          setSaveAsUrl((current) => current ?? urls[0])
-          setOpenQueue((queue) => [...queue, ...urls.slice(1)])
+          // Enqueue every item, including the first. A dialog already on
+          // screen must not cause the first item of a later shell event to be
+          // discarded while its remaining siblings are queued.
+          setOpenQueue((queue) => [...queue, ...urls])
         })
         .catch((err) => reportError('Could not open that torrent', err))
     }
@@ -110,6 +125,7 @@ export default function App(): React.ReactElement {
     const offShellOpen = window.api.onShellOpen(drainShellOpens)
 
     return () => {
+      offCompletionSound()
       offToast()
       offTools()
       offShellOpen()
@@ -117,34 +133,47 @@ export default function App(): React.ReactElement {
   }, [init])
 
   useEffect(() => {
-    document.documentElement.lang = resolvedLanguage(settings.language)
-  }, [settings.language])
+    if (saveAsUrl || playlistUrl || openQueue.length === 0) return
+    const next = openQueue[0]
+    setOpenQueue((queue) => queue.slice(1))
+    if (looksLikePlaylistInput(next)) setPlaylistUrl(next)
+    else setSaveAsUrl(next)
+  }, [openQueue, saveAsUrl, playlistUrl])
 
-  useEffect(() => {
-    const systemDark = window.matchMedia('(prefers-color-scheme: dark)').matches
-    document.documentElement.dataset.theme = settings.theme === 'system'
-      ? (systemDark ? 'dark' : 'light')
-      : settings.theme
-  }, [settings.theme])
+  const hasActiveTasks = useMemo(
+    () => tasks.some((t) => t.status === 'downloading' || t.status === 'probing' || t.status === 'processing' || t.status === 'scanning'),
+    [tasks]
+  )
 
-  const progressSensitiveSort = ['size', 'progress', 'status', 'eta', 'speed'].includes(
+  const progressSensitiveSort = hasActiveTasks && ['progress', 'status', 'eta', 'speed'].includes(
     settings.sortColumn
   )
-  const orderSource = progressSensitiveSort ? tasks : taskListVersion
+
+  const [dynamicSortTick, setDynamicSortTick] = useState(0)
+
+  useEffect(() => {
+    if (!progressSensitiveSort) return
+    const timer = setInterval(() => {
+      setDynamicSortTick((tick) => tick + 1)
+    }, 1500)
+    return () => clearInterval(timer)
+  }, [progressSensitiveSort])
+
   const orderedIds = useMemo(
-    () => sortTasks(
-      filterTasks(tasks, sidebar, search),
+    () => activeQueue ? orderedQueueIds(activeQueue.taskIds, filterTasks(tasks, sidebar).map((task) => task.id)) : sortTasks(
+      filterTasks(tasks, sidebar),
       settings.sortColumn,
       settings.sortDirection
     ).map((task) => task.id),
     // Static sort keys only need a new order after a structural task event.
-    // Dynamic keys deliberately recompute from the 4 Hz progress snapshot.
+    // Dynamic keys recompute smoothly on a throttled timer to prevent table jumping and UI thread churn.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [orderSource, sidebar, search, settings.sortColumn, settings.sortDirection]
+    [activeQueue, progressSensitiveSort ? dynamicSortTick : taskListVersion, taskListVersion, sidebar, settings.sortColumn, settings.sortDirection]
   )
   const rows = useMemo(() => {
     const byId = new Map(tasks.map((task) => [task.id, task]))
     const ordered = orderedIds.map((id) => byId.get(id)).filter((task): task is NonNullable<typeof task> => Boolean(task))
+    if (activeQueue) return ordered
 
     const groups = new Map<string, typeof ordered>()
     for (const task of ordered) {
@@ -166,7 +195,47 @@ export default function App(): React.ReactElement {
       }
     }
     return grouped
-  }, [tasks, orderedIds])
+  }, [tasks, orderedIds, activeQueue])
+
+  /**
+   * The rows the table and the status bar both draw.
+   *
+   * Built once here rather than independently in each. A group is one row in
+   * both places, so two separate grouping passes could only ever agree by
+   * accident, and they cost twice as much while doing it.
+   */
+  const displayRows = useMemo(() => activeQueue ? rows.map((task) => ({ kind: 'task' as const, task })) : buildDisplayRows(rows), [rows, activeQueue])
+
+  /**
+   * Opens whatever a URL actually stands for.
+   *
+   * A playlist or channel link is many downloads, not one, and the Save As
+   * dialog resolves it with `--no-playlist` - so sending one there either
+   * silently fetched the single video the link happened to also name, or failed
+   * with a message about PO tokens that had nothing to do with what happened.
+   *
+   * Every route a user-supplied URL can arrive on goes through here: the
+   * toolbar's Add button, a dropped link, the clipboard inbox, and whatever the
+   * shell handed us. `AddUrlDialog` used to be the only one that checked, which
+   * is why the playlist dialog was very nearly unreachable.
+   */
+  const openUrl = useCallback((value: string): void => {
+    if (looksLikePlaylistInput(value)) setPlaylistUrl(value)
+    else setSaveAsUrl(value)
+  }, [])
+
+  const addUrls = useCallback((urls: string[], source: 'paste' | 'drop'): void => {
+    // A page URL is not a media file. Keep the normal file batch fast, while
+    // each YouTube link goes through the same quality/playlist picker as a
+    // single pasted link instead of saving the watch page's HTML.
+    const media = urls.filter(looksLikeYouTubeInput)
+    const direct = urls.filter((url) => !looksLikeYouTubeInput(url))
+    if (media.length > 0) setOpenQueue((queue) => [...queue, ...media])
+    if (direct.length === 0) return
+    void window.api.addDownloads(direct.map((url) => ({ url })))
+      .then(() => toast('success', t(source === 'drop' ? 'droppedLinksAdded' : 'downloadsAdded', { count: direct.length })))
+      .catch((error) => reportError(t(source === 'drop' ? 'addDroppedFailed' : 'addFailed'), error))
+  }, [t])
 
   /* ---------------------------------------------------------------- */
   /* Commands                                                          */
@@ -193,17 +262,17 @@ export default function App(): React.ReactElement {
     }
 
     setConfirm({
-      title: ids.length === 1 ? 'Delete this download?' : `Delete ${ids.length} downloads?`,
+      title: ids.length === 1 ? t('confirmDeleteOne') : t('confirmDeleteMany', { count: ids.length }),
       message:
         finished.length > 0
-          ? `${finished.length} of them finished. Their downloaded files stay on disk unless you say otherwise.`
-          : 'Any partly downloaded data is discarded.',
-      confirmLabel: 'Delete',
+          ? t('confirmDeleteFinished', { count: finished.length })
+          : t('confirmDeletePartial'),
+      confirmLabel: t('delete'),
       danger: true,
-      checkbox: finished.length > 0 ? 'Also delete the downloaded files' : undefined,
+      checkbox: finished.length > 0 ? t('confirmDeleteFiles') : undefined,
       onConfirm: remove
     })
-  }, [tasks, settings.confirmDelete, setSelection])
+  }, [tasks, settings.confirmDelete, setSelection, t])
 
   const actions: ToolbarActions = useMemo(() => ({
     onAdd: () => {
@@ -211,38 +280,69 @@ export default function App(): React.ReactElement {
         .then((value) => {
           const candidate = value.trim()
           if (looksLikeTorrentInput(candidate) || looksLikeYouTubeInput(candidate)) {
-            setSaveAsUrl(candidate)
+            // Through `openUrl`, not straight to Save As: a playlist link on
+            // the clipboard is a YouTube link, and this button was the most
+            // common way of sending one to the dialog that cannot handle it.
+            openUrl(candidate)
           }
           else setAddOpen(true)
         })
         .catch(() => setAddOpen(true))
     },
     onResume: () => {
-      void window.api.startTasks(selection).catch((err) => reportError('Could not resume', err))
+      void window.api.startTasks(selection).catch((err) => reportError(t('resumeFailed'), err))
     },
     onPause: () => {
-      void window.api.pauseTasks(selection).catch((err) => reportError('Could not stop', err))
+      void window.api.pauseTasks(selection).catch((err) => reportError(t('stopFailed'), err))
     },
     onPauseAll: () => {
-      void window.api.pauseAll().catch((err) => reportError('Could not stop', err))
+      void window.api.pauseAll().catch((err) => reportError(t('stopFailed'), err))
     },
     onDelete: () => requestDelete(selection),
     onDeleteCompleted: () =>
       setConfirm({
-        title: 'Remove completed downloads?',
-        message: 'They disappear from the list. The files themselves are left where they are.',
-        confirmLabel: 'Remove',
+        title: t('removeCompletedTitle'),
+        message: t('removeCompletedBody'),
+        confirmLabel: t('removeCompletedConfirm'),
         onConfirm: () => {
           void window.api
             .removeCompleted()
-            .catch((err) => reportError('Could not remove', err))
+            .catch((err) => reportError(t('removeFailed'), err))
         }
       }),
     onDetails: () => selection[0] && setDetailId(selection[0]),
     onScheduler: () => setSchedulerOpen(true),
     onOptions: () => setOptionsOpen(true),
     onSiteGrabber: () => setSiteGrabberOpen(true)
-  }), [selection, requestDelete])
+  }), [selection, requestDelete, openUrl, t])
+
+  if (!ready) {
+    return (
+      <div className="app-bg h-full flex flex-col overflow-hidden">
+        <TitleBar />
+        <main className="flex-1 grid place-items-center p-6">
+          {initError ? (
+            <section role="alert" className="w-full max-w-md rounded-2xl border border-line bg-surface p-6 shadow-xl">
+              <h1 className="font-display text-lg font-semibold text-ink">{t('startupErrorTitle')}</h1>
+              <p className="mt-2 text-sm text-muted">{t('startupErrorHint')}</p>
+              <p className="mt-3 break-words rounded-lg bg-black/10 p-3 text-xs text-muted">{initError}</p>
+              <button
+                type="button"
+                onClick={() => void init()}
+                disabled={initializing}
+                className="mt-5 rounded-lg bg-[var(--accent)] px-4 py-2 text-sm font-semibold text-black disabled:opacity-50"
+              >
+                {t('retry')}
+              </button>
+            </section>
+          ) : (
+            <div role="status" className="text-sm text-muted">{t('startupLoading')}</div>
+          )}
+        </main>
+        <Toasts />
+      </div>
+    )
+  }
 
   return (
     <div
@@ -270,20 +370,17 @@ export default function App(): React.ReactElement {
           void window.api
             .openTorrentFiles(paths)
             .then((opened) => {
-              if (opened === 0) toast('info', 'Drop a .torrent file, or an HTTP link')
+              if (opened === 0) toast('info', t('dropTorrentHint'))
             })
-            .catch((error) => reportError('Could not open the dropped files', error))
+            .catch((error) => reportError(t('openDroppedFailed'), error))
           return
         }
 
         const raw = event.dataTransfer.getData('text/uri-list') || event.dataTransfer.getData('text/plain')
         const urls = [...new Set(raw.split(/[\r\n\s]+/).filter((value) => /^https?:\/\//i.test(value)))]
-        if (urls.length === 1) setSaveAsUrl(urls[0])
-        else if (urls.length > 1) {
-          void window.api.addDownloads(urls.map((url) => ({ url })))
-            .then(() => toast('success', `${urls.length} dropped links added`))
-            .catch((error) => reportError('Could not add dropped links', error))
-        } else toast('info', 'Drop a .torrent file, or an HTTP link')
+        if (urls.length === 1) openUrl(urls[0])
+        else if (urls.length > 1) addUrls(urls, 'drop')
+        else toast('info', t('dropTorrentHint'))
       }}
     >
       <span
@@ -296,15 +393,43 @@ export default function App(): React.ReactElement {
       />
 
       <TitleBar />
-      <Toolbar actions={actions} search={search} onSearch={setSearch} />
-
+      <Toolbar actions={actions} />
+      <div className="hidden max-[720px]:flex shrink-0 items-center gap-2 border-b border-line px-3 py-2">
+        <label htmlFor="compact-view" className="text-xs text-muted">{t('view')}</label>
+        <select
+          id="compact-view"
+          value={sidebar}
+          onChange={(event) => setSidebar(event.target.value)}
+          className="field min-w-0 flex-1 text-sm"
+        >
+          <option value="all">{t('allDownloads')}</option>
+          <option value="active">{t('activeDownloads')}</option>
+          <option value="queued">{t('queuedDownloads')}</option>
+          <option value="attention">{t('needsAttention')}</option>
+          <option value="finished">{t('finished')}</option>
+          <option value="unfinished">{t('unfinished')}</option>
+          <option value="clipboard">{t('clipboard')}</option>
+          {categories.length > 0 && <optgroup label={t('categories')}>
+            {categories.map((category) => <option key={category.id} value={`cat:${category.id}`}>{category.name}</option>)}
+          </optgroup>}
+          {queues.length > 0 && <optgroup label={t('queues')}>
+            {queues.map((queue) => <option key={queue.id} value={`queue:${queue.id}`}>{queue.name}</option>)}
+          </optgroup>}
+        </select>
+      </div>
       <div className="flex-1 min-h-0 flex">
-        <Sidebar onEditQueues={() => setSchedulerOpen(true)} />
+        <Sidebar onEditQueues={(id) => { setSchedulerQueueId(id); setSchedulerOpen(true) }} />
 
         <main className="flex-1 min-w-0 flex flex-col">
           {sidebar === 'clipboard' ? (
             <ClipboardPanel
               onDownload={(item) => {
+                // A playlist copied to the clipboard reaches the inbox like any
+                // other link and must still open as a playlist from here.
+                if (looksLikePlaylistInput(item.url)) {
+                  setPlaylistUrl(item.url)
+                  return
+                }
                 setClipboardDownload(item)
                 setSaveAsUrl(item.url)
               }}
@@ -312,6 +437,7 @@ export default function App(): React.ReactElement {
           ) : (
             <DownloadTable
               rows={rows}
+              display={displayRows}
               onDetails={setDetailId}
               onGroupDetails={setGroupDetailId}
               onDelete={requestDelete}
@@ -320,7 +446,7 @@ export default function App(): React.ReactElement {
         </main>
       </div>
 
-      <StatusBar onOpenOptions={() => setOptionsOpen(true)} />
+      <StatusBar rows={displayRows} onOpenOptions={() => setOptionsOpen(true)} />
 
       {addOpen && (
         <AddUrlDialog
@@ -331,19 +457,17 @@ export default function App(): React.ReactElement {
             if (urls.length === 1) {
               // A playlist link is not one download and must not go through a
               // dialog that would silently resolve it to a single video.
-              if (looksLikePlaylistInput(urls[0])) setPlaylistUrl(urls[0])
-              else setSaveAsUrl(urls[0])
+              openUrl(urls[0])
               return
             }
-            void window.api.addDownloads(urls.map((url) => ({ url })))
-              .then(() => toast('success', `${urls.length} downloads added`))
-              .catch((err) => reportError('Could not add the downloads', err))
+            addUrls(urls, 'paste')
           }}
         />
       )}
 
       {playlistUrl && (
         <PlaylistDialog
+          key={playlistUrl}
           url={playlistUrl}
           onClose={() => setPlaylistUrl(null)}
           onSingleVideo={(single) => setSaveAsUrl(single)}
@@ -352,28 +476,31 @@ export default function App(): React.ReactElement {
 
       {saveAsUrl && (
         <SaveAsDialog
+          key={`${saveAsUrl}:${clipboardDownload?.id ?? ''}`}
           url={saveAsUrl}
           clipboardItem={clipboardDownload ?? undefined}
           onAdded={clipboardDownload ? () => {
             void window.api.removeClipboardItem(clipboardDownload.id)
             setClipboardDownload(null)
           } : undefined}
+          onPlaylist={(playlist) => {
+            setClipboardDownload(null)
+            setPlaylistUrl(playlist)
+          }}
           onClose={() => {
             setClipboardDownload(null)
-            // Whatever the shell handed us next, rather than nothing.
-            setSaveAsUrl(openQueue[0] ?? null)
-            setOpenQueue((queue) => queue.slice(1))
+            setSaveAsUrl(null)
           }}
         />
       )}
-      {detailId && <TaskDetailDialog id={detailId} onClose={() => setDetailId(null)} />}
+      {detailId && <TaskDetailDialog key={detailId} id={detailId} onClose={() => setDetailId(null)} />}
       {groupDetailId && (
-        <GroupDetailDialog groupId={groupDetailId} onClose={() => setGroupDetailId(null)} />
+        <GroupDetailDialog key={groupDetailId} groupId={groupDetailId} onClose={() => setGroupDetailId(null)} />
       )}
-      {schedulerOpen && <SchedulerDialog onClose={() => setSchedulerOpen(false)} />}
+      {schedulerOpen && <SchedulerDialog initialQueueId={schedulerQueueId} onClose={() => { setSchedulerOpen(false); setSchedulerQueueId(undefined) }} />}
       {siteGrabberOpen && <SiteGrabberDialog onClose={() => setSiteGrabberOpen(false)} />}
       {optionsOpen && (
-        <OptionsDialog onClose={() => setOptionsOpen(false)} onShowTools={setToolUpdates} />
+        <OptionsDialog onClose={() => setOptionsOpen(false)} />
       )}
       {confirm && <ConfirmDialog request={confirm} onClose={() => setConfirm(null)} />}
       {toolUpdates && (

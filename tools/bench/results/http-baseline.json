@@ -1,0 +1,404 @@
+{
+  "scope": "Local HTTP TaskRunner transfer; excludes browser UI, HLS, MPD, and torrent traffic",
+  "generatedAt": "2026-09-24T20:08:52.322Z",
+  "environment": {
+    "platform": "win32",
+    "arch": "x64",
+    "cpu": "11th Gen Intel(R) Core(TM) i7-11800H @ 2.30GHz",
+    "logicalCpus": 16,
+    "totalMemoryBytes": 16866840576,
+    "node": "v26.9.0"
+  },
+  "fixture": {
+    "bodyBytes": 8388608,
+    "content": "byte i modulo 251",
+    "rangeSupport": true,
+    "etag": "fixed",
+    "responseChunkBytes": 65536,
+    "responseChunkDelayMs": 3,
+    "counts": [
+      1,
+      2,
+      4,
+      8
+    ]
+  },
+  "cases": [
+    {
+      "concurrentTasks": 1,
+      "connectionsPerTask": 4,
+      "taskBytes": 8388608,
+      "outputBytes": 8388608,
+      "serverResponseBodyBytesWritten": 8650753,
+      "requests": 5,
+      "rangeRequests": 5,
+      "ranges": [
+        {
+          "start": 0,
+          "end": 0
+        },
+        {
+          "start": 0,
+          "end": 8388607
+        },
+        {
+          "start": 4194304,
+          "end": 8388607
+        },
+        {
+          "start": 2097152,
+          "end": 4194303
+        },
+        {
+          "start": 6291456,
+          "end": 8388607
+        }
+      ],
+      "wholeGetRequests": 0,
+      "elapsedSeconds": 0.7080164,
+      "outputThroughputMiBPerSecond": 11.2991732959858,
+      "cpuUserMs": 156,
+      "cpuSystemMs": 31,
+      "peakHeapBytes": 21365120,
+      "peakRssBytes": 107491328,
+      "eventLoopDelayP95Ms": 20.791295
+    },
+    {
+      "concurrentTasks": 2,
+      "connectionsPerTask": 4,
+      "taskBytes": 8388608,
+      "outputBytes": 16777216,
+      "serverResponseBodyBytesWritten": 17104898,
+      "requests": 10,
+      "rangeRequests": 10,
+      "ranges": [
+        {
+          "start": 0,
+          "end": 0
+        },
+        {
+          "start": 0,
+          "end": 0
+        },
+        {
+          "start": 2097152,
+          "end": 4194303
+        },
+        {
+          "start": 6291456,
+          "end": 8388607
+        },
+        {
+          "start": 0,
+          "end": 8388607
+        },
+        {
+          "start": 4194304,
+          "end": 8388607
+        },
+        {
+          "start": 0,
+          "end": 8388607
+        },
+        {
+          "start": 4194304,
+          "end": 8388607
+        },
+        {
+          "start": 2097152,
+          "end": 4194303
+        },
+        {
+          "start": 6291456,
+          "end": 8388607
+        }
+      ],
+      "wholeGetRequests": 0,
+      "elapsedSeconds": 0.5922889,
+      "outputThroughputMiBPerSecond": 27.013844088585824,
+      "cpuUserMs": 125,
+      "cpuSystemMs": 62,
+      "peakHeapBytes": 24496472,
+      "peakRssBytes": 123858944,
+      "eventLoopDelayP95Ms": 20.054015
+    },
+    {
+      "concurrentTasks": 4,
+      "connectionsPerTask": 4,
+      "taskBytes": 8388608,
+      "outputBytes": 33554432,
+      "serverResponseBodyBytesWritten": 34078724,
+      "requests": 20,
+      "rangeRequests": 20,
+      "ranges": [
+        {
+          "start": 0,
+          "end": 0
+        },
+        {
+          "start": 0,
+          "end": 0
+        },
+        {
+          "start": 0,
+          "end": 0
+        },
+        {
+          "start": 0,
+          "end": 0
+        },
+        {
+          "start": 0,
+          "end": 8388607
+        },
+        {
+          "start": 4194304,
+          "end": 8388607
+        },
+        {
+          "start": 2097152,
+          "end": 4194303
+        },
+        {
+          "start": 6291456,
+          "end": 8388607
+        },
+        {
+          "start": 0,
+          "end": 8388607
+        },
+        {
+          "start": 4194304,
+          "end": 8388607
+        },
+        {
+          "start": 2097152,
+          "end": 4194303
+        },
+        {
+          "start": 6291456,
+          "end": 8388607
+        },
+        {
+          "start": 0,
+          "end": 8388607
+        },
+        {
+          "start": 4194304,
+          "end": 8388607
+        },
+        {
+          "start": 2097152,
+          "end": 4194303
+        },
+        {
+          "start": 6291456,
+          "end": 8388607
+        },
+        {
+          "start": 0,
+          "end": 8388607
+        },
+        {
+          "start": 4194304,
+          "end": 8388607
+        },
+        {
+          "start": 2097152,
+          "end": 4194303
+        },
+        {
+          "start": 6291456,
+          "end": 8388607
+        }
+      ],
+      "wholeGetRequests": 0,
+      "elapsedSeconds": 0.5428421000000003,
+      "outputThroughputMiBPerSecond": 58.94900192892184,
+      "cpuUserMs": 438,
+      "cpuSystemMs": 375,
+      "peakHeapBytes": 25534304,
+      "peakRssBytes": 133783552,
+      "eventLoopDelayP95Ms": 22.757375
+    },
+    {
+      "concurrentTasks": 8,
+      "connectionsPerTask": 4,
+      "taskBytes": 8388608,
+      "outputBytes": 67108864,
+      "serverResponseBodyBytesWritten": 68943880,
+      "requests": 40,
+      "rangeRequests": 40,
+      "ranges": [
+        {
+          "start": 0,
+          "end": 0
+        },
+        {
+          "start": 0,
+          "end": 0
+        },
+        {
+          "start": 0,
+          "end": 0
+        },
+        {
+          "start": 0,
+          "end": 0
+        },
+        {
+          "start": 0,
+          "end": 0
+        },
+        {
+          "start": 0,
+          "end": 0
+        },
+        {
+          "start": 0,
+          "end": 0
+        },
+        {
+          "start": 0,
+          "end": 0
+        },
+        {
+          "start": 0,
+          "end": 8388607
+        },
+        {
+          "start": 4194304,
+          "end": 8388607
+        },
+        {
+          "start": 2097152,
+          "end": 4194303
+        },
+        {
+          "start": 6291456,
+          "end": 8388607
+        },
+        {
+          "start": 0,
+          "end": 8388607
+        },
+        {
+          "start": 4194304,
+          "end": 8388607
+        },
+        {
+          "start": 2097152,
+          "end": 4194303
+        },
+        {
+          "start": 6291456,
+          "end": 8388607
+        },
+        {
+          "start": 0,
+          "end": 8388607
+        },
+        {
+          "start": 4194304,
+          "end": 8388607
+        },
+        {
+          "start": 2097152,
+          "end": 4194303
+        },
+        {
+          "start": 6291456,
+          "end": 8388607
+        },
+        {
+          "start": 0,
+          "end": 8388607
+        },
+        {
+          "start": 4194304,
+          "end": 8388607
+        },
+        {
+          "start": 2097152,
+          "end": 4194303
+        },
+        {
+          "start": 6291456,
+          "end": 8388607
+        },
+        {
+          "start": 0,
+          "end": 8388607
+        },
+        {
+          "start": 4194304,
+          "end": 8388607
+        },
+        {
+          "start": 2097152,
+          "end": 4194303
+        },
+        {
+          "start": 6291456,
+          "end": 8388607
+        },
+        {
+          "start": 0,
+          "end": 8388607
+        },
+        {
+          "start": 4194304,
+          "end": 8388607
+        },
+        {
+          "start": 2097152,
+          "end": 4194303
+        },
+        {
+          "start": 6291456,
+          "end": 8388607
+        },
+        {
+          "start": 0,
+          "end": 8388607
+        },
+        {
+          "start": 4194304,
+          "end": 8388607
+        },
+        {
+          "start": 2097152,
+          "end": 4194303
+        },
+        {
+          "start": 6291456,
+          "end": 8388607
+        },
+        {
+          "start": 0,
+          "end": 8388607
+        },
+        {
+          "start": 4194304,
+          "end": 8388607
+        },
+        {
+          "start": 2097152,
+          "end": 4194303
+        },
+        {
+          "start": 6291456,
+          "end": 8388607
+        }
+      ],
+      "wholeGetRequests": 0,
+      "elapsedSeconds": 0.5681228000000001,
+      "outputThroughputMiBPerSecond": 112.65170135752338,
+      "cpuUserMs": 344,
+      "cpuSystemMs": 375,
+      "peakHeapBytes": 25382360,
+      "peakRssBytes": 148635648,
+      "eventLoopDelayP95Ms": 32.636927
+    }
+  ]
+}

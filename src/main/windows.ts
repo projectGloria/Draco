@@ -1,8 +1,10 @@
 import { app, BrowserWindow, nativeImage, shell } from 'electron'
-import { join } from 'node:path'
+import { isAbsolute, join, relative } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { existsSync } from 'node:fs'
 import type { DownloadTask } from '../shared/types.ts'
 import { iconForSite } from './icons.ts'
+import { getSettings } from './store.ts'
 
 function getIconPath(): string {
   const packaged = join(process.resourcesPath, 'icon.ico')
@@ -40,8 +42,80 @@ function openExternally(url: string): void {
   void shell.openExternal(url)
 }
 
+/**
+ * Whether a navigation target is one of the app's own four pages.
+ *
+ * In a packaged build that is a `file:` URL under the renderer directory; in
+ * development it is the Vite dev server, which does navigate the window for its
+ * own full reloads. Everything else - including a different file on disk - is
+ * somewhere this window has no business going.
+ */
+function isOwnPage(target: string): boolean {
+  let parsed: URL
+  try {
+    parsed = new URL(target)
+  } catch {
+    return false
+  }
+
+  const devServer = process.env.ELECTRON_RENDERER_URL
+  if (devServer) {
+    try {
+      return parsed.origin === new URL(devServer).origin
+    } catch {
+      return false
+    }
+  }
+
+  if (parsed.protocol !== 'file:') return false
+  try {
+    // `relative` rather than a string prefix: it resolves `..` first, so a
+    // crafted path cannot climb out of the renderer directory and still match.
+    const rel = relative(join(__dirname, '../renderer'), fileURLToPath(parsed))
+    return rel !== '' && !rel.startsWith('..') && !isAbsolute(rel)
+  } catch {
+    return false
+  }
+}
+
+/**
+ * Keeps a window on its own page.
+ *
+ * `setWindowOpenHandler` only covers `window.open` and `target=_blank`. A
+ * top-level navigation - `location.href = …`, a plain anchor - goes through
+ * `will-navigate` instead, and without this it would load a remote origin
+ * *into the app's own renderer*, where the preload bridge is already attached.
+ * Sandboxing and context isolation do not help there: the bridge is the whole
+ * privileged surface, and it would be handed to whatever that page is. Every
+ * window gets both handlers, including the two that render no links today.
+ */
+function hardenNavigation(window: BrowserWindow): void {
+  window.webContents.setWindowOpenHandler(({ url }) => {
+    openExternally(url)
+    return { action: 'deny' }
+  })
+
+  window.webContents.on('will-navigate', (event, url) => {
+    if (isOwnPage(url)) return
+    event.preventDefault()
+    openExternally(url)
+  })
+}
+
 let mainWindow: BrowserWindow | null = null
 let splashWindow: BrowserWindow | null = null
+let mainWindowCreated = false
+let mainWindowRequested = false
+let quitting = false
+
+app.on('before-quit', () => {
+  quitting = true
+})
+
+/** A state flush may veto quit after Electron has already emitted before-quit. */
+export function cancelQuit(): void {
+  quitting = false
+}
 
 const preload = join(__dirname, '../preload/index.js')
 
@@ -65,6 +139,8 @@ export function createSplashWindow(): BrowserWindow {
     icon: getIconPath(),
     webPreferences: { preload, sandbox: true, contextIsolation: true }
   })
+
+  hardenNavigation(splashWindow)
 
   const target = rendererUrl('splash')
   if (target.url) void splashWindow.loadURL(target.url)
@@ -101,7 +177,9 @@ export function syncDropzoneWindow(show: boolean): void {
         resizable: false,
         webPreferences: { preload, sandbox: true, contextIsolation: true }
       })
-      
+
+      hardenNavigation(dropzoneWindow)
+
       const target = rendererUrl('index', '#dropzone')
       if (target.url) void dropzoneWindow.loadURL(target.url)
       else void dropzoneWindow.loadFile(target.file!, { hash: 'dropzone' })
@@ -120,7 +198,9 @@ export function syncDropzoneWindow(show: boolean): void {
 }
 
 export function createMainWindow(startMinimized: boolean): BrowserWindow {
-  mainWindow = new BrowserWindow({
+  if (mainWindow && !mainWindow.isDestroyed()) return mainWindow
+
+  const window = new BrowserWindow({
     width: 1180,
     height: 720,
     minWidth: 620,
@@ -130,35 +210,47 @@ export function createMainWindow(startMinimized: boolean): BrowserWindow {
     backgroundColor: '#0b0e14',
     titleBarStyle: 'hidden',
     icon: getIconPath(),
-    webPreferences: { preload, sandbox: true, contextIsolation: true }
+    webPreferences: { preload, sandbox: true, contextIsolation: true, autoplayPolicy: 'no-user-gesture-required' }
   })
+  mainWindow = window
+  mainWindowCreated = true
+  mainWindowRequested = !startMinimized
 
-  mainWindow.once('ready-to-show', () => {
-    if (startMinimized) mainWindow?.minimize()
-    else mainWindow?.show()
+  window.once('ready-to-show', () => {
+    if (quitting || window.isDestroyed() || mainWindow !== window) return
+    // A tray click during loading outranks the start-minimized preference.
+    if (mainWindowRequested) {
+      window.show()
+      window.focus()
+    } else window.minimize()
   })
 
   // Downloads are full of outbound links; none of them should ever open inside
   // the app's own window.
-  mainWindow.webContents.setWindowOpenHandler(({ url }) => {
-    openExternally(url)
-    return { action: 'deny' }
-  })
+  hardenNavigation(window)
 
   const target = rendererUrl('index')
-  if (target.url) void mainWindow.loadURL(target.url)
-  else void mainWindow.loadFile(target.file!)
+  if (target.url) void window.loadURL(target.url)
+  else void window.loadFile(target.file!)
 
   // The window can also be maximized by double-clicking the drag region or by
   // Win+Up, so the renderer cannot infer this from its own button presses.
-  mainWindow.on('maximize', () => send('window:maximized', true))
-  mainWindow.on('unmaximize', () => send('window:maximized', false))
+  window.on('maximize', () => send('window:maximized', true))
+  window.on('unmaximize', () => send('window:maximized', false))
 
-  mainWindow.on('closed', () => {
-    mainWindow = null
+  // Alt+F4 and the taskbar Close command bypass the custom title-bar IPC.
+  window.on('close', (event) => {
+    if (quitting) return
+    event.preventDefault()
+    if (getSettings().closeToTray) window.hide()
+    else app.quit()
   })
 
-  return mainWindow
+  window.on('closed', () => {
+    if (mainWindow === window) mainWindow = null
+  })
+
+  return window
 }
 
 export function getMainWindow(): BrowserWindow | null {
@@ -183,6 +275,17 @@ const handoffWindows = new Map<string, BrowserWindow>()
  * must not be able to open an unbounded number of them. */
 const MAX_HANDOFF_WINDOWS = 12
 
+/**
+ * Notified when the window cap evicts a handoff window, so the owner of
+ * `pendingHandoffs` can drop the matching request too - a window closed here
+ * without its request removed would orphan a handoff nothing can display.
+ */
+let onHandoffEvicted: ((requestId: string) => void) | null = null
+
+export function setHandoffEvictListener(cb: (requestId: string) => void): void {
+  onHandoffEvicted = cb
+}
+
 export function createHandoffWindow(requestId: string): BrowserWindow {
   const existing = handoffWindows.get(requestId)
   if (existing && !existing.isDestroyed()) {
@@ -192,7 +295,10 @@ export function createHandoffWindow(requestId: string): BrowserWindow {
 
   if (handoffWindows.size >= MAX_HANDOFF_WINDOWS) {
     const oldestId = handoffWindows.keys().next().value
-    if (oldestId !== undefined) closeHandoffWindow(oldestId)
+    if (oldestId !== undefined) {
+      onHandoffEvicted?.(oldestId)
+      closeHandoffWindow(oldestId)
+    }
   }
 
   const window = new BrowserWindow({
@@ -222,10 +328,7 @@ export function createHandoffWindow(requestId: string): BrowserWindow {
     window.setPosition(x + offset, y + offset)
   }
 
-  window.webContents.setWindowOpenHandler(({ url }) => {
-    openExternally(url)
-    return { action: 'deny' }
-  })
+  hardenNavigation(window)
 
   const target = rendererUrl('handoff', `?id=${encodeURIComponent(requestId)}`)
   if (target.url) void window.loadURL(target.url)
@@ -286,7 +389,7 @@ export function createProgressWindow(taskId: string): BrowserWindow {
 
   const window = new BrowserWindow({
     width: 470,
-    height: 300,
+    height: 335,
     resizable: false,
     // Minimisable, unlike the confirm window: that one asks a question and is
     // gone, this one may sit there for an hour and has to be got out of the way
@@ -309,10 +412,7 @@ export function createProgressWindow(taskId: string): BrowserWindow {
     window.setPosition(x + offset, y + offset)
   }
 
-  window.webContents.setWindowOpenHandler(({ url }) => {
-    openExternally(url)
-    return { action: 'deny' }
-  })
+  hardenNavigation(window)
 
   const target = rendererUrl('progress', `?id=${encodeURIComponent(taskId)}`)
   if (target.url) void window.loadURL(target.url)
@@ -393,10 +493,24 @@ function updateProgressWindowSiteIcon(window: BrowserWindow, task: DownloadTask)
 
 /** Brings the window back from the tray or a minimised state. */
 export function showMainWindow(): void {
-  if (!mainWindow) return
-  if (mainWindow.isMinimized()) mainWindow.restore()
-  mainWindow.show()
-  mainWindow.focus()
+  if (quitting) return
+  // A second-instance request can arrive before bootstrap has installed IPC.
+  // Surface the splash then; only recreate the UI after its initial creation.
+  if (!mainWindowCreated) {
+    if (splashWindow && !splashWindow.isDestroyed()) {
+      if (splashWindow.isMinimized()) splashWindow.restore()
+      splashWindow.show()
+      splashWindow.focus()
+    }
+    return
+  }
+  const window = mainWindow && !mainWindow.isDestroyed()
+    ? mainWindow
+    : createMainWindow(false)
+  mainWindowRequested = true
+  if (window.isMinimized()) window.restore()
+  window.show()
+  window.focus()
 }
 
 /** Sends on a channel only when there is a live window to receive it. */

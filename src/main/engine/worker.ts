@@ -1,11 +1,11 @@
 import type { FileHandle } from 'node:fs/promises'
-import { request } from 'undici'
 import type { Segment } from '../../shared/types.ts'
 import type { HttpAuthenticator } from './auth.ts'
-import { getDispatcher } from './http.ts'
+import { discardRequestBody, requestGuarded } from '../fetch-guard.ts'
 import { QuotaExceededError, type RateLimiter } from './limiter.ts'
 import { logger } from '../log.ts'
 import { Segmenter } from './segmenter.ts'
+import { isStrongEtag } from './journal.ts'
 
 /**
  * One connection pulling one byte range straight onto disk.
@@ -90,6 +90,14 @@ export interface SegmentContext {
   retryLimit: number
   exponentialBackoff: boolean
   expectedSize: number | null
+  /** Strong validator from the fresh probe, used to guard ranged responses. */
+  expectedEtag?: string | null
+  /** False for servers that reject ranges and for compatibility restarts. */
+  useRanges?: boolean
+  /** Request the entire file as one range without allowing partial retries or splitting. */
+  requestFullRange?: boolean
+  /** Bounded requests for one fixed signed YouTube resource; no cross-run resume. */
+  sequentialRanges?: boolean
   signal: AbortSignal
   /**
    * How much this connection may hold back before issuing one positioned
@@ -106,8 +114,25 @@ export interface SegmentContext {
   auth?: HttpAuthenticator
 }
 
+function isGoogleVideoUrl(rawUrl: string): boolean {
+  try {
+    const parsed = new URL(rawUrl)
+    return /(^|\.)googlevideo\.com$/i.test(parsed.hostname)
+  } catch {
+    return false
+  }
+}
+
+/**
+ * YouTube / googlevideo drops or throttles TCP connections for ranges > 10MB.
+ * Slicing requests to 10MB matches yt-dlp's default http_chunk_size and keeps
+ * downloads smooth and uninterrupted.
+ */
+const GOOGLE_VIDEO_CHUNK_SIZE = 10 * 1024 * 1024
+
 export async function runSegment(seg: Segment, ctx: SegmentContext): Promise<void> {
   let attempt = 0
+  let lastPosition = seg.position
 
   for (;;) {
     if (ctx.signal.aborted) throw new AbortedError()
@@ -138,6 +163,13 @@ export async function runSegment(seg: Segment, ctx: SegmentContext): Promise<voi
       // truncated-but-complete read is a success, not a retry.
       if (Segmenter.remaining(seg) <= 0) return
 
+      // If bytes were committed during this attempt, reset the retry counter:
+      // genuine progress was made, so this was not a hard failure loop.
+      if (seg.position > lastPosition) {
+        attempt = 0
+        lastPosition = seg.position
+      }
+
       attempt++
       if (attempt >= ctx.retryLimit) throw err
 
@@ -153,197 +185,255 @@ export async function runSegment(seg: Segment, ctx: SegmentContext): Promise<voi
 }
 
 async function attemptSegment(seg: Segment, ctx: SegmentContext): Promise<void> {
-  const openEnded = seg.end < 0
-  const requestedStart = seg.position
-  const requestedEnd = seg.end
-  const range = openEnded ? `bytes=${requestedStart}-` : `bytes=${requestedStart}-${requestedEnd}`
+  const isGoogleVideo = isGoogleVideoUrl(ctx.url)
 
-  const send = async (): Promise<Awaited<ReturnType<typeof request>>> => {
-    // Sent up front once the task has been challenged even once, so only the
-    // very first request of a protected download pays for a round trip.
-    const authorization = ctx.auth?.headerFor(ctx.url, 'GET')
-    return request(ctx.url, {
-      method: 'GET',
-      headers: { ...ctx.headers, ...(authorization ? { authorization } : {}), range },
-      dispatcher: getDispatcher(ctx.timeoutMs),
-      signal: ctx.signal
-    })
-  }
+  while (seg.end < 0 ? true : Segmenter.remaining(seg) > 0) {
+    if (ctx.signal.aborted) throw new AbortedError()
 
-  let res = await send()
-
-  // A 401 that names a challenge is a server saying who it wants to hear from,
-  // not a signed URL that expired. `challenged` answers false when there is no
-  // password for it, or when this exact nonce has already been refused - so a
-  // wrong password fails once rather than being retried until the account locks.
-  if (res.statusCode === 401 && ctx.auth?.challenged(ctx.url, res.headers['www-authenticate'])) {
-    await res.body.dump().catch(() => {})
-    res = await send()
-  }
-
-  // A non-resumable server is allowed to return the complete file for the
-  // initial single-connection request. What is unsafe is a 200 that ignores a
-  // partial/split range, because accepting that body would overlap other work.
-  const isWholeFileRequest =
-    requestedStart === 0 &&
-    requestedEnd >= 0 &&
-    ctx.expectedSize !== null &&
-    requestedEnd + 1 === ctx.expectedSize
-  if (res.statusCode === 200 && (requestedStart > 0 || (requestedEnd >= 0 && !isWholeFileRequest))) {
-    await res.body.dump().catch(() => {})
-    throw new NotResumableError('Server ignored the requested byte range')
-  }
-
-  if (BUSY_STATUS.has(res.statusCode)) {
-    const retryAfterMs = parseRetryAfterMs(res.headers['retry-after'])
-    await res.body.dump().catch(() => {})
-    throw new ServerBusyError(res.statusCode, retryAfterMs)
-  }
-
-  if (res.statusCode !== 206 && res.statusCode !== 200) {
-    // undici exposes no reason phrase; the status code is the whole signal.
-    await res.body.dump().catch(() => {})
-    throw new HttpStatusError(res.statusCode)
-  }
-
-  if (res.statusCode === 206) {
-    const contentRange = res.headers['content-range']
-    const match = typeof contentRange === 'string'
-      ? /^bytes\s+(\d+)-(\d+)\/(\d+|\*)$/i.exec(contentRange)
-      : null
-    if (!match) {
-      await res.body.dump().catch(() => {})
-      throw new Error('Server returned 206 without a valid Content-Range')
+    const openEnded = seg.end < 0
+    const requestedStart = seg.position
+    let requestedEnd = seg.end
+    if (ctx.useRanges === false && !ctx.sequentialRanges && requestedStart > 0) {
+      throw new NotResumableError('Server does not support resuming a partial download')
     }
 
-    const rangeStart = Number(match[1])
-    const rangeEnd = Number(match[2])
-    const total = match[3] === '*' ? null : Number(match[3])
-    if (!Number.isSafeInteger(rangeStart) || !Number.isSafeInteger(rangeEnd) || rangeEnd < rangeStart) {
-      await res.body.dump().catch(() => {})
-      throw new Error('Server returned an invalid Content-Range')
+    if ((isGoogleVideo && ctx.useRanges !== false) || ctx.sequentialRanges) {
+      const maxSliceEnd = requestedStart + GOOGLE_VIDEO_CHUNK_SIZE - 1
+      if (requestedEnd >= 0) {
+        requestedEnd = Math.min(requestedEnd, maxSliceEnd)
+      } else if (ctx.expectedSize !== null) {
+        requestedEnd = Math.min(ctx.expectedSize - 1, maxSliceEnd)
+      } else {
+        requestedEnd = maxSliceEnd
+      }
     }
-    if (rangeStart !== requestedStart || (requestedEnd >= 0 && rangeEnd !== requestedEnd)) {
-      await res.body.dump().catch(() => {})
-      throw new Error('Server returned a range different from the requested bytes')
+
+    const range = requestedEnd < 0 ? `bytes=${requestedStart}-` : `bytes=${requestedStart}-${requestedEnd}`
+
+    const send = async (): Promise<Awaited<ReturnType<typeof requestGuarded>>> => {
+      const headers: Record<string, string> = { ...ctx.headers }
+      // Captured browser headers must not reintroduce a range on a plain GET.
+      for (const key of Object.keys(headers)) {
+        if (key.toLowerCase() === 'range') delete headers[key]
+      }
+      if (ctx.useRanges !== false || ctx.sequentialRanges || (ctx.requestFullRange && requestedStart === 0 &&
+          ctx.expectedSize !== null && requestedEnd + 1 === ctx.expectedSize)) {
+        headers.range = range
+        if (ctx.expectedEtag?.startsWith('"') && ctx.expectedEtag.endsWith('"')) {
+          headers['if-range'] = ctx.expectedEtag
+        }
+      }
+      return requestGuarded(ctx.url, {
+        method: 'GET',
+        headers,
+        timeoutMs: ctx.timeoutMs,
+        signal: ctx.signal,
+        // A redirected destination may be the host that challenged during the
+        // probe. Rebuild its header at that hop; never carry source credentials.
+        headersForHop: (url, base) => {
+          const authorization = ctx.auth?.headerFor(url.href, 'GET')
+          return authorization ? { ...base, authorization } : base
+        }
+      })
     }
-    if (total !== null && (!Number.isSafeInteger(total) || total < rangeEnd + 1)) {
-      await res.body.dump().catch(() => {})
-      throw new Error('Server returned an invalid Content-Range total')
+
+    let sent = await send()
+    let res = sent.response
+
+    // A 401 that names a challenge is a server saying who it wants to hear from,
+    // not a signed URL that expired. `challenged` answers false when there is no
+    // password for it, or when this exact nonce has already been refused - so a
+    // wrong password fails once rather than being retried until the account locks.
+    if (res.statusCode === 401 && ctx.auth?.challenged(sent.finalUrl, res.headers['www-authenticate'])) {
+      discardRequestBody(res.body)
+      sent = await send()
+      res = sent.response
     }
-    if (ctx.expectedSize !== null && total !== null && total !== ctx.expectedSize) {
-      await res.body.dump().catch(() => {})
-      throw new Error('Server reported a different resource size than the probe')
+
+    // A non-resumable server is allowed to return the complete file for the
+    // initial single-connection request. What is unsafe is a 200 that ignores a
+    // partial/split range, because accepting that body would overlap other work.
+    const isWholeFileRequest =
+      requestedStart === 0 &&
+      requestedEnd >= 0 &&
+      ctx.expectedSize !== null &&
+      requestedEnd + 1 === ctx.expectedSize
+    if (res.statusCode === 200 && (requestedStart > 0 || (requestedEnd >= 0 && !isWholeFileRequest))) {
+      discardRequestBody(res.body)
+      throw new NotResumableError('Server ignored the requested byte range')
+    }
+
+    if (BUSY_STATUS.has(res.statusCode)) {
+      const retryAfterMs = parseRetryAfterMs(res.headers['retry-after'])
+      discardRequestBody(res.body)
+      throw new ServerBusyError(res.statusCode, retryAfterMs)
+    }
+
+    if (res.statusCode !== 206 && res.statusCode !== 200) {
+      // undici exposes no reason phrase; the status code is the whole signal.
+      discardRequestBody(res.body)
+      throw new HttpStatusError(res.statusCode)
+    }
+
+    if (ctx.sequentialRanges && sent.finalUrl !== new URL(ctx.url).href) {
+      const origUrl = new URL(ctx.url)
+      const finalUrl = new URL(sent.finalUrl)
+      const isYouTubeEdgeMirror =
+        (origUrl.hostname === 'googlevideo.com' || origUrl.hostname.endsWith('.googlevideo.com')) &&
+        (finalUrl.hostname === 'googlevideo.com' || finalUrl.hostname.endsWith('.googlevideo.com')) &&
+        origUrl.pathname === finalUrl.pathname &&
+        origUrl.searchParams.get('id') === finalUrl.searchParams.get('id') &&
+        origUrl.searchParams.get('itag') === finalUrl.searchParams.get('itag')
+      if (!isYouTubeEdgeMirror) {
+        discardRequestBody(res.body)
+        throw new Error('YouTube media redirected to a different resource during transfer')
+      }
+    }
+
+    // A server can change the object after the probe, or between parallel
+    // segments. Never append a response that identifies a different version.
+    const responseEtag = res.headers.etag
+    if (ctx.useRanges !== false && isStrongEtag(ctx.expectedEtag)) {
+      if (typeof responseEtag !== 'string') {
+        discardRequestBody(res.body)
+        throw new NotResumableError('Server omitted the ETag on a ranged response')
+      }
+      if (responseEtag !== ctx.expectedEtag) {
+        discardRequestBody(res.body)
+        throw new Error('Server changed the resource ETag during transfer')
+      }
+    }
+
+    if (res.statusCode === 206) {
+      const contentRange = res.headers['content-range']
+      const match = typeof contentRange === 'string'
+        ? /^bytes\s+(\d+)-(\d+)\/(\d+|\*)$/i.exec(contentRange)
+        : null
+      if (!match) {
+        discardRequestBody(res.body)
+        throw new Error('Server returned 206 without a valid Content-Range')
+      }
+
+      const rangeStart = Number(match[1])
+      const rangeEnd = Number(match[2])
+      const total = match[3] === '*' ? null : Number(match[3])
+      if (ctx.sequentialRanges && total !== ctx.expectedSize) {
+        discardRequestBody(res.body)
+        throw new Error('YouTube media chunk did not confirm the expected resource size')
+      }
+      if (!Number.isSafeInteger(rangeStart) || !Number.isSafeInteger(rangeEnd) || rangeEnd < rangeStart) {
+        discardRequestBody(res.body)
+        throw new Error('Server returned an invalid Content-Range')
+      }
+      if (rangeStart !== requestedStart || (requestedEnd >= 0 && rangeEnd > requestedEnd)) {
+        discardRequestBody(res.body)
+        throw new Error('Server returned a range different from the requested bytes')
+      }
+      if (total !== null && (!Number.isSafeInteger(total) || total < rangeEnd + 1)) {
+        discardRequestBody(res.body)
+        throw new Error('Server returned an invalid Content-Range total')
+      }
+      if (ctx.expectedSize !== null && total !== null && total !== ctx.expectedSize) {
+        discardRequestBody(res.body)
+        throw new Error('Server reported a different resource size than the probe')
+      }
+    }
+
+    const reader = ReadableStream.from(res.body).getReader()
+    const capacity = Math.max(1, Math.floor(ctx.writeBufferBytes))
+    let pending: Uint8Array[] = []
+    let buffered = 0
+    let sliceBytesRead = 0
+
+    const commit = async (chunks: Uint8Array[], total: number): Promise<boolean> => {
+      if (total === 0) return true
+
+      const at = seg.position
+      await writeAtFully(ctx.fh, chunks, at)
+
+      const room = seg.end < 0 ? total : Math.max(0, seg.end - at + 1)
+      const landed = Math.min(total, room)
+      if (landed <= 0) return false
+
+      seg.position = at + landed
+      ctx.onBytes(landed)
+
+      // Pay for the bytes only after they are safely written. Awaiting here is
+      // what applies backpressure all the way down to the socket.
+      await ctx.limiter.consume(landed, ctx.signal)
+      return landed === total
+    }
+
+    const flushPending = async (): Promise<boolean> => {
+      if (buffered === 0) return true
+      const chunks = pending
+      const total = buffered
+      pending = []
+      buffered = 0
+      return commit(chunks, total)
+    }
+
+    try {
+      for (;;) {
+        if (ctx.signal.aborted) throw new AbortedError()
+
+        const { done, value } = await reader.read()
+        if (done) break
+
+        const buf = value as Uint8Array
+        sliceBytesRead += buf.length
+
+        // The segment's `end` can move backwards underneath us: the segmenter
+        // shrinks it when it hands our tail to a newly-idle connection. Anything
+        // past the current end now belongs to another worker. Gathered chunks
+        // have not moved `position` yet, so they count against the room this one
+        // has left.
+        let offset = 0
+        while (offset < buf.length) {
+          const room = seg.end < 0 ? buf.length : seg.end - (seg.position + buffered) + 1
+          const allowed = Math.min(buf.length - offset, capacity - buffered, Math.max(0, room))
+          if (allowed <= 0) break
+
+          pending.push(buf.subarray(offset, offset + allowed))
+          buffered += allowed
+          offset += allowed
+
+          // A network chunk can exceed the split margin. Never let one write
+          // cross that margin while the segmenter is handing our tail away.
+          if (buffered === capacity && !(await flushPending())) break
+        }
+
+        if (offset < buf.length || Segmenter.remaining(seg) <= 0) break
+      }
+
+      // Only on the way out cleanly. An abort or a stream error drops whatever is
+      // still gathered, which costs at most one batch of re-downloading and keeps
+      // `position` describing bytes that reached the disk and nothing else.
+      await flushPending()
+    } finally {
+      // Splitting or a failed disk write must release the response immediately;
+      // draining it can wait on a stalled peer and spend uncharged body bytes.
+      await reader.cancel().catch(() => {})
+      reader.releaseLock()
+    }
+
+    if (openEnded) {
+      if (sliceBytesRead === 0 || res.statusCode === 200) {
+        break
+      }
+      if (ctx.expectedSize !== null && seg.position >= ctx.expectedSize) {
+        break
+      }
+    } else {
+      if (sliceBytesRead === 0 && Segmenter.remaining(seg) > 0) {
+        throw new Error(
+          `Connection closed with ${Segmenter.remaining(seg)} bytes of the range outstanding`
+        )
+      }
     }
   }
 
-  // Read chunks with a pull-based loop instead of `for await...of`.
-  //
-  // The async iterator pauses undici's internal HTTP parser when JS is busy
-  // (writing to disk, awaiting the rate limiter). If the server closes the
-  // socket while the parser is paused, `parser.finish()` hits
-  // `assert(!this.paused)` and crashes the process (undici #3816 / v7).
-  //
-  // Using `readableStream.getReader()` on the web ReadableStream avoids
-  // engaging undici's internal pause/resume and keeps the parser unpaused.
-  // A socket close during an async gap becomes a normal stream error instead
-  // of a fatal assertion.
-  const reader = ReadableStream.from(res.body).getReader()
-
-  /*
-   * Socket chunks are gathered and landed with a single vectored write.
-   *
-   * undici hands over 16-64 KB at a time. Writing each one straight through
-   * costs its own libuv threadpool round-trip and, on the sparse part file,
-   * its own NTFS extent - thousands of both per second at a gigabit, across
-   * every segment of every task. `writev` takes the chunks as they are, so the
-   * batching costs no copying: the saving is in syscalls and in an extent map
-   * that stays small enough not to punish whoever reads the file afterwards.
-   *
-   * Holding chunks back means `seg.position` lags reality, and `Segmenter.split`
-   * picks its midpoint from exactly that number. The caller therefore caps a
-   * batch at the segmenter's minimum split size: a split always leaves at
-   * least that much room ahead of the position it read, so bytes in hand stay
-   * behind the new end. `commit` re-checks anyway, because `end` can also move
-   * while a write is in flight.
-   */
-  const capacity = Math.max(1, Math.floor(ctx.writeBufferBytes))
-  let pending: Uint8Array[] = []
-  let buffered = 0
-
-  /**
-   * Lands one contiguous run at `seg.position` and accounts for it.
-   *
-   * The advance is clamped to what the segment still owns once the write
-   * returns, not to what it owned when the run was gathered. Anything past
-   * that was handed to another connection in the meantime; it is written but
-   * not claimed, and the connection that now owns it writes the same bytes at
-   * the same offsets. Returns false when the run was cut short that way.
-   */
-  const commit = async (chunks: Uint8Array[], total: number): Promise<boolean> => {
-    if (total === 0) return true
-
-    const at = seg.position
-    await writeAtFully(ctx.fh, chunks, at)
-
-    const room = seg.end < 0 ? total : Math.max(0, seg.end - at + 1)
-    const landed = Math.min(total, room)
-    if (landed <= 0) return false
-
-    seg.position = at + landed
-    ctx.onBytes(landed)
-
-    // Pay for the bytes only after they are safely written. Awaiting here is
-    // what applies backpressure all the way down to the socket.
-    await ctx.limiter.consume(landed, ctx.signal)
-    return landed === total
-  }
-
-  const flushPending = async (): Promise<boolean> => {
-    if (buffered === 0) return true
-    const chunks = pending
-    const total = buffered
-    pending = []
-    buffered = 0
-    return commit(chunks, total)
-  }
-
-  try {
-    for (;;) {
-      if (ctx.signal.aborted) throw new AbortedError()
-
-      const { done, value } = await reader.read()
-      if (done) break
-
-      const buf = value as Uint8Array
-
-      // The segment's `end` can move backwards underneath us: the segmenter
-      // shrinks it when it hands our tail to a newly-idle connection. Anything
-      // past the current end now belongs to another worker. Gathered chunks
-      // have not moved `position` yet, so they count against the room this one
-      // has left.
-      const room = seg.end < 0 ? buf.length : seg.end - (seg.position + buffered) + 1
-      const allowed = Math.min(buf.length, Math.max(0, room))
-      if (allowed <= 0) break
-
-      pending.push(allowed === buf.length ? buf : buf.subarray(0, allowed))
-      buffered += allowed
-
-      if (buffered >= capacity && !(await flushPending())) break
-
-      if (allowed < buf.length) break
-    }
-
-    // Only on the way out cleanly. An abort or a stream error drops whatever is
-    // still gathered, which costs at most one batch of re-downloading and keeps
-    // `position` describing bytes that reached the disk and nothing else.
-    await flushPending()
-  } finally {
-    reader.releaseLock()
-    await res.body.dump().catch(() => {})
-  }
-
-  if (!openEnded && Segmenter.remaining(seg) > 0) {
+  if (seg.end >= 0 && Segmenter.remaining(seg) > 0) {
     throw new Error(
       `Connection closed with ${Segmenter.remaining(seg)} bytes of the range outstanding`
     )
@@ -391,6 +481,7 @@ async function writeAtFully(fh: FileHandle, chunks: Uint8Array[], position: numb
 }
 
 function delay(ms: number, signal: AbortSignal): Promise<void> {
+  if (signal.aborted) return Promise.reject(new AbortedError())
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => {
       signal.removeEventListener('abort', onAbort)

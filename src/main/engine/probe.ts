@@ -1,6 +1,6 @@
 import type { ProbeResult, RequestHeaders } from '../../shared/types.ts'
 import type { HttpAuthenticator } from './auth.ts'
-import { getDispatcher } from './http.ts'
+import { fetchGuarded } from '../fetch-guard.ts'
 import { isEmptyRangeResponse } from './probe-helpers.ts'
 import { filenameFromDisposition, filenameFromUrl, sanitizeFilename } from './naming.ts'
 import { localTorrentDescriptor } from './torrent-store.ts'
@@ -11,16 +11,16 @@ import { HttpStatusError } from './worker.ts'
  * to call it, and - the part that decides everything else - whether the server
  * will actually serve byte ranges.
  *
- * This uses `fetch` rather than undici's `request` for one reason: `fetch`
- * reports the post-redirect URL as `response.url`. undici's redirect
- * interceptor only records the hops it left behind, so the destination itself
- * would have to be reconstructed by hand.
+ * The guarded fetch reports the final URL and checks every redirect before
+ * connecting, including redirects into local or private addresses.
  */
 
 export const DEFAULT_USER_AGENT =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36'
 
 export interface ProbeOptions {
+  /** Resume validation must observe the current resource, not a dialog's preview. */
+  fresh?: boolean
   headers?: RequestHeaders
   timeoutMs?: number
   signal?: AbortSignal
@@ -61,27 +61,53 @@ export function totalFromContentRange(value: string | null): number | null {
 }
 
 const probeCache = new Map<string, { result: ProbeResult; expiresAt: number }>()
+const PROBE_CACHE_MAX = 500
+
+/**
+ * Reads through the cache, dropping an entry that has aged out.
+ *
+ * Expiry used to be checked only at the call site, so a stale entry sat in the
+ * map holding a slot until five hundred newer probes had pushed it out - which,
+ * with the eviction below, they could not reliably do.
+ */
+function getProbeCache(key: string): ProbeResult | null {
+  const entry = probeCache.get(key)
+  if (!entry) return null
+  if (Date.now() >= entry.expiresAt) {
+    probeCache.delete(key)
+    return null
+  }
+  // Re-insert so the eviction order below is by *use*, not by first sighting.
+  probeCache.delete(key)
+  probeCache.set(key, entry)
+  return entry.result
+}
 
 function setProbeCache(key: string, value: { result: ProbeResult; expiresAt: number }) {
+  // Delete first: re-setting an existing key keeps its original position in a
+  // Map, so a hot URL refreshed in place would still be the first one evicted.
+  probeCache.delete(key)
   probeCache.set(key, value)
-  if (probeCache.size > 500) {
+
+  while (probeCache.size > PROBE_CACHE_MAX) {
     const oldest = probeCache.keys().next().value
-    if (oldest !== undefined) probeCache.delete(oldest)
+    if (oldest === undefined) break
+    probeCache.delete(oldest)
   }
 }
 
 export async function probeUrl(url: string, options: ProbeOptions = {}): Promise<ProbeResult> {
+  options.signal?.throwIfAborted()
   if (isTorrentSource(url)) return probeTorrent(url, options)
 
   const cacheKey = url + JSON.stringify(options.headers || {})
-  const cached = probeCache.get(cacheKey)
-  if (cached && Date.now() < cached.expiresAt) {
-    return cached.result
+  if (!options.fresh) {
+    const cached = getProbeCache(cacheKey)
+    if (cached) return cached
   }
 
   const timeoutMs = options.timeoutMs ?? 30_000
   const headers = buildHeaders(options.headers)
-  const dispatcher = getDispatcher(timeoutMs)
 
   /**
    * `fetch`, plus the one retry a 401 challenge is worth.
@@ -90,23 +116,30 @@ export async function probeUrl(url: string, options: ProbeOptions = {}): Promise
    * what makes Add URL work at all on one - and the authenticator is shared
    * with the task that follows, which therefore starts already knowing.
    */
-  const authedFetch = async (target: string, init: Record<string, unknown>): Promise<Response> => {
-    const build = (): RequestInit => {
-      const authorization = options.auth?.headerFor(target, String(init.method ?? 'GET'))
-      const base = (init.headers ?? {}) as Record<string, string>
-      return {
-        ...init,
-        headers: authorization ? { ...base, authorization } : base,
-        dispatcher
-      } as RequestInit
+  const authedFetch = async (
+    target: string,
+    init: { method: 'HEAD' | 'GET'; headers: Record<string, string>; signal?: AbortSignal }
+  ): Promise<Response> => {
+    const send = (): Promise<Response> => {
+      return fetchGuarded(target, {
+        method: init.method,
+        headers: init.headers,
+        headersForHop: (address, base) => {
+          const authorization = options.auth?.headerFor(address.href, init.method)
+          return authorization ? { ...base, authorization } : base
+        },
+        signal: init.signal,
+        timeoutMs
+      })
     }
 
-    const first = await fetch(target, build())
+    const first = await send()
     if (first.status !== 401) return first
-    if (!options.auth?.challenged(target, first.headers.get('www-authenticate') ?? undefined)) return first
+    const challengedUrl = first.url || target
+    if (!options.auth?.challenged(challengedUrl, first.headers.get('www-authenticate') ?? undefined)) return first
 
     await first.body?.cancel().catch(() => {})
-    return fetch(target, build())
+    return send()
   }
 
   let finalUrl = url
@@ -122,7 +155,6 @@ export async function probeUrl(url: string, options: ProbeOptions = {}): Promise
     const head = await authedFetch(url, {
       method: 'HEAD',
       headers,
-      redirect: 'follow',
       signal: options.signal
     })
 
@@ -152,12 +184,20 @@ export async function probeUrl(url: string, options: ProbeOptions = {}): Promise
   const ranged = await authedFetch(url, {
     method: 'GET',
     headers: { ...headers, range: 'bytes=0-0' },
-    redirect: 'follow',
     signal: options.signal
   })
 
   try {
-    finalUrl = ranged.url || finalUrl
+    const rangedUrl = ranged.url || url
+    const sameHeadTarget = rangedUrl === finalUrl
+    finalUrl = rangedUrl
+    // GET is authoritative. HEAD may describe another version or even another
+    // redirect target; retaining its length can silently truncate a chunked GET.
+    size = null
+    etag = ranged.headers.get('etag')
+    lastModified = ranged.headers.get('last-modified')
+    mimeType = ranged.headers.get('content-type') ?? (sameHeadTarget ? mimeType : null)
+    disposition = ranged.headers.get('content-disposition') ?? (sameHeadTarget ? disposition : null)
 
     // Empty resources commonly answer `Range: bytes=0-0` with 416 and
     // `Content-Range: bytes */0`.
@@ -189,21 +229,21 @@ export async function probeUrl(url: string, options: ProbeOptions = {}): Promise
         const plain = await authedFetch(url, {
           method: 'GET',
           headers,
-          redirect: 'follow',
           signal: options.signal
         })
         try {
           if (plain.ok) {
             finalUrl = plain.url || finalUrl
+            size = null
             const len = plain.headers.get('content-length')
             if (len && /^\d+$/.test(len)) {
               const parsed = Number(len)
               if (Number.isSafeInteger(parsed)) size = parsed
             }
-            etag = plain.headers.get('etag') ?? etag
-            lastModified = plain.headers.get('last-modified') ?? lastModified
-            mimeType = plain.headers.get('content-type') ?? mimeType
-            disposition = plain.headers.get('content-disposition') ?? disposition
+            etag = plain.headers.get('etag')
+            lastModified = plain.headers.get('last-modified')
+            mimeType = plain.headers.get('content-type')
+            disposition = plain.headers.get('content-disposition')
             const result = {
               finalUrl,
               filename: resolveFilename(disposition, finalUrl, url, mimeType),
@@ -274,8 +314,10 @@ function isTorrentSource(url: string): boolean {
 
 async function probeTorrent(url: string, options: ProbeOptions): Promise<ProbeResult> {
   const cacheKey = `torrent:${url}`
-  const cached = probeCache.get(cacheKey)
-  if (cached && Date.now() < cached.expiresAt) return cached.result
+  if (!options.fresh) {
+    const cached = getProbeCache(cacheKey)
+    if (cached) return cached
+  }
 
   // An imported `.torrent` already says what is inside it. Asking the swarm
   // would be up to 45 seconds of peer discovery to learn what is sitting in a
@@ -296,7 +338,7 @@ async function probeTorrent(url: string, options: ProbeOptions): Promise<ProbeRe
     const torrent = await new Promise<TorrentProbeMetadata>((resolve, reject) => {
       let settled = false
       let timer: NodeJS.Timeout | undefined
-      const candidate = client.add(url)
+      const candidate = client.add(url, { deselect: true })
 
       const finish = (metadata?: TorrentProbeMetadata, error?: unknown): void => {
         if (settled) return
@@ -373,6 +415,44 @@ function metadataFromWebTorrent(torrent: any): TorrentProbeMetadata {
   }
 }
 
+/** A `.torrent` descriptor is kilobytes; this is already absurdly generous. */
+const MAX_DESCRIPTOR_BYTES = 10 * 1024 * 1024
+
+/**
+ * Reads a response body, giving up the moment it exceeds `limit` rather than
+ * once it has already been held in memory.
+ */
+async function readBounded(response: Response, limit: number): Promise<Uint8Array | null> {
+  if (!response.body) return null
+
+  const reader = response.body.getReader()
+  const chunks: Uint8Array[] = []
+  let total = 0
+
+  try {
+    for (;;) {
+      const { done, value } = await reader.read()
+      if (done) break
+      total += value.length
+      if (total > limit) return null
+      chunks.push(value)
+    }
+  } finally {
+    // Also what tears down a body abandoned over the limit.
+    await reader.cancel().catch(() => {})
+    reader.releaseLock()
+  }
+
+  if (total === 0) return null
+  const out = new Uint8Array(total)
+  let offset = 0
+  for (const chunk of chunks) {
+    out.set(chunk, offset)
+    offset += chunk.length
+  }
+  return out
+}
+
 export async function fetchCachedTorrentDescriptor(
   magnetUrl: string,
   signal: AbortSignal | undefined
@@ -384,23 +464,26 @@ export async function fetchCachedTorrentDescriptor(
 
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), 10_000)
-  const abort = (): void => controller.abort()
-  signal?.addEventListener('abort', abort, { once: true })
+  const requestSignal = signal ? AbortSignal.any([signal, controller.signal]) : controller.signal
+  let response: Response | undefined
   try {
-    const response = await fetch(
+    response = await fetchGuarded(
       `https://itorrents.org/torrent/${requested.infoHash.toUpperCase()}.torrent`,
       {
         headers: { accept: 'application/x-bittorrent', 'user-agent': DEFAULT_USER_AGENT },
-        redirect: 'follow',
-        signal: controller.signal,
-        dispatcher: getDispatcher(10_000)
-      } as RequestInit
+        signal: requestSignal,
+        timeoutMs: 10_000
+      }
     )
     if (!response.ok) return undefined
     const declared = Number(response.headers.get('content-length') ?? 0)
-    if (declared > 10 * 1024 * 1024) return undefined
-    const bytes = new Uint8Array(await response.arrayBuffer())
-    if (bytes.length === 0 || bytes.length > 10 * 1024 * 1024) return undefined
+    if (Number.isFinite(declared) && declared > MAX_DESCRIPTOR_BYTES) return undefined
+    // The declared length is only a claim, and a response that omits it made no
+    // claim at all - so the cap has to be enforced while reading rather than
+    // after. `arrayBuffer()` here would buffer whatever the host chose to send,
+    // in the main process, before anything got to check it.
+    const bytes = await readBounded(response, MAX_DESCRIPTOR_BYTES)
+    if (!bytes) return undefined
     const parsed = await parseTorrent(bytes)
     if (parsed.infoHash.toLowerCase() !== requested.infoHash.toLowerCase() || !parsed.files) return undefined
     return {
@@ -413,7 +496,7 @@ export async function fetchCachedTorrentDescriptor(
     }
   } finally {
     clearTimeout(timer)
-    signal?.removeEventListener('abort', abort)
+    await response?.body?.cancel().catch(() => {})
   }
 }
 

@@ -17,6 +17,9 @@ const fileWork = new Map<string, Promise<string | null>>()
 const siteIcons = new Map<string, string | null>()
 const siteWork = new Map<string, Promise<string | null>>()
 
+const thumbnails = new Map<string, string | null>()
+const thumbnailWork = new Map<string, Promise<string | null>>()
+
 function useRemembered(
   key: string | null,
   cache: Map<string, string | null>,
@@ -70,6 +73,21 @@ const loadSiteIcon = (origin: string): Promise<string | null> => window.api.site
 /** The icon Windows shows for this kind of file, or null while unknown. */
 export function useFileIcon(filename: string): string | null {
   return useRemembered(extensionOf(filename) || null, fileIcons, fileWork, loadFileIcon)
+}
+
+const loadThumbnail = (url: string): Promise<string | null> => window.api.thumbnail(url)
+
+/**
+ * A video's poster image, or null while it is still being fetched - and null
+ * for good if it could not be. Same data-URL round trip as the icons above, and
+ * for the same reason: the CSP does not let a window fetch `i.ytimg.com` itself.
+ *
+ * The module-scope cache matters more here than for icons. A playlist of four
+ * hundred rows scrolls in and out of view repeatedly, and without this every
+ * pass would be four hundred fresh IPC calls for images main already holds.
+ */
+export function useThumbnail(url: string | null | undefined): string | null {
+  return useRemembered(url || null, thumbnails, thumbnailWork, loadThumbnail)
 }
 
 /** The favicon of the site a download came from, keyed by origin. */

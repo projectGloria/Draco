@@ -1,4 +1,5 @@
 import type { TaskStatus } from '@shared/types'
+import { useT } from '../i18n'
 
 /**
  * One bar, used for whole tasks in the table and for individual segments in the
@@ -15,6 +16,8 @@ export function barColor(status: TaskStatus): string {
       return 'var(--color-err)'
     case 'paused':
       return 'var(--color-faint)'
+    case 'scanning':
+      return 'var(--color-warn)'
     default:
       return 'var(--grad)'
   }
@@ -29,6 +32,7 @@ export default function ProgressBar({
   status: TaskStatus
   height?: number
 }): React.ReactElement {
+  const t = useT()
   const live = status === 'downloading' || status === 'probing'
 
   return (
@@ -39,6 +43,7 @@ export default function ProgressBar({
       aria-valuenow={percent ?? undefined}
       aria-valuemin={0}
       aria-valuemax={100}
+      aria-valuetext={status === 'processing' ? t('transferCompleteProcessing') : status === 'scanning' ? t('transferCompleteScanning') : undefined}
     >
       {percent === null ? (
         <div

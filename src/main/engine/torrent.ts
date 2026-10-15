@@ -5,7 +5,6 @@ import type { RunnerContext } from './manager.ts'
 import { DEFAULT_TORRENT_TRACKERS } from './create.ts'
 import { fetchCachedTorrentDescriptor } from './probe.ts'
 import { localTorrentDescriptor } from './torrent-store.ts'
-import { QuotaExceededError } from './limiter.ts'
 
 interface TorrentProgressFile {
   path: string
@@ -68,14 +67,21 @@ function torrentInfoOf(torrent: Torrent, selectedFiles?: string[]): DownloadTask
   }
 }
 
+/** How often the details panel may be rebuilt while it is being watched. */
+const INFO_REFRESH_MS = 1000
+const TORRENT_QUOTA_UNSUPPORTED = 'Torrent downloads cannot honor the active transfer quota because WebTorrent receives pieces before Draco can count their network bytes. Turn off the quota before retrying this torrent.'
+
 export class TorrentRunner implements Runner {
   public running = false
   private client: any | null = null
   private torrent: Torrent | null = null
+  private controller = new AbortController()
+  private cleanupPromise: Promise<void> | null = null
 
   public readonly task: DownloadTask
   private readonly context: RunnerContext
-  private lastReportedDownloaded = 0
+  /** When the diagnostics panel was last rebuilt - see `updateTorrentInfo`. */
+  private lastInfoAt = 0
 
   constructor(
     task: DownloadTask,
@@ -83,20 +89,57 @@ export class TorrentRunner implements Runner {
   ) {
     this.task = task
     this.context = context
-    this.lastReportedDownloaded = task.received || 0
   }
 
   async start(): Promise<void> {
     if (this.running) return
     this.running = true
+    this.controller = new AbortController()
     this.task.status = 'downloading'
     this.task.detail = 'Finding torrent metadata…'
     this.context.onUpdate(this.task)
 
+    try {
+      if (this.context.limiter.hasTransferQuota) throw new Error(TORRENT_QUOTA_UNSUPPORTED)
+      await this.startClient()
+    } catch (err) {
+      // The runner contract (engine/runner.ts): every stop path must end in
+      // onFinished, or the manager's concurrency slot leaks and schedule()
+      // skips this task forever. A failed webtorrent import, a throwing
+      // constructor, or a synchronous client.add() all land here.
+      if (!this.running) return
+      this.running = false
+      this.task.status = 'error'
+      this.task.detail = null
+      this.task.error = err instanceof Error ? err.message : String(err)
+      this.context.onUpdate(this.task)
+      await this.cleanup()
+      this.context.onFinished(this.task, err instanceof Error ? err : new Error(String(err)))
+    }
+  }
+
+  private async startClient(): Promise<void> {
     // Bypass Vite's CommonJS transpilation so we use the real Node.js dynamic import
     const wt = await (new Function("return import('webtorrent')")())
+    if (!this.running) return
+    if (this.context.limiter.hasTransferQuota) throw new Error(TORRENT_QUOTA_UNSUPPORTED)
     const WebTorrentModule = wt.default || wt
     this.client = new (WebTorrentModule as any)()
+    // Discovery can emit an error while descriptor lookup is awaiting HTTP.
+    // Install the observer before the first asynchronous startup operation.
+    this.client.on('error', (err: Error | string) => {
+      if (!this.running) return
+      this.running = false
+      this.task.status = 'error'
+      this.task.detail = null
+      this.task.error = typeof err === 'string' ? err : err.message
+      this.context.onUpdate(this.task)
+      void this.cleanup().then(() => this.context.onFinished(this.task, typeof err === 'string' ? new Error(err) : err))
+    })
+    if (!this.running) {
+      this.cleanup()
+      return
+    }
     this.applyThrottles()
 
     // Start with no pieces selected. WebTorrent otherwise selects the entire
@@ -110,7 +153,7 @@ export class TorrentRunner implements Runner {
         // cache is merely convenient.
         const cached =
           (await localTorrentDescriptor(this.task.url)) ??
-          (await fetchCachedTorrentDescriptor(this.task.url, undefined))
+          (await fetchCachedTorrentDescriptor(this.task.url, this.controller.signal))
         if (!this.running) {
           this.cleanup()
           return
@@ -119,14 +162,28 @@ export class TorrentRunner implements Runner {
       } catch {}
     }
 
+    if (!this.running) return
+    if (this.context.limiter.hasTransferQuota) throw new Error(TORRENT_QUOTA_UNSUPPORTED)
 
-    this.torrent = this.client.add(
+    this.attachTorrent(this.client.add(
       torrentId,
       { ...torrentDownloadOptions(this.task.dir), announce: [...DEFAULT_TORRENT_TRACKERS] }
-    ) as Torrent
+    ) as Torrent)
+  }
 
+  private attachTorrent(torrent: Torrent): void {
+    this.torrent = torrent
     this.torrent.on('metadata', () => {
       if (!this.running || !this.torrent) return
+      const roots = this.torrent.files.map((file) => file.path.split(/[\\/]/)[0])
+      const root = roots[0]
+      if (root && root !== '.' && root !== '..' && roots.every((name) => name === root)) {
+        // WebTorrent writes metadata paths; an arbitrary display name cannot
+        // rename those files and makes Open/Show-in-folder point nowhere.
+        this.task.filename = root
+        this.task.filenameLocked = true
+      }
+      this.task.torrentFiles = this.torrent.files.map((file) => ({ path: file.path, size: file.length }))
       
       if (this.task.selectedFiles) {
         const selected = new Set(this.task.selectedFiles)
@@ -141,20 +198,27 @@ export class TorrentRunner implements Runner {
           .filter((f: any) => selected.has(f.path))
           .reduce((sum: number, f: any) => sum + f.length, 0)
       } else {
+        // The client starts with no pieces selected, including full downloads.
+        // Explicitly select every file once its metadata is available.
+        for (const file of this.torrent.files) file.select()
         this.task.size = this.torrent.length
       }
 
       this.task.resumable = true
       this.task.received = this.selectedDownloaded()
       this.task.detail = this.torrent.wires.length > 0 ? null : 'Metadata ready · waiting for peers…'
-      this.updateTorrentInfo()
-      if (this.selectedComplete()) this.complete()
+      this.updateTorrentInfo(true)
+      if (this.selectedComplete()) void this.complete()
       else this.context.onUpdate(this.task)
     })
 
-    this.torrent.on('done', () => this.complete())
+    this.torrent.on('done', () => { void this.complete() })
+    // Idempotent on purpose. `onUpdate` is a full task-list broadcast plus a
+    // persist, and a torrent finding eighty peers fires this eighty times in a
+    // few seconds - seventy-nine of which had nothing left to say, because the
+    // detail was already null after the first.
     this.torrent.on('wire', () => {
-      if (!this.running) return
+      if (!this.running || this.task.detail === null) return
       this.task.detail = null
       this.context.onUpdate(this.task)
     })
@@ -168,57 +232,61 @@ export class TorrentRunner implements Runner {
 
     this.torrent.on('error', (err: Error | string) => {
       if (!this.running) return
+      this.running = false
       this.task.status = 'error'
       this.task.detail = null
       this.task.error = typeof err === 'string' ? err : err.message
       this.context.onUpdate(this.task)
-      this.context.onFinished(this.task, typeof err === 'string' ? new Error(err) : err)
-      this.cleanup()
+      void this.cleanup().then(() => this.context.onFinished(this.task, typeof err === 'string' ? new Error(err) : err))
     })
 
-    this.client.on('error', (err: Error | string) => {
-      if (!this.running) return
-      this.task.status = 'error'
-      this.task.detail = null
-      this.task.error = typeof err === 'string' ? err : err.message
-      this.context.onUpdate(this.task)
-      this.context.onFinished(this.task, typeof err === 'string' ? new Error(err) : err)
-      this.cleanup()
-    })
   }
 
   async pause(): Promise<void> {
-    if (!this.running) return
+    if (!this.running) {
+      await this.cleanupPromise
+      return
+    }
     this.running = false
     this.task.status = 'paused'
     this.task.detail = null
     this.task.speed = 0
     this.task.eta = null
     this.context.onUpdate(this.task)
-    this.cleanup()
+    await this.cleanup()
+
+    /*
+     * `onFinished` is how a runner gives its slot back: it is what makes the
+     * manager drop this entry from `runners`. Every other runner reaches it
+     * through its own `start()` unwinding on abort; this one cannot, because
+     * `start()` returned the moment the torrent was added and there is nothing
+     * left to unwind.
+     *
+     * Without it a paused torrent held its concurrency slot for the life of the
+     * process - and `schedule()` skips any task already in `runners`, so
+     * pressing Start again left the row sitting at "queued" forever.
+     *
+     */
+    this.context.onFinished(this.task, null)
   }
 
   tick(): void {
     if (!this.running || !this.torrent) return
 
+    // WebTorrent has already received bytes by the time its counters change.
+    // Charging those counters cannot enforce a hard transfer quota.
+    if (this.context.limiter.hasTransferQuota) {
+      this.failUnsupportedQuota()
+      return
+    }
+
     this.applyThrottles()
 
     const downloaded = this.selectedDownloaded()
-    const delta = downloaded - this.lastReportedDownloaded
-    if (delta > 0) {
-      this.lastReportedDownloaded = downloaded
-      void this.context.limiter.consume(delta).catch((err) => {
-        if (err instanceof QuotaExceededError) {
-          void this.pause()
-          this.task.detail = 'Transfer quota reached'
-          this.context.onUpdate(this.task)
-        }
-      })
-    }
 
     this.task.received = Math.min(downloaded, this.task.size ?? downloaded)
     if (this.selectedComplete()) {
-      this.complete()
+      void this.complete()
       return
     }
     this.task.speed = this.torrent.downloadSpeed
@@ -244,14 +312,15 @@ export class TorrentRunner implements Runner {
   /**
    * Pushes the current caps at the client.
    *
-   * Download follows the app-wide limiter every other runner obeys. Upload is a
-   * separate setting on purpose: sharing one cap would make giving back cost
-   * the user the speed they set for getting, and then nobody leaves seeding on.
+   * WebTorrent has its own per-client throttle. Apply the tightest app/queue
+   * rate to this client; multiple torrent clients still need a shared throttle
+   * before the app-wide rate can be guaranteed in aggregate. Upload has its
+   * own setting, so seeding does not consume the download rate.
    */
   private applyThrottles(): void {
     if (!this.client) return
     if (typeof this.client.throttleDownload === 'function') {
-      this.client.throttleDownload(this.context.limiter.limit ?? -1)
+      this.client.throttleDownload(this.context.limiter.effectiveSpeedLimit ?? -1)
     }
     if (typeof this.client.throttleUpload === 'function') {
       this.client.throttleUpload(this.context.uploadLimit ?? -1)
@@ -285,12 +354,9 @@ export class TorrentRunner implements Runner {
 
     const downloaded = this.selectedDownloaded()
     this.task.received = Math.min(downloaded, this.task.size ?? downloaded)
-    // The limiter was already charged for whatever arrived; re-baseline so a
-    // shrunken selection is not read as a negative delta on the next tick.
-    this.lastReportedDownloaded = downloaded
-    this.updateTorrentInfo()
+    this.updateTorrentInfo(true)
 
-    if (this.running && this.selectedComplete()) this.complete()
+    if (this.running && this.selectedComplete()) void this.complete()
     else this.context.onUpdate(this.task)
   }
 
@@ -300,32 +366,68 @@ export class TorrentRunner implements Runner {
     return selectedTorrentDownloaded(this.torrent.files, this.task.selectedFiles)
   }
 
+  private failUnsupportedQuota(): void {
+    if (!this.running) return
+    this.running = false
+    const error = new Error(TORRENT_QUOTA_UNSUPPORTED)
+    this.task.status = 'error'
+    this.task.error = error.message
+    this.task.detail = null
+    this.task.speed = 0
+    this.task.eta = null
+    this.context.onUpdate(this.task)
+    void this.cleanup().then(() => this.context.onFinished(this.task, error))
+  }
+
   private selectedComplete(): boolean {
     if (!this.torrent) return false
     return selectedTorrentComplete(this.torrent.files, this.task.selectedFiles)
   }
 
-  private updateTorrentInfo(): void {
+  /**
+   * Rebuilds the diagnostics panel, at most once a second and only when
+   * something is showing it.
+   *
+   * `torrentInfoOf` allocates an object per file and per peer and calls into
+   * every wire for its rates. Doing that on all four ticks a second - for a
+   * panel that is only drawn while the details dialog is open - was the single
+   * most expensive thing in the main process on a large torrent, and it was
+   * paid on the same event loop that drains the sockets.
+   *
+   * `force` is for the transitions that must be exact whether or not anybody is
+   * watching: metadata arriving, a selection change, completion.
+   */
+  private updateTorrentInfo(force = false): void {
     if (!this.torrent) return
+
+    if (!force) {
+      if (!this.context.isWatched?.()) return
+      const now = Date.now()
+      if (now - this.lastInfoAt < INFO_REFRESH_MS) return
+      this.lastInfoAt = now
+    } else {
+      this.lastInfoAt = Date.now()
+    }
+
     this.task.torrentInfo = torrentInfoOf(this.torrent, this.task.selectedFiles)
   }
 
-  private complete(): void {
+  private async complete(): Promise<void> {
     if (!this.running || !this.torrent) return
     this.running = false
     this.task.status = 'done'
+    this.task.completedAt = Date.now()
     this.task.detail = null
     this.task.received = this.task.size ?? this.selectedDownloaded()
     this.task.speed = 0
     this.task.eta = null
-    this.updateTorrentInfo()
-    this.context.onUpdate(this.task)
+    this.updateTorrentInfo(true)
 
     // Hand the live swarm connection to the manager instead of destroying it.
     // The download is over either way - `onFinished` still runs, the row still
     // goes green, the queue still starts the next task - but the peers who made
     // this download possible keep an upload to talk to.
-    if (!this.handOverForSeeding()) this.cleanup()
+    if (!this.handOverForSeeding()) await this.cleanup()
 
     this.context.onFinished(this.task, null)
   }
@@ -348,6 +450,7 @@ export class TorrentRunner implements Runner {
 
     const task = this.task
     let stopped = false
+    let stopping: Promise<void> | null = null
 
     const session: SeedSession = {
       taskId: task.id,
@@ -366,13 +469,13 @@ export class TorrentRunner implements Runner {
         ;(client as any).throttleUpload(bytesPerSecond ?? -1)
       },
       stop: () => {
-        if (stopped) return
+        if (stopping) return stopping
         stopped = true
-        try {
-          client.destroy()
-        } catch {
-          // A client that is already gone is the outcome this wanted anyway.
-        }
+        stopping = new Promise<void>((resolve, reject) => {
+          try { client.destroy((error?: Error | null) => error ? reject(error) : resolve()) }
+          catch (error) { reject(error) }
+        })
+        return stopping
       }
     }
 
@@ -380,11 +483,21 @@ export class TorrentRunner implements Runner {
     return true
   }
 
-  private cleanup(): void {
-    if (this.client) {
-      this.client.destroy()
-      this.client = null
-    }
+  private cleanup(): Promise<void> {
+    this.controller.abort()
+    const client = this.client
+    this.client = null
     this.torrent = null
+    if (!client) return this.cleanupPromise ?? Promise.resolve()
+    const pending = new Promise<void>((resolve) => {
+      // WebTorrent's callback follows store and socket teardown. A remove must
+      // not delete the payload until outstanding piece writes have stopped.
+      try { client.destroy(() => resolve()) } catch { resolve() }
+    })
+    this.cleanupPromise = pending
+    void pending.finally(() => {
+      if (this.cleanupPromise === pending) this.cleanupPromise = null
+    })
+    return pending
   }
 }

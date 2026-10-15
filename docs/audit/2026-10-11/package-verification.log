@@ -1,0 +1,15 @@
+
+> draco@0.1.2 verify:package
+> node tools/verify-package.mjs
+
+ffmpeg.exe: ffmpeg version N-127021-ge0c94b2d1c-20260930 Copyright (c) 2000-2026 the FFmpeg developers
+ffprobe.exe: ffprobe version N-127021-ge0c94b2d1c-20260930 Copyright (c) 2007-2026 the FFmpeg developers
+yt-dlp.exe: 2026.08.19
+Bundled JavaScript runtime: v24.21.0
+Offline media encode, probe and extraction passed.
+Native binary loaded: bufferutil/prebuilds/win32-x64/bufferutil.node
+Native binary loaded: utf-8-validate/prebuilds/win32-x64/utf-8-validate.node
+Native binary loaded: utp-native/prebuilds/win32-x64/node.napi.node
+Native binary loaded: fs-native-extensions/prebuilds/win32-x64/fs-native-extensions.node
+Native binary loaded: node-datachannel/build/Release/node_datachannel.node
+Standalone package verified without developer tools on PATH.

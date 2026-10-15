@@ -1,9 +1,12 @@
+import { xPostUrl } from '../shared/x-post.ts'
+
 /** Media pages that Draco deliberately sends through yt-dlp instead of probing as files. */
 export function isSupportedMediaPageUrl(value: unknown): boolean {
   if (typeof value !== 'string') return false
   try {
     const url = new URL(value)
     if (url.protocol !== 'https:') return false
+    if (xPostUrl(value)) return true
 
     if (/(^|\.)soundcloud\.com$/i.test(url.hostname)) {
       const parts = url.pathname.split('/').filter(Boolean)

@@ -48,10 +48,27 @@ const prefsReady = chrome.storage.local.get(PREFS_KEY).then((stored) => {
   prefs = normalizePrefs(stored[PREFS_KEY])
 })
 
+// Chromium's bubble is independent of pausing/cancelling individual downloads.
+// Apply this before downloads arrive, and serialize updates so a slow request
+// cannot hide the UI again after the user pauses integration. Firefox has no
+// equivalent API; keep its download handling available without this feature.
+let downloadUiUpdate = Promise.resolve()
+function syncDownloadUi() {
+  if (!chrome.downloads.setUiOptions) return Promise.resolve()
+  downloadUiUpdate = downloadUiUpdate.then(async () => {
+    await prefsReady
+    await chrome.downloads.setUiOptions({
+      enabled: prefs.paused || !config.enabled || !appStatus.running
+    })
+  }).catch((err) => console.warn('Draco could not update browser download UI:', err))
+  return downloadUiUpdate
+}
+
 async function savePrefs(next) {
   await prefsReady
   prefs = next
   await chrome.storage.local.set({ [PREFS_KEY]: prefs })
+  await syncDownloadUi()
   await refreshAllTabs()
 }
 
@@ -69,6 +86,7 @@ async function probeApp(force = false) {
       }
       const changed = next.running !== appStatus.running || next.version !== appStatus.version
       appStatus = next
+      await syncDownloadUi()
       if (changed) void refreshAllTabs()
       return appStatus
     } finally {
@@ -182,6 +200,7 @@ chrome.storage.onChanged.addListener((changes, area) => {
   // Bounded and deduped the same way the initial load is. Taking the stored
   // arrays verbatim let the in-memory copy exceed the limits that load enforces.
   prefs = normalizePrefs(changes[PREFS_KEY].newValue)
+  void syncDownloadUi()
   void refreshAllTabs()
 })
 
@@ -261,8 +280,12 @@ async function checkAndConsumePassThrough(url) {
 /* Native host                                                         */
 /* ------------------------------------------------------------------ */
 
+function newRequestId() {
+  return globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(36).slice(2)}`
+}
+
 async function callHost(message) {
-  const requestId = globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(36).slice(2)}`
+  const requestId = message.requestId || newRequestId()
   const payload = { ...message, requestId }
   try {
     const reply = await chrome.runtime.sendNativeMessage(HOST, payload)
@@ -281,6 +304,7 @@ async function refreshConfig(force = false) {
   if (reply.ok && reply.config) {
     config = reply.config
     configFetchedAt = Date.now()
+    await syncDownloadUi()
   }
   return config
 }
@@ -288,6 +312,111 @@ async function refreshConfig(force = false) {
 /* ------------------------------------------------------------------ */
 /* Download takeover                                                   */
 /* ------------------------------------------------------------------ */
+
+// The browser remains the owner while a Save As confirmation is open. Keep
+// enough state in local storage to recover a paused item after MV3 suspends
+// this worker. An alarm supplies recovery even if a JS timeout is discarded.
+const PENDING_PREFIX = 'dracoHandoff:'
+const HANDOFF_DEADLINE_MS = 5 * 60_000
+const PREPARING_GRACE_MS = 10_000
+const pendingChecks = new Set()
+
+async function finishPending(record, taken) {
+  try {
+    const items = await chrome.downloads.search({ id: record.downloadId }).catch(() => null)
+    if (items && (!items.length || items[0].state !== 'in_progress')) {
+      await chrome.storage.local.remove(`${PENDING_PREFIX}${record.downloadId}`)
+      return true
+    }
+    if (items && !taken && !items[0].paused) {
+      await chrome.storage.local.remove(`${PENDING_PREFIX}${record.downloadId}`)
+      return true
+    }
+    if (taken) {
+      await chrome.downloads.cancel(record.downloadId)
+      await chrome.storage.local.remove(`${PENDING_PREFIX}${record.downloadId}`)
+      await chrome.downloads.erase({ id: record.downloadId }).catch(() => {})
+    } else {
+      await chrome.downloads.resume(record.downloadId)
+      await chrome.storage.local.remove(`${PENDING_PREFIX}${record.downloadId}`)
+    }
+    return true
+  } catch (err) {
+    console.warn('Draco could not release browser download:', err)
+    return false
+  }
+}
+
+async function checkPending(record) {
+  if (pendingChecks.has(record.downloadId)) return
+  pendingChecks.add(record.downloadId)
+  let stillPending = false
+  try {
+    const key = `${PENDING_PREFIX}${record.downloadId}`
+    const current = (await chrome.storage.local.get(key))[key]
+    if (!current || current.handoffId !== record.handoffId) return
+    record = current
+    const items = await chrome.downloads.search({ id: record.downloadId })
+    // A new onCreated handler writes its recovery record before pausing. Give
+    // that short in-flight step time to finish; after a worker crash an item
+    // that was never paused simply remains with the browser.
+    if (record.stage === 'preparing' && Date.now() < record.preparingUntil &&
+        items.length && items[0].state === 'in_progress') {
+      setTimeout(() => void checkPending(record), 2000)
+      return
+    }
+    if (!items.length || items[0].state !== 'in_progress' || !items[0].paused) {
+      const cleared = await callHost({ type: 'handoffCancel', handoffId: record.handoffId })
+      if (cleared.ok) await chrome.storage.local.remove(key)
+      else setTimeout(() => void checkPending(record), 2000)
+      return
+    }
+    const expired = Date.now() >= record.deadline
+    const reply = await callHost({
+      type: expired ? 'handoffCancel' : 'handoffStatus',
+      handoffId: record.handoffId
+    })
+    if (reply.ok && reply.pending && record.stage === 'requesting') {
+      record.stage = 'pending'
+      await chrome.storage.local.set({ [key]: record })
+    }
+    if (reply.ok && reply.taken) {
+      stillPending = !(await finishPending(record, true))
+    } else if (expired || (reply.ok && !reply.pending && record.stage !== 'requesting')) {
+      stillPending = !(await finishPending(record, false))
+    } else {
+      stillPending = true
+    }
+  } catch (err) {
+    console.warn('Draco confirmation status failed:', err)
+    stillPending = Date.now() < record.deadline
+    if (!stillPending) stillPending = !(await finishPending(record, false))
+  } finally {
+    pendingChecks.delete(record.downloadId)
+  }
+  if (stillPending) setTimeout(() => void checkPending(record), 2000)
+}
+
+async function recoverPending() {
+  const stored = await chrome.storage.local.get(null)
+  for (const [key, record] of Object.entries(stored)) {
+    if (key.startsWith(PENDING_PREFIX) && record?.handoffId && Number.isInteger(record.downloadId)) {
+      void checkPending(record)
+    }
+  }
+}
+
+if (chrome.alarms) {
+  chrome.alarms.onAlarm.addListener((alarm) => {
+    if (alarm.name === 'draco-handoffs') {
+      void recoverPending()
+      void probeApp(true).then((status) => status.running ? refreshConfig() : undefined)
+    }
+  })
+  void chrome.alarms.create('draco-handoffs', { periodInMinutes: 0.5 })
+}
+void recoverPending()
+void prefsReady.then(() => probeApp()).then((status) => status.running ? refreshConfig() : undefined)
 
 function extensionOf(name) {
   const match = /\.([a-z0-9]{1,10})$/i.exec(name || '')
@@ -361,7 +490,40 @@ async function cookieHeaderFor(url) {
   }
 }
 
-chrome.downloads.onCreated.addListener(async (item) => {
+// onCreated precedes filename determination in Chromium. Keep its work visible
+// to that listener so the Save As prompt waits for the ownership decision.
+const downloadTakeovers = new Map()
+chrome.downloads.onCreated.addListener((item) => {
+  const task = takeOverDownload(item)
+  downloadTakeovers.set(item.id, task)
+  void task.finally(() => downloadTakeovers.delete(item.id)).catch(() => {})
+  return task
+})
+
+chrome.downloads.onDeterminingFilename?.addListener((item, suggest) => {
+  let released = false
+  const release = () => {
+    if (released) return
+    released = true
+    clearTimeout(timer)
+    suggest()
+  }
+  // Chromium imposes its own filename-listener timeout. Never hold the browser
+  // indefinitely if the host hangs or Draco's confirmation stays open.
+  const timer = setTimeout(release, 10_000)
+  void (async () => {
+    await downloadTakeovers.get(item.id)
+    while (!released) {
+      const key = `${PENDING_PREFIX}${item.id}`
+      const stored = await chrome.storage.local.get(key)
+      if (!stored[key]) break
+      await new Promise((resolve) => setTimeout(resolve, 250))
+    }
+  })().catch((err) => console.warn('Draco filename handoff failed:', err)).finally(release)
+  return true
+})
+
+async function takeOverDownload(item) {
   if (item.startTime) {
     const age = Date.now() - new Date(item.startTime).getTime()
     if (age > 10_000) return // Ignore old downloads re-emitted by the browser on startup
@@ -370,47 +532,149 @@ chrome.downloads.onCreated.addListener(async (item) => {
   if (item.finalUrl && await checkAndConsumePassThrough(item.finalUrl)) return
   if (item.url && await checkAndConsumePassThrough(item.url)) return
 
-  const sourceTab = item.tabId >= 0 ? await chrome.tabs.get(item.tabId).catch(() => null) : null
-  if (!(await stateForTab(sourceTab)).active) return
-
-  const url = item.finalUrl || item.url
-  const rules = await refreshConfig()
-  if (!shouldTakeOver(item, rules)) return
-  const [cookie, tab] = await Promise.all([
-    cookieHeaderFor(url),
-    Promise.resolve(sourceTab)
-  ])
-
+  /*
+   * Save recovery state, then pause before any native-host work. The first
+   * host message may cold-start Draco and take seconds; keeping the browser
+   * item paused avoids racing the desktop transfer.
+   */
+  let paused = false
+  const handoffId = newRequestId()
+  const record = {
+    downloadId: item.id,
+    handoffId,
+    deadline: Date.now() + HANDOFF_DEADLINE_MS,
+    preparingUntil: Date.now() + PREPARING_GRACE_MS,
+    stage: 'preparing'
+  }
+  // Persist ownership *before* pausing. If MV3 suspends us as pause resolves,
+  // the alarm can still find and release the browser item.
+  try {
+    await chrome.storage.local.set({ [`${PENDING_PREFIX}${item.id}`]: record })
+  } catch (err) {
+    console.warn('Draco could not track browser download:', err)
+    return
+  }
   try {
     await chrome.downloads.pause(item.id)
+    paused = true
   } catch {
     // If it's too fast, we might not be able to pause it.
   }
 
-  const reply = await callHost({
-    type: 'download',
-    url,
-    filename: item.filename ? item.filename.split(/[\\/]/).pop() : undefined,
-    referer: item.referrer || tab?.url || undefined,
-    cookie: cookie || undefined,
-    userAgent: navigator.userAgent,
-    size: item.totalBytes > 0 ? item.totalBytes : null,
-    mimeType: item.mime || null
-  })
+  if (paused) {
+    try {
+      record.stage = 'requesting'
+      await chrome.storage.local.set({ [`${PENDING_PREFIX}${item.id}`]: record })
+    } catch (err) {
+      console.warn('Draco could not track paused browser download:', err)
+      await chrome.downloads.resume(item.id).catch(() => {})
+      return
+    }
+  } else {
+    await chrome.storage.local.remove(`${PENDING_PREFIX}${item.id}`).catch(() => {})
+  }
 
-  if (!reply.ok || !reply.taken) {
-    console.warn('Draco did not take the download:', reply.error ?? 'declined')
+  const resume = async () => {
+    if (!paused) return
     try {
       await chrome.downloads.resume(item.id)
+      await chrome.storage.local.remove(`${PENDING_PREFIX}${item.id}`)
     } catch {}
-    return
   }
 
   try {
-    await chrome.downloads.cancel(item.id)
-    await chrome.downloads.erase({ id: item.id })
-  } catch {}
-})
+    const sourceTab = item.tabId >= 0 ? await chrome.tabs.get(item.tabId).catch(() => null) : null
+    if (!(await stateForTab(sourceTab)).active) {
+      await resume()
+      return
+    }
+
+    const url = item.finalUrl || item.url
+    const rules = await refreshConfig()
+    if (!shouldTakeOver(item, rules)) {
+      await resume()
+      return
+    }
+
+    const [cookie, tab] = await Promise.all([
+      cookieHeaderFor(url),
+      Promise.resolve(sourceTab)
+    ])
+
+    const reply = await callHost({
+      type: 'download',
+      requestId: handoffId,
+      handoffExpiresAt: record.deadline,
+      url,
+      filename: item.filename ? item.filename.split(/[\\/]/).pop() : undefined,
+      referer: item.referrer || tab?.url || undefined,
+      cookie: cookie || undefined,
+      userAgent: navigator.userAgent,
+      size: item.totalBytes > 0 ? item.totalBytes : null,
+      mimeType: item.mime || null
+    })
+
+    if (reply.ok && reply.pending && reply.handoffId && paused) {
+      try {
+        record.stage = 'pending'
+        await chrome.storage.local.set({ [`${PENDING_PREFIX}${item.id}`]: record })
+      } catch (err) {
+        const decision = await callHost({ type: 'handoffCancel', handoffId: reply.handoffId })
+        if (!(decision.ok && decision.taken)) {
+          await resume()
+          return
+        }
+        try {
+          await chrome.downloads.cancel(item.id)
+          await chrome.downloads.erase({ id: item.id })
+        } catch {}
+        return
+      }
+      void checkPending(record)
+      return
+    }
+
+    if (reply.ok && reply.pending && reply.handoffId && !paused) {
+      const decision = await callHost({ type: 'handoffCancel', handoffId: reply.handoffId })
+      if (decision.ok && decision.taken) {
+        try {
+          await chrome.downloads.cancel(item.id)
+          await chrome.downloads.erase({ id: item.id })
+        } catch {}
+      }
+      return
+    }
+
+    let taken = reply.ok && reply.taken
+    if (!reply.ok) {
+      const decision = await callHost({ type: 'handoffCancel', handoffId })
+      if (!decision.ok && paused) {
+        void checkPending(record)
+        return
+      }
+      taken = decision.ok && decision.taken
+    }
+    if (!taken) {
+      console.warn('Draco did not take the download:', reply.error ?? 'declined')
+      await resume()
+      return
+    }
+  } catch (err) {
+    // Any unexpected failure here must never leave the user's download paused
+    // for the life of the item - give it back to the browser instead.
+    console.warn('Draco takeover failed:', err)
+    await resume()
+    return
+  }
+
+  if (paused) await finishPending(record, true)
+  else {
+    try {
+      await chrome.downloads.cancel(item.id)
+      await chrome.downloads.erase({ id: item.id })
+    } catch {}
+  }
+}
 
 /* ------------------------------------------------------------------ */
 /* Context menus                                                       */
@@ -434,7 +698,7 @@ function isYouTubePage(url) {
   try {
     const parsed = new URL(url)
     return (
-      /(^|\.)youtube\.com$/i.test(parsed.hostname) ||
+      /(^|\.)(youtube\.com|youtube-nocookie\.com)$/i.test(parsed.hostname) ||
       /(^|\.)youtu\.be$/i.test(parsed.hostname)
     )
   } catch {
@@ -448,7 +712,7 @@ function youtubeVideoId(url) {
     if (/(^|\.)youtu\.be$/i.test(parsed.hostname)) {
       return parsed.pathname.replace(/^\//, '').split('/')[0] || null
     }
-    if (!/(^|\.)youtube\.com$/i.test(parsed.hostname)) return null
+    if (!/(^|\.)(youtube\.com|youtube-nocookie\.com)$/i.test(parsed.hostname)) return null
     return (
       parsed.searchParams.get('v') ||
       (/^\/(?:shorts|embed|live)\/([^/?#]+)/i.exec(parsed.pathname) || [])[1] ||
@@ -637,7 +901,7 @@ async function sendUrls(urls, referer) {
   const unique = [...new Set(urls.filter((u) => /^https?:/i.test(u)))]
   if (unique.length === 0) {
     notify('No downloadable links were found on this page')
-    return
+    return { ok: false, error: 'No downloadable links were found' }
   }
 
   // One link asks where to save it, the way IDM does.
@@ -652,8 +916,8 @@ async function sendUrls(urls, referer) {
       userAgent: navigator.userAgent,
       bulk: false
     })
-    notify(reply.ok && reply.taken ? 'Sent the download to Draco' : 'Draco did not accept the link')
-    return
+    notify(reply.ok && (reply.taken || reply.pending) ? 'Sent the download to Draco' : 'Draco did not accept the link')
+    return { ...reply, ok: Boolean(reply.ok && (reply.taken || reply.pending)) }
   }
 
   /*
@@ -688,6 +952,7 @@ async function sendUrls(urls, referer) {
           (dropped > 0 ? ` (${dropped} beyond the ${MAX_BATCH_ITEMS} link limit were skipped)` : '')
       : `Draco did not accept the links${reply.error ? `: ${reply.error}` : ''}`
   )
+  return { ...reply, ok: queued > 0, queued }
 }
 
 chrome.contextMenus.onClicked.addListener(async (info, tab) => {
@@ -787,7 +1052,7 @@ function capturedHeaders(headers = []) {
     if (!name || !value || BLOCKED_CAPTURED_HEADERS.has(name)) continue
     if (!/^[a-z0-9!#$%&'*+.^_`|~-]+$/.test(name)) continue
     if (Object.keys(result).length >= 40) break
-    result[name] = value.slice(0, 16_384)
+    result[name] = value.slice(0, name === 'cookie' ? 1_000_000 : 16_384)
   }
   return result
 }
@@ -1022,6 +1287,36 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           sendResponse({ ok: false, error: 'Draco is offline, paused, or excluded on this page' })
           return
         }
+        if (message.postUrl) {
+          let postUrl
+          try {
+            const post = new URL(message.postUrl)
+            const page = new URL(tab?.url ?? '')
+            if (!/(^|\.)(x\.com|twitter\.com)$/i.test(page.hostname) ||
+                !/(^|\.)(x\.com|twitter\.com)$/i.test(post.hostname)) {
+              throw new Error('Invalid X post')
+            }
+            const match = /^\/([A-Za-z0-9_]{1,15}|i(?:\/web)?)\/status\/(\d+)/i.exec(post.pathname)
+            if (!match) throw new Error('Invalid X post status')
+            postUrl = `${post.origin}/${match[1]}/status/${match[2]}`
+          } catch {
+            sendResponse({ ok: false, error: 'Open a specific X post and try again.' })
+            return
+          }
+          const cookie = await cookieHeaderFor(postUrl)
+          const reply = await callHost({
+            type: 'media',
+            pageUrl: postUrl,
+            pageTitle: '',
+            mediaUrl: postUrl,
+            kind: 'file',
+            referer: postUrl,
+            cookie: cookie || undefined,
+            userAgent: navigator.userAgent
+          })
+          sendResponse(reply.ok ? { ok: true } : { ok: false, error: reply.error })
+          return
+        }
         const list = await getMedia(tab?.id)
 
         // The page's own <video src> is the most reliable thing there is when
@@ -1093,6 +1388,22 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           sendResponse({ ok: false, error: 'Draco is offline, paused, or excluded on this page' })
           return
         }
+        if (/(^|\.)(x\.com|twitter\.com)$/i.test(new URL(tab?.url ?? 'about:blank').hostname)) {
+          const page = new URL(tab.url)
+          if (!/^\/[A-Za-z0-9_]{1,15}\/status\/\d+(?:\/|$)/i.test(page.pathname)) {
+            sendResponse({ ok: false, error: 'Open the X post, or click Draco on its video in the feed.' })
+            return
+          }
+          const postUrl = `${page.origin}${page.pathname.match(/^\/[A-Za-z0-9_]{1,15}\/status\/\d+/i)[0]}`
+          const cookie = await cookieHeaderFor(postUrl)
+          const reply = await callHost({
+            type: 'media', pageUrl: postUrl, pageTitle: '', mediaUrl: postUrl,
+            kind: 'file', referer: postUrl, cookie: cookie || undefined,
+            userAgent: navigator.userAgent
+          })
+          sendResponse(reply.ok ? { ok: true } : { ok: false, error: reply.error })
+          return
+        }
         const cookie = await cookieHeaderFor(message.mediaUrl)
         const captured = (await getMedia(tab?.id)).find((item) => item.mediaUrl === message.mediaUrl)
         const relatedMediaUrls = (await getMedia(tab?.id))
@@ -1160,8 +1471,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
         const tab = sender.tab
         const cookie = await cookieHeaderFor(url)
+        const requestId = newRequestId()
         const reply = await callHost({
           type: 'download',
+          requestId,
+          handoffExpiresAt: Date.now() + HANDOFF_DEADLINE_MS,
           url,
           filename: message.filename || undefined,
           referer: tab?.url,
@@ -1169,9 +1483,17 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           userAgent: navigator.userAgent
         })
 
-        if (reply.ok && reply.taken) {
-          sendResponse({ taken: true })
+        if (reply.ok && (reply.taken || reply.pending)) {
+          sendResponse({ taken: Boolean(reply.taken), pending: Boolean(reply.pending), handoffId: reply.handoffId })
           return
+        }
+
+        if (!reply.ok) {
+          const decision = await callHost({ type: 'handoffCancel', handoffId: requestId })
+          if (decision.ok && decision.taken) {
+            sendResponse({ taken: true })
+            return
+          }
         }
 
         // Let the page's own navigation happen instead; onCreated will see the
@@ -1181,13 +1503,24 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         return
       }
 
+      case 'draco:handoff-status': {
+        const reply = await callHost({
+          type: message.expired ? 'handoffCancel' : 'handoffStatus',
+          handoffId: message.handoffId
+        })
+        if (message.url && (message.expired || (reply.ok && !reply.pending && !reply.taken))) {
+          await addPassThrough(message.url)
+        }
+        sendResponse(reply)
+        return
+      }
+
       case 'draco:send-url': {
         if (!(await stateForTab(messageTab)).active) {
           sendResponse({ ok: false, error: 'Draco is unavailable' })
           return
         }
-        await sendUrls([message.url], message.referer)
-        sendResponse({ ok: true })
+        sendResponse(await sendUrls([message.url], message.referer))
         return
       }
 
@@ -1200,7 +1533,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       default:
         sendResponse({ ok: false, error: 'unknown message' })
     }
-  })()
+  })().catch((err) => {
+    console.error('Draco extension message failed:', err)
+    sendResponse({ ok: false, error: err instanceof Error ? err.message : String(err) })
+  })
 
   // Keeps the message channel open for the async work above.
   return true
@@ -1213,6 +1549,9 @@ function notify(message) {
       iconUrl: chrome.runtime.getURL('icon.png'),
       title: 'Draco',
       message
+    })
+    .then((id) => {
+      setTimeout(() => { void chrome.notifications.clear(id).catch(() => {}) }, 5000)
     })
     .catch?.(() => {})
 }

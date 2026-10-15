@@ -61,6 +61,43 @@ describe('RateLimiter rate', () => {
 })
 
 describe('RateLimiter quota', () => {
+  it('counts written bytes even when paused during a speed-limit wait', async () => {
+    const limiter = new RateLimiter(1)
+    limiter.setQuota(1000, 60_000)
+    const controller = new AbortController()
+    const pending = limiter.consume(500, controller.signal)
+    controller.abort()
+    await rejects(pending, /aborted/)
+    strictEqual(limiter.quotaRemaining, 500)
+  })
+
+  it('exposes active parent and child policies to engines that cannot enforce them', () => {
+    const app = new RateLimiter()
+    const queue = new RateLimiter(null, app)
+    strictEqual(queue.hasSpeedLimit, false)
+    strictEqual(queue.hasTransferQuota, false)
+
+    app.setQuota(1000, 60_000)
+    strictEqual(queue.hasTransferQuota, true, 'a queue cannot hide the app quota')
+    queue.setLimit(500)
+    strictEqual(queue.hasSpeedLimit, true)
+    strictEqual(queue.effectiveSpeedLimit, 500)
+    queue.setLimit(null)
+    app.setLimit(250)
+    strictEqual(queue.hasSpeedLimit, true, 'a queue cannot hide the app speed cap')
+    strictEqual(queue.effectiveSpeedLimit, 250)
+    queue.setLimit(500)
+    strictEqual(queue.effectiveSpeedLimit, 250, 'the parent cap wins over a wider queue cap')
+    queue.setLimit(100)
+    strictEqual(queue.effectiveSpeedLimit, 100, 'a narrower queue cap wins')
+    queue.setLimit(null)
+    app.setLimit(null)
+    app.setQuota(null, 60_000)
+    strictEqual(queue.hasSpeedLimit, false)
+    strictEqual(queue.hasTransferQuota, false)
+    strictEqual(queue.effectiveSpeedLimit, null)
+  })
+
   it('reports nothing to spend when no quota is set', () => {
     strictEqual(new RateLimiter().quotaRemaining, null)
   })

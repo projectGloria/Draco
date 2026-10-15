@@ -3,7 +3,9 @@ import { createHash } from 'node:crypto'
 import { mkdir, open, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { getPaths } from './bootstrap/paths.ts'
-import { getDispatcher } from './engine/http.ts'
+import { fetchGuarded } from './fetch-guard.ts'
+import { readResponseBytes } from './response-limit.ts'
+import { isPrivateHost } from './engine/create.ts'
 import { DEFAULT_USER_AGENT } from './engine/probe.ts'
 import { logger } from './log.ts'
 
@@ -93,6 +95,11 @@ export async function iconForSite(url: string): Promise<string | null> {
   try {
     const parsed = new URL(url)
     if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return null
+    // The URL can arrive from the renderer with a media result. Every other
+    // fetch made on the renderer's behalf (thumbnails, media probes) refuses
+    // private addresses for the same reason: the request must not be aimable
+    // at a router or a cloud-metadata endpoint.
+    if (isPrivateHost(parsed.hostname)) return null
     origin = parsed.origin
   } catch {
     return null
@@ -181,24 +188,20 @@ async function trimFaviconCache(dir: string): Promise<void> {
 }
 
 async function fetchFavicon(origin: string): Promise<string | null> {
-  const response = await fetch(`${origin}/favicon.ico`, {
-    redirect: 'follow',
+  const response = await fetchGuarded(`${origin}/favicon.ico`, {
     signal: AbortSignal.timeout(FAVICON_TIMEOUT_MS),
     headers: { accept: 'image/*', 'user-agent': DEFAULT_USER_AGENT },
-    // Through the app's own pool, so a configured proxy applies here too. This
-    // was the one outbound request in the app that ignored it - and it names
-    // the site the user is downloading from.
-    dispatcher: getDispatcher(FAVICON_TIMEOUT_MS)
-  } as RequestInit)
-  if (!response.ok) return null
-
-  const type = (response.headers.get('content-type') ?? '').split(';')[0].trim().toLowerCase()
-  // A site with no favicon usually answers with its own 404 page rather than a
-  // 404 status, and an HTML document is not an icon.
-  if (!type.startsWith('image/')) return null
-
-  const bytes = Buffer.from(await response.arrayBuffer())
-  if (bytes.length === 0 || bytes.length > FAVICON_MAX_BYTES) return null
-
-  return `data:${type};base64,${bytes.toString('base64')}`
+    timeoutMs: FAVICON_TIMEOUT_MS
+  })
+  try {
+    if (!response.ok) return null
+    const type = (response.headers.get('content-type') ?? '').split(';')[0].trim().toLowerCase()
+    // A site with no favicon may answer with its own HTML error page.
+    if (!type.startsWith('image/')) return null
+    const bytes = await readResponseBytes(response, FAVICON_MAX_BYTES)
+    if (bytes.length === 0) return null
+    return `data:${type};base64,${bytes.toString('base64')}`
+  } finally {
+    await response.body?.cancel().catch(() => {})
+  }
 }

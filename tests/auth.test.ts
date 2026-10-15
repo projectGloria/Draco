@@ -100,6 +100,11 @@ describe('chooseChallenge', () => {
   it('has nothing to choose from an empty list', () => {
     strictEqual(chooseChallenge([]), null)
   })
+
+  it('skips algorithms and qop modes it cannot compute rather than choosing them over Basic', () => {
+    strictEqual(chooseChallenge([{ ...digestMd5, algorithm: 'unknown' }, basic]), basic)
+    strictEqual(chooseChallenge([{ ...digestMd5, qop: 'auth-int' }, basic]), basic)
+  })
 })
 
 describe('basicAuthHeader', () => {
@@ -177,6 +182,8 @@ describe('digestAuthHeader', () => {
     const plain = digestAuthHeader({ ...challenge, algorithm: 'MD5' }, CREDS, options)
     const sess = digestAuthHeader({ ...challenge, algorithm: 'MD5-sess' }, CREDS, options)
     ok(param(plain, 'response') !== param(sess, 'response'))
+    const legacy = digestAuthHeader({ ...challenge, algorithm: 'MD5-sess', qop: undefined }, CREDS, options)
+    strictEqual(param(legacy, 'cnonce'), 'abc', 'the server needs this nonce to compute the session digest')
   })
 
   it('escapes quotes so a hostile realm cannot forge header parameters', () => {
@@ -208,6 +215,14 @@ describe('HttpAuthenticator', () => {
     strictEqual(auth.headerFor('https://example.test/f', 'GET'), null)
   })
 
+  it('resolves new credentials when a different realm challenges on the same origin', () => {
+    const auth = new HttpAuthenticator((_url, realm) => ({ username: realm, password: 'password' }))
+    auth.challenged('https://example.test/a', 'Basic realm="A"')
+    auth.headerFor('https://example.test/a', 'GET')
+    strictEqual(auth.challenged('https://example.test/b', 'Basic realm="B"'), true)
+    strictEqual(auth.headerFor('https://example.test/b', 'GET'), basicAuthHeader({ username: 'B', password: 'password' }))
+  })
+
   it('arms itself from a challenge and answers every later request', () => {
     const auth = new HttpAuthenticator(always)
     strictEqual(auth.challenged('https://example.test/f', 'Basic realm="Files"'), true)
@@ -216,6 +231,15 @@ describe('HttpAuthenticator', () => {
 
     // Eight connections on one file should not each need to be told "no" first.
     match(auth.headerFor('https://example.test/f', 'GET') ?? '', /^Basic /)
+    match(auth.headerFor('https://example.test/other', 'GET') ?? '', /^Basic /)
+  })
+
+  it('never sends an armed password to another origin', () => {
+    const auth = new HttpAuthenticator(always)
+    strictEqual(auth.challenged('https://example.test/file', 'Basic realm="Files"'), true)
+    strictEqual(auth.headerFor('https://other.test/file', 'GET'), null)
+    strictEqual(auth.headerFor('https://example.test:8443/file', 'GET'), null)
+    strictEqual(auth.headerFor('http://example.test/file', 'GET'), null)
     match(auth.headerFor('https://example.test/other', 'GET') ?? '', /^Basic /)
   })
 

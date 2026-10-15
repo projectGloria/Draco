@@ -2,9 +2,11 @@ import { createHash } from 'node:crypto'
 import { posix, join } from 'node:path'
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { getDispatcher } from '../engine/http.ts'
+import { fetchGuarded } from '../fetch-guard.ts'
+import { readResponseText } from '../response-limit.ts'
 import { mapConcurrent } from '../engine/concurrency.ts'
 import { isPrivateHost } from '../engine/create.ts'
+import { escapeWindowsDeviceName } from '../engine/naming.ts'
 
 export interface SiteGrabOptions {
   startUrl: string
@@ -72,46 +74,55 @@ export async function crawlSite(
         if (signal?.aborted) return
         const canonical = withoutHash(url)
 
-        const response = await fetch(canonical, {
+        // Hop-by-hop: `redirect: 'follow'` would already have connected to
+        // whatever the server pointed at before the private-host / stay-on-host
+        // verdict below could run against it.
+        const response = await fetchGuarded(canonical, {
           headers: { accept: 'text/html,application/xhtml+xml', 'user-agent': 'DracoSiteGrabber/0.1' },
-          redirect: 'follow',
           signal,
-          dispatcher: getDispatcher(30_000)
-        } as RequestInit).catch(() => null)
-        if (!response?.ok) return
-        const final = new URL(response.url || canonical)
-        if (final.host !== start.host) {
-          if (options.stayOnHost || isPrivateHost(final.hostname)) return
-        }
-        const type = response.headers.get('content-type') ?? ''
-        if (!/text\/html|application\/xhtml\+xml/i.test(type)) {
-          resources.set(withoutHash(final), resourceFor(final, 'asset'))
-          return
-        }
-
-        const declared = Number(response.headers.get('content-length') ?? 0)
-        if (declared > PAGE_BYTES_LIMIT) return
-        const html = await response.text()
-        if (html.length > PAGE_BYTES_LIMIT) return
-
-        const tmpFile = join(tmpDir, createHash('sha1').update(final.toString()).digest('hex') + '.html')
-        await writeFile(tmpFile, html, 'utf8')
-        resources.set(withoutHash(final), { ...resourceFor(final, 'page'), tmpFile })
-
-        for (const link of extractLinks(html, final)) {
-          if (link.url.host !== start.host) {
-            if (options.stayOnHost || isPrivateHost(link.url.hostname)) continue
+          timeoutMs: 30_000,
+          pinHost: options.stayOnHost ? start.host : undefined
+        }).catch(() => null)
+        if (!response) return
+        try {
+          if (!response.ok) return
+          const final = new URL(response.url || canonical)
+          if (final.host !== start.host) {
+            if (options.stayOnHost || isPrivateHost(final.hostname)) return
           }
-          if (link.kind === 'page') {
-            if (depth >= options.maxDepth) continue
-            const key = withoutHash(link.url)
-            if (visited.has(key) || next.has(key)) continue
-            if (blockedByRobots(link.url, robots)) continue
-            next.set(key, link.url)
-          } else if (link.kind === 'asset' && options.includeAssets) {
-            if (resources.size >= maxResources) continue
-            resources.set(withoutHash(link.url), resourceFor(link.url, 'asset'))
+          const type = response.headers.get('content-type') ?? ''
+          if (!/text\/html|application\/xhtml\+xml/i.test(type)) {
+            resources.set(withoutHash(final), resourceFor(final, 'asset', start.origin))
+            return
           }
+
+          const html = await readResponseText(response, PAGE_BYTES_LIMIT).catch(() => null)
+          if (html === null) return
+
+          const tmpFile = join(tmpDir, createHash('sha1').update(final.toString()).digest('hex') + '.html')
+          await writeFile(tmpFile, html, 'utf8')
+          resources.set(withoutHash(final), { ...resourceFor(final, 'page', start.origin), tmpFile })
+
+          for (const link of extractLinks(html, final)) {
+            if (link.url.host !== start.host) {
+              if (options.stayOnHost || isPrivateHost(link.url.hostname)) continue
+            }
+            if (link.kind === 'page') {
+              if (depth >= options.maxDepth) continue
+              const key = withoutHash(link.url)
+              if (visited.has(key) || next.has(key)) continue
+              if (blockedByRobots(link.url, robots)) continue
+              next.set(key, link.url)
+            } else if (link.kind === 'asset' && options.includeAssets) {
+              if (resources.size >= maxResources) continue
+              const key = withoutHash(link.url)
+              // A stylesheet/asset link may point at a page already fetched.
+              // Retain its saved HTML and page identity rather than downgrade it.
+              if (resources.get(key)?.kind !== 'page') resources.set(key, resourceFor(link.url, 'asset', start.origin))
+            }
+          }
+        } finally {
+          await response.body?.cancel().catch(() => {})
         }
       })
 
@@ -124,6 +135,7 @@ export async function crawlSite(
       }
     }
 
+    if (signal?.aborted) throw new Error('The site crawl was cancelled')
     const paths = new Map([...resources.values()].map((resource) => [resource.url, resource.relativePath]))
     return { resources: [...resources.values()], paths, tmpDir }
   } catch (err) {
@@ -154,7 +166,7 @@ export function extractLinks(html: string, base: URL): Array<{ url: URL; kind: '
   return [...out.values()]
 }
 
-export function resourceFor(url: URL, kind: 'page' | 'asset'): SiteResource {
+export function resourceFor(url: URL, kind: 'page' | 'asset', primaryOrigin?: string): SiteResource {
   let pathname = safePathname(url.pathname)
   if (kind === 'page' && (pathname.endsWith('/') || !posix.extname(pathname))) pathname += pathname.endsWith('/') ? 'index.html' : '.html'
   if (!pathname || pathname === '/') pathname = '/index.html'
@@ -163,7 +175,10 @@ export function resourceFor(url: URL, kind: 'page' | 'asset'): SiteResource {
     const hash = createHash('sha256').update(url.search).digest('hex').slice(0, 8)
     pathname = extension ? `${pathname.slice(0, -extension.length)}-${hash}${extension}` : `${pathname}-${hash}`
   }
-  return { url: withoutHash(url), relativePath: pathname.replace(/^\/+/, ''), kind }
+  const external = primaryOrigin && url.origin !== primaryOrigin
+    ? `_external/${createHash('sha256').update(url.origin).digest('hex').slice(0, 16)}/`
+    : ''
+  return { url: withoutHash(url), relativePath: external + pathname.replace(/^\/+/, ''), kind }
 }
 
 export function rewriteForOffline(
@@ -174,12 +189,17 @@ export function rewriteForOffline(
 ): string {
   const local = (raw: string): string => {
     try {
+      if (raw.startsWith('#')) return raw
       const url = new URL(decodeHtml(raw), pageUrl)
+      const hash = url.hash
       url.hash = ''
       const target = paths.get(url.toString())
       if (!target) return raw
       const relative = posix.relative(posix.dirname(pagePath), target)
-      return relative.startsWith('.') ? relative : './' + relative
+      // Percent-encode local filename characters that otherwise become URL
+      // syntax (spaces, #, %, quotes), then retain the original page anchor.
+      const encoded = relative.split('/').map((part) => encodeURIComponent(part).replace(/'/g, '%27')).join('/')
+      return (relative.startsWith('.') ? encoded : './' + encoded) + hash
     } catch {
       return raw
     }
@@ -190,24 +210,31 @@ export function rewriteForOffline(
     .replace(/url\(\s*(["']?)(.*?)\1\s*\)/gi, (_whole, quote: string, value: string) => `url(${quote}${local(value)}${quote})`)
 }
 
+
 function safePathname(pathname: string): string {
   const trailingSlash = pathname.endsWith('/')
   const safe = '/' + pathname.split('/').filter(Boolean).map((part) => {
     let decoded = part
     try { decoded = decodeURIComponent(part) } catch {}
-    const safe = decoded.replace(/[<>:"/\\|?*\x00-\x1f]/g, '_').replace(/[. ]+$/g, '')
-    return safe && safe !== '.' && safe !== '..' ? safe.slice(0, 180) : '_'
+    let safe = decoded.replace(/[<>:"/\\|?*\x00-\x1f]/g, '_').slice(0, 180).replace(/[. ]+$/g, '')
+    safe = escapeWindowsDeviceName(safe)
+    return safe && safe !== '.' && safe !== '..' ? safe : '_'
   }).join('/')
   return trailingSlash && safe !== '/' ? safe + '/' : safe
 }
 
 async function loadRobots(origin: string, signal?: AbortSignal): Promise<RobotsRule[]> {
   try {
-    const response = await fetch(new URL('/robots.txt', origin), {
-      headers: { 'user-agent': 'DracoSiteGrabber/0.1' }, signal, dispatcher: getDispatcher(10_000)
-    } as RequestInit)
-    if (!response.ok) return []
-    const text = (await response.text()).slice(0, 1_000_000)
+    const response = await fetchGuarded(new URL('/robots.txt', origin), {
+      headers: { 'user-agent': 'DracoSiteGrabber/0.1' }, signal, timeoutMs: 10_000
+    })
+    let text: string
+    try {
+      if (!response.ok) return []
+      text = await readResponseText(response, 1_000_000)
+    } finally {
+      await response.body?.cancel().catch(() => {})
+    }
     let applies = false
     const rules: RobotsRule[] = []
     for (const raw of text.split(/\r?\n/)) {

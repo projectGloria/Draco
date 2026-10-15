@@ -156,6 +156,13 @@ textarea {
     0 0 0 3px var(--accent-soft);
 }
 
+.download-row:focus-visible,
+.download-header:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+  z-index: 1;
+}
+
 /*
  * Form controls. Written once here instead of as a class soup repeated in nine
  * dialogs - the dialogs differ in what they ask for, not in how a text field

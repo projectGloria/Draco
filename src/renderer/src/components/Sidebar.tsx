@@ -1,15 +1,19 @@
+import CategoryIcon from './CategoryIcon'
 import { useState } from 'react'
+import { useShallow } from 'zustand/react/shallow'
 import { useApp } from '../store/app'
 import { reportError } from '../store/toasts'
 import { useT } from '../i18n'
+import type { Queue } from '@shared/types'
+import ContextMenu, { type MenuPosition } from './ContextMenu'
+import Dialog, { GhostButton, PrimaryButton } from './Dialog'
+import QueueIcon from './QueueIcon'
 import {
   CalendarIcon,
   CheckIcon,
   ChevronIcon,
   ClipboardIcon,
   DownloadIcon,
-  FolderIcon,
-  LayersIcon,
   ListIcon,
   PlayIcon,
   StopAllIcon
@@ -23,7 +27,7 @@ import {
 export default function Sidebar({
   onEditQueues
 }: {
-  onEditQueues(): void
+  onEditQueues(id?: string): void
 }): React.ReactElement {
   const categories = useApp((s) => s.categories)
   const queues = useApp((s) => s.queues)
@@ -31,44 +35,70 @@ export default function Sidebar({
   const setSidebar = useApp((s) => s.setSidebar)
   const t = useT()
 
-  const total = useApp((s) => s.tasks.length)
-  const unfinished = useApp((s) => s.tasks.filter((t) => t.status !== 'done').length)
-  const finished = total - unfinished
   const clipboardItems = useApp((s) => s.clipboardItems)
   const clipboardFetching = clipboardItems.some((item) => item.status === 'fetching')
 
-  const queueCounts = useApp((s) => {
-    const counts = new Map<string, number>()
-    for (const q of s.queues) {
-      let n = 0
-      for (const task of s.tasks) if (task.queueId === q.id) n++
-      counts.set(q.id, n)
-    }
-    return Array.from(counts.entries()).map(([k, v]) => `${k}:${v}`).join(',')
-  })
+  /*
+   * One pass over the list for every count this nav draws.
+   *
+   * There used to be four selectors here, and Zustand runs every one of them on
+   * every store write - which is four times a second while anything is
+   * downloading. Two of them were O(tasks x queues) and O(tasks x categories),
+   * one allocated a filtered array to read its length, and all of them then
+   * encoded their results into a comma-joined string that was parsed back out
+   * with a freshly compiled RegExp per queue per render. That last part was
+   * also quietly wrong: the id was interpolated into the pattern unescaped, so
+   * an id carrying a regex metacharacter matched the wrong entry.
+   *
+   * `useShallow` is what makes the single pass pay off - the record is rebuilt
+   * every tick, but the nav only re-renders when a number in it moved. It has
+   * to be one flat record for that to work: a shallow compare over nested
+   * `queue` and `category` objects would see two fresh references every time
+   * and never match. The keys are the same strings the sidebar selection uses,
+   * so there is no second naming scheme to keep in step.
+   */
+  const counts = useApp(
+    useShallow((s) => {
+      const out: Record<string, number> = {
+        total: s.tasks.length, unfinished: 0, active: 0, queued: 0, attention: 0
+      }
 
-  const categoryCounts = useApp((s) => {
-    const counts = new Map<string, number>()
-    for (const c of s.categories) {
-      let n = 0
-      for (const task of s.tasks) if (task.categoryId === c.id) n++
-      counts.set(c.id, n)
-    }
-    return Array.from(counts.entries()).map(([k, v]) => `${k}:${v}`).join(',')
-  })
+      for (const task of s.tasks) {
+        if (task.status !== 'done') out.unfinished++
+        if (['probing', 'downloading', 'processing', 'scanning'].includes(task.status)) out.active++
+        if (task.status === 'queued') out.queued++
+        if (task.status === 'error' || task.status === 'missing') out.attention++
+        if (task.queueId) {
+          const key = 'queue:' + task.queueId
+          out[key] = (out[key] ?? 0) + 1
+        }
+        if (task.categoryId) {
+          const key = 'cat:' + task.categoryId
+          out[key] = (out[key] ?? 0) + 1
+        }
+      }
 
-  const getQueueCount = (id: string) => {
-    const match = new RegExp(`${id}:(\\d+)`).exec(queueCounts)
-    return match ? parseInt(match[1], 10) : 0
-  }
+      return out
+    })
+  )
 
-  const getCategoryCount = (id: string) => {
-    const match = new RegExp(`${id}:(\\d+)`).exec(categoryCounts)
-    return match ? parseInt(match[1], 10) : 0
-  }
+  const total = counts.total
+  const unfinished = counts.unfinished
+  const finished = total - unfinished
 
   const [openCategories, setOpenCategories] = useState(true)
   const [openQueues, setOpenQueues] = useState(true)
+  const [menu, setMenu] = useState<{ queue: Queue; at: MenuPosition } | null>(null)
+  const [renameId, setRenameId] = useState<string | null>(null)
+  const [name, setName] = useState('')
+  const rename = async (): Promise<void> => {
+    const queue = queues.find((item) => item.id === renameId)
+    if (!queue || !name.trim()) return
+    try {
+      await window.api.saveQueue({ ...queue, name: name.trim() })
+      setRenameId(null)
+    } catch (error) { reportError(t('queueSaveFailed'), error) }
+  }
 
   return (
     <nav className="w-[204px] shrink-0 border-r border-line bg-white/[0.012] overflow-y-auto py-2 px-2 flex flex-col gap-0.5 max-[720px]:hidden">
@@ -80,15 +110,44 @@ export default function Sidebar({
         onClick={() => setSidebar('all')}
       />
       <Item
+        icon={<DownloadIcon className="w-[15px] h-[15px]" />}
+        label={t('activeDownloads')}
+        count={counts.active}
+        active={sidebar === 'active'}
+        onClick={() => setSidebar('active')}
+      />
+      <Item
+        icon={<ListIcon className="w-[15px] h-[15px]" />}
+        label={t('queuedDownloads')}
+        count={counts.queued}
+        active={sidebar === 'queued'}
+        onClick={() => setSidebar('queued')}
+      />
+      <Item
+        icon={<StopAllIcon className="w-[15px] h-[15px]" />}
+        label={t('needsAttention')}
+        count={counts.attention}
+        active={sidebar === 'attention'}
+        onClick={() => setSidebar('attention')}
+      />
+      <Item
+        icon={<CheckIcon className="w-[15px] h-[15px]" />}
+        label={t('finished')}
+        count={finished}
+        active={sidebar === 'finished'}
+        onClick={() => setSidebar('finished')}
+      />
+      <div className="h-2" />
+      <Item
         icon={<ClipboardIcon className="w-[15px] h-[15px]" />}
-        label="Clipboard"
+        label={t('clipboard')}
         count={clipboardItems.length}
         active={sidebar === 'clipboard'}
         onClick={() => setSidebar('clipboard')}
         trailing={clipboardFetching ? (
           <span
             className="w-3.5 h-3.5 rounded-full border-2 border-faint border-t-[var(--accent)] animate-spin shrink-0"
-            aria-label="Preparing clipboard link"
+            aria-label={t('preparingClipboard')}
           />
         ) : undefined}
       />
@@ -98,13 +157,6 @@ export default function Sidebar({
         count={unfinished}
         active={sidebar === 'unfinished'}
         onClick={() => setSidebar('unfinished')}
-      />
-      <Item
-        icon={<CheckIcon className="w-[15px] h-[15px]" />}
-        label={t('finished')}
-        count={finished}
-        active={sidebar === 'finished'}
-        onClick={() => setSidebar('finished')}
       />
 
       <Section
@@ -117,9 +169,9 @@ export default function Sidebar({
           <Item
             key={category.id}
             indent
-            icon={<FolderIcon className="w-[15px] h-[15px]" />}
+            icon={<CategoryIcon category={category} />}
             label={category.name}
-            count={getCategoryCount(category.id)}
+            count={counts['cat:' + category.id] ?? 0}
             active={sidebar === 'cat:' + category.id}
             onClick={() => setSidebar('cat:' + category.id)}
           />
@@ -129,7 +181,7 @@ export default function Sidebar({
 
       <Section label={t('queues')} open={openQueues} onToggle={() => setOpenQueues((v) => !v)}>
         <button
-          onClick={onEditQueues}
+          onClick={() => onEditQueues()}
           title={t('manageQueues')}
           className="w-5 h-5 rounded grid place-items-center text-faint hover:text-ink hover:bg-white/[0.07]"
         >
@@ -142,8 +194,10 @@ export default function Sidebar({
             key={queue.id}
             id={queue.id}
             name={queue.name}
+            icon={queue.icon}
+            onContextMenu={(event) => { event.preventDefault(); setMenu({ queue, at: { x: event.clientX, y: event.clientY } }) }}
             running={queue.running}
-            count={getQueueCount(queue.id)}
+            count={counts['queue:' + queue.id] ?? 0}
             active={sidebar === 'queue:' + queue.id}
             onClick={() => setSidebar('queue:' + queue.id)}
             stopLabel={t('stopQueue')}
@@ -151,6 +205,16 @@ export default function Sidebar({
             errorLabel={t('queueFailed')}
           />
         ))}
+      {menu && <ContextMenu at={menu.at} onClose={() => setMenu(null)} items={[
+        { label: t('renameQueue'), onClick: () => { setRenameId(menu.queue.id); setName(menu.queue.name) } },
+        { label: t('options'), onClick: () => onEditQueues(menu.queue.id) }
+      ]} />}
+      {renameId && <Dialog title={t('renameQueue')} width={400} onClose={() => setRenameId(null)} footer={<>
+        <GhostButton onClick={() => setRenameId(null)}>{t('cancel')}</GhostButton>
+        <PrimaryButton disabled={!name.trim()} onClick={() => void rename()}>{t('saveQueue')}</PrimaryButton>
+      </>}>
+        <input autoFocus value={name} maxLength={60} onFocus={(event) => event.target.select()} onChange={(event) => setName(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') void rename() }} className="field" aria-label={t('name')} />
+      </Dialog>}
     </nav>
   )
 }
@@ -191,6 +255,7 @@ function Item({
   indent,
   highlight,
   onClick,
+  onContextMenu,
   trailing
 }: {
   icon: React.ReactNode
@@ -200,11 +265,13 @@ function Item({
   indent?: boolean
   highlight?: boolean
   onClick(): void
+  onContextMenu?(event: React.MouseEvent): void
   trailing?: React.ReactNode
 }): React.ReactElement {
   return (
     <button
       onClick={onClick}
+      onContextMenu={onContextMenu}
       title={label}
       className={
         'group relative w-full flex items-center gap-2.5 rounded-lg py-[6px] pr-2 text-[12.5px] transition-colors ' +
@@ -245,6 +312,8 @@ function Item({
 function QueueItem({
   id,
   name,
+  icon,
+  onContextMenu,
   running,
   count,
   active,
@@ -255,6 +324,8 @@ function QueueItem({
 }: {
   id: string
   name: string
+  icon: Queue['icon']
+  onContextMenu(event: React.MouseEvent): void
   running: boolean
   count: number
   active: boolean
@@ -274,11 +345,12 @@ function QueueItem({
   return (
     <Item
       indent
-      icon={<LayersIcon className="w-[15px] h-[15px]" />}
+      icon={<QueueIcon icon={icon} className="w-[15px] h-[15px]" />}
       label={name}
       count={count}
       active={active}
       onClick={onClick}
+      onContextMenu={onContextMenu}
       trailing={
         <span
           role="button"

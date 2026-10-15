@@ -1,24 +1,25 @@
-import { createHash } from 'node:crypto'
-import { createReadStream, createWriteStream } from 'node:fs'
-import { mkdir, mkdtemp, readdir, rename, rm, stat } from 'node:fs/promises'
+import { createWriteStream } from 'node:fs'
+import { mkdir, mkdtemp, readdir, rm, stat } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
-import { Writable } from 'node:stream'
+import { Transform } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
 import { spawn } from 'node:child_process'
+import { killTree } from '../proc.ts'
 import { getPaths } from '../bootstrap/paths.ts'
+import { fetchGuarded } from '../fetch-guard.ts'
+import { readResponseText } from '../response-limit.ts'
 import { logger } from '../log.ts'
-import { parseFfmpegVersion, parseSha256 } from '../tools-version.ts'
+import { parseFfmpegVersion } from '../tools-version.ts'
+import { verifyArchiveDigest } from './archive-digest.ts'
+import { replaceVerifiedExecutable } from './replace-executable.ts'
 
 const log = logger('ffmpeg')
 
 /**
- * ffmpeg is fetched on first use rather than bundled: it is 80 MB of binary
- * that most downloads never need, and shipping it would quadruple the installer
- * for a feature only the grabber uses.
- *
- * It lands in %APPDATA%/Draco/bin, so a reinstall of the app does not mean
- * fetching it again.
+ * The installer ships ffmpeg. An updated copy in %APPDATA%/Draco/bin takes
+ * priority, keeping updates writable even for installs under Program Files.
+ * PATH and downloading remain fallbacks for development or damaged installs.
  */
 
 /*
@@ -27,7 +28,7 @@ const log = logger('ffmpeg')
  * fallback: a stable URL worth having, but 170 MB is a lot of transfer to ask a
  * flaky connection to complete in one piece.
  */
-const SOURCES: Array<{ url: string; sha256Url?: string }> = [
+const SOURCES: Array<{ url: string; sha256Url: string }> = [
   {
     url: 'https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip',
     // Published beside the archive, so the thing we are about to run can be
@@ -82,6 +83,8 @@ export function ensureFfmpeg(onProgress?: (p: ProvisionProgress) => void): Promi
 async function provision(onProgress?: (p: ProvisionProgress) => void): Promise<string> {
   const target = getPaths().ffmpegExe
   if (await isUsable(target)) return target
+  const bundled = getPaths().bundledFfmpegExe
+  if (await isUsable(bundled)) return bundled
 
   /*
    * A copy already on PATH is worth finding before fetching a second one. Plenty
@@ -116,6 +119,8 @@ export async function reinstallFfmpeg(onProgress?: (p: ProvisionProgress) => voi
 export async function locateFfmpeg(): Promise<{ path: string; managed: boolean } | null> {
   const target = getPaths().ffmpegExe
   if (await isUsable(target)) return { path: target, managed: true }
+  const bundled = getPaths().bundledFfmpegExe
+  if (await isUsable(bundled)) return { path: bundled, managed: true }
   const onPath = await findOnPath('ffmpeg.exe')
   if (onPath && (await isUsable(onPath))) return { path: onPath, managed: false }
   return null
@@ -132,9 +137,11 @@ export async function latestFfmpegVersion(): Promise<string | null> {
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), CONNECT_TIMEOUT_MS)
   try {
-    const res = await fetch(VERSION_URL, { redirect: 'follow', signal: controller.signal })
+    const res = await fetchGuarded(VERSION_URL, {
+      signal: controller.signal, timeoutMs: CONNECT_TIMEOUT_MS, requireHttps: true
+    })
     if (!res.ok) return null
-    return parseFfmpegVersion((await res.text()).slice(0, 200))
+    return parseFfmpegVersion((await readResponseText(res, 4096)).slice(0, 200))
   } catch {
     return null
   } finally {
@@ -164,7 +171,7 @@ async function installFromSources(
 }
 
 async function install(
-  source: { url: string; sha256Url?: string },
+  source: { url: string; sha256Url: string },
   target: string,
   onProgress?: (p: ProvisionProgress) => void
 ): Promise<void> {
@@ -179,7 +186,7 @@ async function install(
     onProgress?.({ stage: 'downloading', percent: null })
     await download(url, zipPath, onProgress)
 
-    if (source.sha256Url) await verifyDigest(zipPath, source.sha256Url)
+    await verifyArchiveDigest(zipPath, source.sha256Url)
 
     onProgress?.({ stage: 'extracting', percent: null })
 
@@ -196,21 +203,14 @@ async function install(
      * It costs unpacking the whole archive to a temp folder, which is thrown
      * away immediately afterwards.
      */
-    await run('tar', ['-xf', 'build.zip'], work)
+    await run('tar', ['-xf', 'build.zip'], work, 10 * 60_000)
 
     const found = await findFile(work, 'ffmpeg.exe')
     if (!found) throw new Error('The archive contained no ffmpeg.exe')
 
-    // Rename into place last, so a failure never leaves a half-written binary
-    // that later looks installed and dies at spawn time.
-    await rm(target, { force: true })
-    await rename(found, target).catch(async () => {
-      // Across volumes rename fails; fall back to a copy.
-      const { copyFile } = await import('node:fs/promises')
-      await copyFile(found, target)
-    })
-
-    if (!(await isUsable(target))) throw new Error('ffmpeg.exe did not run after extraction')
+    // Stage beside the current executable so an update failure leaves the
+    // working copy intact. Test the staged binary before replacing anything.
+    await replaceVerifiedExecutable(found, target, isUsable)
   } finally {
     await rm(work, { recursive: true, force: true }).catch(() => {})
   }
@@ -234,10 +234,11 @@ async function download(
   }
 
   try {
-    const res = await fetch(url, {
-      redirect: 'follow',
+    const res = await fetchGuarded(url, {
       headers: { 'user-agent': 'Draco' },
-      signal: controller.signal
+      signal: controller.signal,
+      timeoutMs: STALL_TIMEOUT_MS,
+      requireHttps: true
     })
     if (!res.ok || !res.body) throw new Error(`HTTP ${res.status} for ${url}`)
     resetStall()
@@ -249,8 +250,8 @@ async function download(
     let lastPercent = -1
 
     const file = createWriteStream(destPath)
-    const counter = new Writable({
-      write(chunk: Buffer, _encoding, callback) {
+    const counter = new Transform({
+      transform(chunk: Buffer, _encoding, callback) {
         received += chunk.length
         resetStall()
         const percent = total ? Math.min(100, (received / total) * 100) : null
@@ -263,14 +264,14 @@ async function download(
           if (percent !== null) lastPercent = Math.round(percent)
           onProgress?.({ stage: 'downloading', percent })
         }
-        file.write(chunk, () => callback())
-      },
-      final(callback) {
-        file.end(() => callback())
+        callback(null, chunk)
       }
     })
 
-    await pipeline(res.body as unknown as NodeJS.ReadableStream, counter)
+    // Keep the destination in the pipeline so disk failures reject this
+    // operation and destroy the HTTP body instead of crashing main with an
+    // unhandled WriteStream error.
+    await pipeline(res.body as unknown as NodeJS.ReadableStream, counter, file)
 
     /*
      * A stream that ends early does not always reject: the peer can close the
@@ -294,53 +295,17 @@ async function download(
   }
 }
 
-/**
- * Checks the archive against the digest its publisher lists beside it.
- *
- * HTTPS says the bytes came from that host unaltered; it says nothing about
- * whether the host is serving what it published. This is one extra request for
- * a file that is about to be executed on the user's machine, so it is cheap at
- * the price. A digest that cannot be fetched is not fatal - the publisher's
- * side file is not part of the contract - but one that disagrees is.
- */
-async function verifyDigest(archivePath: string, sha256Url: string): Promise<void> {
-  const controller = new AbortController()
-  const timer = setTimeout(() => controller.abort(), CONNECT_TIMEOUT_MS)
-
-  let published: string | null = null
-  try {
-    const res = await fetch(sha256Url, { redirect: 'follow', signal: controller.signal })
-    if (res.ok) published = parseSha256(await res.text())
-  } catch {
-    // Fall through: unverifiable, not wrong.
-  } finally {
-    clearTimeout(timer)
-  }
-
-  if (!published) {
-    log.warn(`no published digest for ${sha256Url}; installing unverified`)
-    return
-  }
-
-  const hash = createHash('sha256')
-  await pipeline(createReadStream(archivePath), hash)
-  const actual = hash.digest('hex')
-  if (actual !== published) {
-    throw new Error(`Archive digest ${actual.slice(0, 16)}… does not match the published ${published.slice(0, 16)}…`)
-  }
-  log.info('ffmpeg archive matches its published sha256')
-}
-
 /** Runs a binary for its own output; used only for version banners. */
 function capture(command: string, args: string[]): Promise<string> {
   return new Promise((resolve) => {
     const child = spawn(command, args, { shell: false, windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'] })
     let stdout = ''
+    const timer = setTimeout(() => killTree(child), 15_000)
     child.stdout.on('data', (chunk: Buffer) => {
       stdout = (stdout + chunk.toString('utf8')).slice(0, 4096)
     })
-    child.on('error', () => resolve(''))
-    child.on('close', () => resolve(stdout))
+    child.on('error', () => { clearTimeout(timer); resolve('') })
+    child.on('close', () => { clearTimeout(timer); resolve(stdout) })
   })
 }
 
@@ -403,7 +368,7 @@ async function findOnPath(name: string): Promise<string | null> {
   })
 }
 
-function run(command: string, args: string[], cwd?: string): Promise<void> {
+function run(command: string, args: string[], cwd?: string, timeoutMs = 120_000): Promise<void> {
   return new Promise((resolve, reject) => {
     // Argument array with shell:false throughout - none of these paths are
     // allowed anywhere near a command line the shell gets to parse.
@@ -421,9 +386,23 @@ function run(command: string, args: string[], cwd?: string): Promise<void> {
       stderr = (stderr + chunk.toString('utf8')).slice(-2000)
     })
 
-    child.on('error', reject)
+    // A wedged child on the provisioning path parks the runner's whole
+    // in-flight promise - pause() awaits it - so it must not be allowed to
+    // hang forever.
+    let timedOut = false
+    const timer = setTimeout(() => {
+      timedOut = true
+      killTree(child)
+    }, timeoutMs)
+
+    child.on('error', (err) => {
+      clearTimeout(timer)
+      reject(err)
+    })
     child.on('close', (code) => {
-      if (code === 0) resolve()
+      clearTimeout(timer)
+      if (timedOut) reject(new Error(`${command} timed out after ${Math.round(timeoutMs / 1000)}s`))
+      else if (code === 0) resolve()
       else reject(new Error(`${command} exited with ${code}: ${stderr.trim()}`))
     })
   })

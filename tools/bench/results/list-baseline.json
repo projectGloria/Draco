@@ -1,0 +1,92 @@
+{
+  "scope": "Node renderer-store sort and progress update; excludes React render, layout, paint, disk, and network",
+  "generatedAt": "2026-09-24T20:03:57.657Z",
+  "environment": {
+    "platform": "win32",
+    "arch": "x64",
+    "cpu": "11th Gen Intel(R) Core(TM) i7-11800H @ 2.30GHz",
+    "logicalCpus": 16,
+    "totalMemoryBytes": 16866840576,
+    "node": "v26.9.0"
+  },
+  "fixture": {
+    "counts": [
+      1,
+      10,
+      100,
+      1000
+    ],
+    "rounds": 12,
+    "iterationsPerRound": 250,
+    "warmupRounds": 2
+  },
+  "cases": [
+    {
+      "count": 1,
+      "nameSort": {
+        "medianMsPerOperation": 0.00014639999999997144,
+        "p95MsPerOperation": 0.0003204000000000633
+      },
+      "speedSort": {
+        "medianMsPerOperation": 0.00008159999999998035,
+        "p95MsPerOperation": 0.0001488000000000511
+      },
+      "oneTaskProgressTick": {
+        "medianMsPerOperation": 0.008155599999999937,
+        "p95MsPerOperation": 0.008556800000000066
+      }
+    },
+    {
+      "count": 10,
+      "nameSort": {
+        "medianMsPerOperation": 0.06371440000000007,
+        "p95MsPerOperation": 0.06411480000000006
+      },
+      "speedSort": {
+        "medianMsPerOperation": 0.0004540000000001783,
+        "p95MsPerOperation": 0.0006292000000000826
+      },
+      "oneTaskProgressTick": {
+        "medianMsPerOperation": 0.008358799999999974,
+        "p95MsPerOperation": 0.008829600000000028
+      }
+    },
+    {
+      "count": 100,
+      "nameSort": {
+        "medianMsPerOperation": 0.7450092000000004,
+        "p95MsPerOperation": 0.7503439999999991
+      },
+      "speedSort": {
+        "medianMsPerOperation": 0.0029888000000009925,
+        "p95MsPerOperation": 0.0030687999999991005
+      },
+      "oneTaskProgressTick": {
+        "medianMsPerOperation": 0.010400799999999436,
+        "p95MsPerOperation": 0.01098399999999856
+      }
+    },
+    {
+      "count": 1000,
+      "nameSort": {
+        "medianMsPerOperation": 8.160169999999999,
+        "p95MsPerOperation": 8.20323520000001
+      },
+      "speedSort": {
+        "medianMsPerOperation": 0.03011559999999008,
+        "p95MsPerOperation": 0.032918000000005124
+      },
+      "oneTaskProgressTick": {
+        "medianMsPerOperation": 0.03920399999999791,
+        "p95MsPerOperation": 0.040642399999997
+      }
+    }
+  ],
+  "process": {
+    "cpuUserMs": 26594,
+    "cpuSystemMs": 985,
+    "heapUsedBytes": 7496080,
+    "eventLoopDelayP95Ms": 2068.840447
+  },
+  "sink": 9999000
+}

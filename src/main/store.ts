@@ -1,6 +1,4 @@
 import { randomUUID } from 'node:crypto'
-import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
-import { dirname } from 'node:path'
 import type {
   Category,
   ClipboardItem,
@@ -12,6 +10,9 @@ import type {
 } from '@shared/types'
 import type { QuotaState } from './engine/limiter.ts'
 import { getPaths } from './bootstrap/paths.ts'
+import { readJson, readJsonOrThrowIfPresent, writeJsonAtomic } from './json-file.ts'
+import { electronJsonCipher } from './electron-json-cipher.ts'
+import { readSealedJsonFile, sealJson } from './sealed-json.ts'
 import { defaultCategories } from './categories.ts'
 import {
   sanitizeCategories,
@@ -22,37 +23,13 @@ import {
 
 /**
  * Small JSON-file store. Writes go through a temp file + rename so a crash
- * mid-write cannot leave an unparseable file that bricks startup.
+ * mid-write cannot leave an unparseable file that bricks startup. Task records
+ * are sealed before writing because URLs and request headers can contain tokens.
  *
  * Import convention in this project: `src/main/engine/**` uses relative `.ts`
  * specifiers so it runs bare under `node tools/dl.ts`; everything else in main
  * uses the `@shared` alias.
  */
-
-async function writeJsonAtomic(path: string, value: unknown, pretty = true): Promise<void> {
-  await mkdir(dirname(path), { recursive: true })
-  // Use a unique temp path. Several IPC calls can legitimately persist the same
-  // JSON file concurrently; a shared `<file>.tmp` lets one writer rename/remove
-  // another writer's temp file and turns an otherwise valid save into ENOENT.
-  const tmp = `${path}.${randomUUID()}.tmp`
-  try {
-    await writeFile(tmp, JSON.stringify(value, null, pretty ? 2 : undefined), 'utf8')
-    await rename(tmp, path)
-  } catch (err) {
-    // On success the rename already consumed the temp file - only clean it up
-    // when the write or rename actually failed and left it behind.
-    await rm(tmp, { force: true }).catch(() => {})
-    throw err
-  }
-}
-
-async function readJson<T>(path: string): Promise<T | null> {
-  try {
-    return JSON.parse(await readFile(path, 'utf8')) as T
-  } catch {
-    return null
-  }
-}
 
 /* ------------------------------------------------------------------ */
 /* Clipboard inbox                                                     */
@@ -100,6 +77,7 @@ export function defaultSettings(): Settings {
     theme: 'dark',
     downloadDir: getPaths().defaultDownloadDir,
     checkDiskSpace: true,
+    completionSound: true,
     catMode: false,
     maxConcurrentTasks: 3,
     exponentialBackoff: true,
@@ -153,19 +131,25 @@ export function defaultSettings(): Settings {
 // JSON can be fuzzed independently of Electron startup.
 
 let settings: Settings | null = null
+let settingsSaveTail: Promise<void> = Promise.resolve()
 
 export async function loadSettings(): Promise<Settings> {
   const base = defaultSettings()
   const [stored, clipboardInbox] = await Promise.all([
-    readJson<Partial<Settings>>(getPaths().settingsFile),
+    readJsonOrThrowIfPresent<Partial<Settings>>(getPaths().settingsFile),
     readJson<unknown>(getPaths().clipboardFile)
   ])
+  if (stored !== null && (typeof stored !== 'object' || Array.isArray(stored))) {
+    throw new Error('Saved settings must be an object')
+  }
   settings = stored ? sanitizeSettings(stored, base, defaultColumns) : base
 
   // The old clipboard monitor defaulted off because it opened a modal whenever
   // it noticed a link. The inbox is deliberately quiet, so enable it once when
-  // this new persisted store is first introduced. Later user choices survive.
-  if (!Array.isArray(clipboardInbox)) settings.watchClipboard = true
+  // this new persisted store is first introduced. Later user choices survive:
+  // a missing or corrupt clipboard.json (antivirus quarantine, disk trouble)
+  // must not re-enable the watcher over the user's explicit off.
+  if (!Array.isArray(clipboardInbox) && stored === null) settings.watchClipboard = true
 
   // Migrate the file forward when a release adds settings, so the on-disk shape
   // matches what the app actually uses and stays hand-editable.
@@ -178,10 +162,17 @@ export function getSettings(): Settings {
   return settings
 }
 
-export async function saveSettings(patch: Partial<Settings>): Promise<Settings> {
-  settings = sanitizeSettings({ ...getSettings(), ...patch }, defaultSettings(), defaultColumns)
-  await writeJsonAtomic(getPaths().settingsFile, settings)
-  return settings
+export function saveSettings(patch: Partial<Settings>): Promise<Settings> {
+  // Compute each patch against the last committed value. A failed write must
+  // not become the in-memory setting or leak into a later, unrelated patch.
+  const operation = settingsSaveTail.then(async () => {
+    const next = sanitizeSettings({ ...getSettings(), ...patch }, defaultSettings(), defaultColumns)
+    await writeJsonAtomic(getPaths().settingsFile, next)
+    settings = next
+    return next
+  })
+  settingsSaveTail = operation.then(() => {}, () => {})
+  return operation
 }
 
 /* ------------------------------------------------------------------ */
@@ -189,9 +180,11 @@ export async function saveSettings(patch: Partial<Settings>): Promise<Settings> 
 /* ------------------------------------------------------------------ */
 
 let categories: Category[] = []
+let categoriesSaveTail: Promise<void> = Promise.resolve()
 
 export async function loadCategories(): Promise<Category[]> {
-  const stored = await readJson<Category[]>(getPaths().categoriesFile)
+  const stored = await readJsonOrThrowIfPresent<Category[]>(getPaths().categoriesFile)
+  if (stored !== null && !Array.isArray(stored)) throw new Error('Saved categories must be a list')
   categories = Array.isArray(stored) && stored.length > 0 ? sanitizeCategories(stored, defaultCategories) : defaultCategories()
   await writeJsonAtomic(getPaths().categoriesFile, categories)
   return categories
@@ -201,10 +194,15 @@ export function getCategories(): Category[] {
   return categories
 }
 
-export async function saveCategories(next: Category[]): Promise<Category[]> {
-  categories = sanitizeCategories(next, defaultCategories)
-  await writeJsonAtomic(getPaths().categoriesFile, categories)
-  return categories
+export function saveCategories(next: Category[]): Promise<Category[]> {
+  const snapshot = sanitizeCategories(next, defaultCategories)
+  const operation = categoriesSaveTail.then(async () => {
+    await writeJsonAtomic(getPaths().categoriesFile, snapshot)
+    categories = snapshot
+    return snapshot
+  })
+  categoriesSaveTail = operation.then(() => {}, () => {})
+  return operation
 }
 
 /* ------------------------------------------------------------------ */
@@ -212,19 +210,79 @@ export async function saveCategories(next: Category[]): Promise<Category[]> {
 /* ------------------------------------------------------------------ */
 
 export async function loadTasks(): Promise<DownloadTask[]> {
-  const stored = await readJson<unknown>(getPaths().tasksFile)
-  return sanitizeTasks(stored, getPaths().defaultDownloadDir)
+  const opened = await readSealedJsonFile(getPaths().tasksFile, electronJsonCipher)
+  if (opened === null) return []
+  if (!Array.isArray(opened.value)) throw new Error('Saved tasks must be a list')
+  const tasks = sanitizeTasks(opened.value, getPaths().defaultDownloadDir)
+  if (opened.legacy || opened.repairBackup) {
+    // Replace both the primary and its backup. A normal atomic write would
+    // preserve the old readable JSON as the backup during this migration.
+    await writeJsonAtomic(getPaths().tasksFile, sealJson(tasks.map(persistable), electronJsonCipher), false, 'replace')
+  }
+  return tasks
 }
 
 let taskWriteTimer: NodeJS.Timeout | null = null
 let pendingTasks: DownloadTask[] | null = null
-let taskWritePromise: Promise<void> | null = null
+let taskWritePromise: Promise<void> = Promise.resolve()
+let taskWriteError: unknown = null
+let taskWriteRevision = 0
+let quotaWriteError: unknown = null
+let persistenceErrorHandler: ((scope: 'tasks' | 'quota', error: unknown) => void) | null = null
+
+export function setPersistenceErrorHandler(handler: ((scope: 'tasks' | 'quota', error: unknown) => void) | null): void {
+  persistenceErrorHandler = handler
+}
+
+function queueTaskWrite(snapshot: DownloadTask[]): void {
+  const revision = ++taskWriteRevision
+  let write: Promise<void>
+  try {
+    write = writeJsonAtomic(getPaths().tasksFile,
+      sealJson(snapshot.map(persistable), electronJsonCipher), false)
+  } catch (error) {
+    write = Promise.reject(error)
+  }
+  taskWritePromise = write
+    .then(() => { taskWriteError = null }, (error: unknown) => {
+      taskWriteError = error
+      // A failed quit flush must retain its snapshot for the next quit attempt.
+      // Do not requeue an older revision if a newer write is already queued or
+      // a newer state snapshot is waiting for its coalescing timer.
+      if (revision === taskWriteRevision && !pendingTasks) pendingTasks = snapshot
+      persistenceErrorHandler?.('tasks', error)
+    })
+}
+
+/**
+ * How long task writes are coalesced for.
+ *
+ * The journals beside each part file - not this one - are what actually make a
+ * download resumable, so this file being a few seconds stale costs nothing.
+ * What it buys is that a busy app is not running a synchronous
+ * `JSON.stringify` over the whole download list once a second on the same
+ * thread that is draining sockets.
+ */
+const TASK_WRITE_COALESCE_MS = 4000
+
+/**
+ * The persistable shape of a task.
+ *
+ * `torrentInfo` is live diagnostics - a full file list plus a peer list - and
+ * `sanitizeTasks` has never restored it, so every byte of it written here was
+ * stringified and then discarded on the next launch. `speed` and `eta` are
+ * likewise recomputed the moment a task runs again. Dropping the three keeps
+ * the write proportional to what is actually read back.
+ */
+function persistable(task: DownloadTask): DownloadTask {
+  const { torrentInfo: _torrentInfo, ...rest } = task
+  return { ...rest, speed: 0, eta: null } as DownloadTask
+}
 
 /**
  * Coalesces task writes. Statuses change on every segment completion, and
  * rewriting the whole list each time would put the disk on the hot path for no
- * benefit - a second of staleness costs nothing because the journals, not this
- * file, are what make a download resumable.
+ * benefit.
  */
 export function persistTasks(tasks: DownloadTask[]): void {
   pendingTasks = tasks
@@ -236,12 +294,8 @@ export function persistTasks(tasks: DownloadTask[]): void {
     pendingTasks = null
     if (!snapshot) return
 
-    taskWritePromise = writeJsonAtomic(getPaths().tasksFile, snapshot, false)
-      .catch(() => {})
-      .finally(() => {
-        taskWritePromise = null
-      })
-  }, 1000)
+    queueTaskWrite(snapshot)
+  }, TASK_WRITE_COALESCE_MS)
   taskWriteTimer.unref?.()
 }
 
@@ -252,15 +306,13 @@ export async function flushTasks(): Promise<void> {
     taskWriteTimer = null
   }
 
-  if (taskWritePromise) {
-    await taskWritePromise
-  }
-
   if (pendingTasks) {
     const snapshot = pendingTasks
     pendingTasks = null
-    await writeJsonAtomic(getPaths().tasksFile, snapshot, false).catch(() => {})
+    queueTaskWrite(snapshot)
   }
+  await taskWritePromise
+  if (taskWriteError) throw taskWriteError
 }
 
 /* ------------------------------------------------------------------ */
@@ -280,13 +332,16 @@ export async function loadQuotaState(): Promise<QuotaState | null> {
 
 export function persistQuotaState(state: QuotaState): void {
   const snapshot = { ...state }
-  quotaWritePromise = quotaWritePromise
-    .then(() => writeJsonAtomic(getPaths().quotaFile, snapshot))
-    .catch(() => {})
+  quotaWritePromise = writeJsonAtomic(getPaths().quotaFile, snapshot)
+    .then(() => { quotaWriteError = null }, (error: unknown) => {
+      quotaWriteError = error
+      persistenceErrorHandler?.('quota', error)
+    })
 }
 
 export async function flushQuotaState(): Promise<void> {
   await quotaWritePromise
+  if (quotaWriteError) throw quotaWriteError
 }
 
 /* ------------------------------------------------------------------ */
@@ -294,7 +349,8 @@ export async function flushQuotaState(): Promise<void> {
 /* ------------------------------------------------------------------ */
 
 export async function loadQueues(): Promise<Queue[]> {
-  const stored = await readJson<unknown>(getPaths().queuesFile)
+  const stored = await readJsonOrThrowIfPresent<unknown>(getPaths().queuesFile)
+  if (stored !== null && !Array.isArray(stored)) throw new Error('Saved queues must be a list')
   const sanitized = sanitizeQueues(stored)
   if (sanitized.length === 0) {
     const main: Queue = {
@@ -306,7 +362,8 @@ export async function loadQueues(): Promise<Queue[]> {
       startTime: null,
       stopTime: null,
       days: [],
-      maxConcurrent: 3,
+      maxConcurrent: 1,
+      parallelismConfigured: true,
       retryLimit: 3,
       retryDelaySeconds: 30,
       onComplete: 'none',

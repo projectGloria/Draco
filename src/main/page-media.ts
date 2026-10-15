@@ -1,10 +1,28 @@
 import type { MediaVariant, RequestHeaders, YouTubeResolution } from '../shared/types.ts'
-import { getDispatcher } from './engine/http.ts'
+import { fetchGuarded } from './fetch-guard.ts'
+import { isPrivateHost } from './engine/create.ts'
 import { DEFAULT_USER_AGENT } from './engine/probe.ts'
+import { readResponseText } from './response-limit.ts'
 
 const MAX_HTML_BYTES = 5 * 1024 * 1024
 const MAX_EMBEDDED_PAGES = 8
 const MAX_EMBED_DEPTH = 2
+
+/**
+ * Headers for fetching a URL the *page* declared - an embedded player frame or
+ * a media asset. Unlike the root page, which the user chose, these addresses
+ * are attacker-influenced, so they never receive the session's cookies and are
+ * held to the same private-network boundary as extension-supplied URLs.
+ */
+function pageControlledHeaders(
+  headers: RequestHeaders | undefined,
+  referer: string | undefined
+): Record<string, string> {
+  return {
+    'user-agent': headers?.userAgent || DEFAULT_USER_AGENT,
+    ...(referer ? { referer } : {})
+  }
+}
 
 interface Candidate {
   kind: 'video' | 'audio' | 'image'
@@ -19,6 +37,10 @@ export async function resolveHtmlPageMedia(
   headers: RequestHeaders | undefined
 ): Promise<YouTubeResolution> {
   const root = await fetchHtmlPage(pageUrl, headers, headers?.referer)
+  // Whether private-network media may be probed follows the root page: an
+  // intranet page declaring intranet media is legitimate, a public page
+  // declaring `http://169.254.169.254/...` is request forgery.
+  const rootIsPrivate = isPrivateHost(new URL(root.url).hostname)
   const pages: Array<{ html: string; url: string }> = [root]
   const visited = new Set([root.url])
   let frontier = [{ ...root, depth: 0 }]
@@ -35,12 +57,18 @@ export async function resolveHtmlPageMedia(
     ).filter((target) => {
       if (visited.has(target.url)) return false
       visited.add(target.url)
+      // Embedded frames are chosen by the page, never by the user.
+      if (!rootIsPrivate && isPrivateHost(new URL(target.url).hostname)) return false
       return true
     }).slice(0, MAX_EMBEDDED_PAGES + 1 - pages.length)
 
     const fetched = await mapConcurrent(targets, 4, async (target) => {
       try {
-        return { ...(await fetchHtmlPage(target.url, headers, target.referer)), depth: target.depth }
+        // Embedded frames are page-chosen, so the session's cookies stay home.
+        return {
+          ...(await fetchHtmlPage(target.url, headers, target.referer, false)),
+          depth: target.depth
+        }
       } catch {
         return null
       }
@@ -62,8 +90,12 @@ export async function resolveHtmlPageMedia(
     }
   }
   const ordered = [...unique.values()].sort((a, b) => mediaVariantOrder(a) - mediaVariantOrder(b))
-  const variants = await mapConcurrent(ordered.slice(0, 50), 8, (variant) =>
-    inspectAsset(variant, pageUrl, headers)
+  // Media URLs are read straight out of the page's HTML, so they are held to
+  // the page's own network boundary before anything is fetched from them.
+  const variants = await mapConcurrent(
+    ordered.filter((variant) => rootIsPrivate || !isPrivateHost(new URL(variant.url).hostname)).slice(0, 50),
+    8,
+    (variant) => inspectAsset(variant, pageUrl, headers)
   )
   const reachable = variants.filter((variant): variant is MediaVariant => variant !== null)
   if (reachable.length === 0) {
@@ -81,29 +113,24 @@ export async function resolveHtmlPageMedia(
 async function fetchHtmlPage(
   url: string,
   headers: RequestHeaders | undefined,
-  referer: string | undefined
+  referer: string | undefined,
+  withCredentials = true
 ): Promise<{ html: string; url: string }> {
-  const response = await fetch(url, {
+  const response = await fetchGuarded(url, {
     headers: {
       accept: 'text/html,application/xhtml+xml',
       'user-agent': headers?.userAgent || DEFAULT_USER_AGENT,
       ...(referer ? { referer } : {}),
-      ...(headers?.cookie ? { cookie: headers.cookie } : {})
+      ...(withCredentials && headers?.cookie ? { cookie: headers.cookie } : {})
     },
-    redirect: 'follow',
-    dispatcher: getDispatcher(30_000)
-  } as RequestInit)
+    timeoutMs: 30_000
+  })
   if (!response.ok) throw new Error(`Page inspection failed with HTTP ${response.status}`)
   const type = response.headers.get('content-type') ?? ''
   if (!/text\/html|application\/xhtml\+xml/i.test(type)) {
     throw new Error('The address is not an HTML media page')
   }
-  const declared = Number(response.headers.get('content-length') ?? 0)
-  if (declared > MAX_HTML_BYTES) throw new Error('The page is too large to inspect safely')
-  const html = await response.text()
-  if (Buffer.byteLength(html, 'utf8') > MAX_HTML_BYTES) {
-    throw new Error('The page is too large to inspect safely')
-  }
+  const html = await readResponseText(response, MAX_HTML_BYTES)
   return { html, url: response.url || url }
 }
 
@@ -172,19 +199,26 @@ export function extractPageMedia(html: string, pageUrl: string): YouTubeResoluti
     }
   }
 
-  // Tilda and similar builders keep playable/background resources in custom
-  // data attributes instead of actual <video>/<img> sources.
-  for (const match of html.matchAll(/<[a-z][^>]*>/gi)) {
-    const attrs = attributes(match[0])
-    add('video', attrs['data-content-video-url-mp4'], 30_000, 'video/mp4')
-    add('video', attrs['data-content-video-url-webm'], 30_000, 'video/webm')
-    add('video', attrs['data-video-url'], 20_000)
-    add('image', attrs['data-img-zoom-url'] || attrs['data-original'], 20_000)
-    add('image', attrs['data-content-cover-bg'], 10_000)
-    for (const [name, value] of Object.entries(attrs)) {
-      if (!/^(?:data-(?:src|source|file|url|video|media)|src)$/i.test(name)) continue
-      const kind = kindFrom(undefined, value)
-      if (kind) add(kind, value, 15_000)
+  /*
+   * Tilda and similar builders keep playable/background resources in custom
+   * data attributes instead of actual <video>/<img> sources.
+   *
+   * This used to walk every tag in the document - `matchAll(/<[a-z][^>]*>/gi)`
+   * - and run the attribute parser, itself a `matchAll`, on each one. On a 5 MB
+   * page that is a nested scan of the whole document, synchronously, on the
+   * same event loop that drains every download's sockets; and `resolveMediaPage`
+   * does it for up to nine pages. Only about a dozen attribute names were ever
+   * being looked for, so they are searched for directly instead: one pass per
+   * name rather than one parse per tag.
+   */
+  for (const [name, kind, score, mime] of DATA_ATTRIBUTE_SOURCES) {
+    for (const value of attributeValues(html, name)) {
+      if (kind === null) {
+        const inferred = kindFrom(undefined, value)
+        if (inferred) add(inferred, value, score)
+      } else {
+        add(kind, value, score, mime)
+      }
     }
   }
 
@@ -287,6 +321,45 @@ function titleCase(value: 'video' | 'image'): string {
   return value[0].toUpperCase() + value.slice(1)
 }
 
+/**
+ * The custom attributes page builders hide media in, and what each one means.
+ *
+ * A `null` kind means "work it out from the value", which is what the old
+ * catch-all loop over `data-src`/`data-url`/... did. Everything else names its
+ * kind outright, because the attribute name is more reliable than the URL.
+ */
+const DATA_ATTRIBUTE_SOURCES: ReadonlyArray<
+  [name: string, kind: Candidate['kind'] | null, score: number, mime?: string]
+> = [
+  ['data-content-video-url-mp4', 'video', 30_000, 'video/mp4'],
+  ['data-content-video-url-webm', 'video', 30_000, 'video/webm'],
+  ['data-video-url', 'video', 20_000],
+  ['data-img-zoom-url', 'image', 20_000],
+  ['data-original', 'image', 20_000],
+  ['data-content-cover-bg', 'image', 10_000],
+  ['data-src', null, 15_000],
+  ['data-source', null, 15_000],
+  ['data-file', null, 15_000],
+  ['data-url', null, 15_000],
+  ['data-video', null, 15_000],
+  ['data-media', null, 15_000],
+  ['src', null, 15_000]
+]
+
+/** Every value one attribute name carries anywhere in the document. */
+function attributeValues(html: string, name: string): string[] {
+  const pattern = new RegExp(
+    `\\b${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*=\\s*(?:(["'])(.*?)\\1|([^\\s>]+))`,
+    'gi'
+  )
+  const out: string[] = []
+  for (const match of html.matchAll(pattern)) {
+    const value = decodeHtml(match[2] ?? match[3] ?? '')
+    if (value) out.push(value)
+  }
+  return out
+}
+
 function attributes(tag: string): Record<string, string> {
   const out: Record<string, string> = {}
   for (const match of tag.matchAll(/\b([a-z_:][-a-z0-9_:.]*)\s*=\s*(?:(["'])(.*?)\2|([^\s>]+))/gi)) {
@@ -365,24 +438,21 @@ async function requestAssetInfo(
   pageUrl: string,
   headers: RequestHeaders | undefined
 ): Promise<MediaVariant> {
-  const requestHeaders = {
-    'user-agent': headers?.userAgent || DEFAULT_USER_AGENT,
-    referer: headers?.referer || pageUrl,
-    ...(headers?.cookie ? { cookie: headers.cookie } : {})
-  }
-  let response = await fetch(url, {
+  // The asset address was declared by the page, so it is probed without the
+  // session's cookies - the probe exists to learn a size and a container, and
+  // must not be usable to relay credentials to an attacker-chosen host.
+  const requestHeaders = pageControlledHeaders(headers, headers?.referer || pageUrl)
+  let response = await fetchGuarded(url, {
     method: 'HEAD',
     headers: requestHeaders,
-    redirect: 'follow',
-    dispatcher: getDispatcher(20_000)
-  } as RequestInit)
+    timeoutMs: 20_000
+  })
 
   if (!response.ok || !positiveLength(response.headers.get('content-length'))) {
-    response = await fetch(url, {
+    response = await fetchGuarded(url, {
       headers: { ...requestHeaders, range: 'bytes=0-0' },
-      redirect: 'follow',
-      dispatcher: getDispatcher(20_000)
-    } as RequestInit)
+      timeoutMs: 20_000
+    })
     if (!response.ok) throw new Error(`Asset returned HTTP ${response.status}`)
     await response.body?.cancel()
   }

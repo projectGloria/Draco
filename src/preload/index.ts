@@ -2,12 +2,15 @@ import { contextBridge, ipcRenderer, webUtils, type IpcRendererEvent } from 'ele
 import type {
   BootstrapState,
   Category,
+  CookieCheckProgress,
   DownloadTask,
   MediaAudioTrack,
   NewDownload,
   PendingAction,
+  PlaylistProgress,
   Queue,
   RendererApi,
+  TaskPatch,
   RequestHeaders,
   Settings,
   TaskProgress,
@@ -37,12 +40,15 @@ const api: RendererApi = {
   /* tasks */
   listTasks: () => ipcRenderer.invoke('tasks:list'),
   getTask: (id: string) => ipcRenderer.invoke('tasks:get', id),
+  taskDetail: (id: string) => ipcRenderer.invoke('tasks:detail', id),
   addDownload: (input: NewDownload) => ipcRenderer.invoke('tasks:add', input),
   addDownloads: (inputs: NewDownload[]) => ipcRenderer.invoke('tasks:addMany', inputs),
   probe: (url: string, headers?: RequestHeaders) => ipcRenderer.invoke('tasks:probe', url, headers),
   resolveYouTube: (url: string) => ipcRenderer.invoke('youtube:resolve', url),
   resolvePlaylist: (url: string) => ipcRenderer.invoke('youtube:playlist', url),
   addPlaylist: (input) => ipcRenderer.invoke('youtube:addPlaylist', input),
+  cancelPlaylist: (groupId: string) => ipcRenderer.invoke('youtube:cancelPlaylist', groupId),
+  onPlaylistProgress: (cb) => subscribe<PlaylistProgress>('playlist:progress', cb),
   resolveMediaPage: (url: string, headers?: RequestHeaders) => ipcRenderer.invoke('media:resolvePage', url, headers),
   listClipboardItems: () => ipcRenderer.invoke('clipboard:list'),
   retryClipboardItem: (id: string) => ipcRenderer.invoke('clipboard:retry', id),
@@ -57,7 +63,7 @@ const api: RendererApi = {
   findDuplicate: (input) => ipcRenderer.invoke('tasks:findDuplicate', input),
   exportDownloads: (ids) => ipcRenderer.invoke('tasks:export', ids),
   importDownloads: () => ipcRenderer.invoke('tasks:import'),
-  updateTask: (id: string, patch: Partial<DownloadTask>) =>
+  updateTask: (id: string, patch: TaskPatch) =>
     ipcRenderer.invoke('tasks:update', id, patch),
   redownload: (id: string) => ipcRenderer.invoke('tasks:redownload', id),
   openFile: (id: string) => ipcRenderer.invoke('tasks:open', id),
@@ -101,6 +107,7 @@ const api: RendererApi = {
   /* queues */
   listQueues: () => ipcRenderer.invoke('queues:list'),
   saveQueue: (queue: Queue) => ipcRenderer.invoke('queues:save', queue),
+  reorderQueue: (id, taskIds) => ipcRenderer.invoke('queues:reorder', id, taskIds),
   removeQueue: (id: string) => ipcRenderer.invoke('queues:remove', id),
   startQueue: (id: string) => ipcRenderer.invoke('queues:start', id),
   stopQueue: (id: string) => ipcRenderer.invoke('queues:stop', id),
@@ -135,6 +142,10 @@ const api: RendererApi = {
   /* icons */
   fileIcon: (extension: string) => ipcRenderer.invoke('icons:file', extension),
   siteIcon: (url: string) => ipcRenderer.invoke('icons:site', url),
+  thumbnail: (url: string) => ipcRenderer.invoke('icons:thumbnail', url),
+  listBrowsers: () => ipcRenderer.invoke('cookies:browsers'),
+  checkCookies: (browser: string) => ipcRenderer.invoke('cookies:check', browser),
+  onCookieCheckProgress: (cb) => subscribe<CookieCheckProgress>('cookies:progress', cb),
 
   /* window */
   minimize: () => ipcRenderer.invoke('window:minimize'),
@@ -143,7 +154,8 @@ const api: RendererApi = {
   minimizeSelf: () => ipcRenderer.invoke('window:minimizeSelf'),
   closeSelf: () => ipcRenderer.invoke('window:closeSelf'),
   onMaximizeChange: (cb) => subscribe<boolean>('window:maximized', cb),
-  onToast: (cb) => subscribe<Toast>('toast', cb)
+  onToast: (cb) => subscribe<Toast>('toast', cb),
+  onDownloadComplete: (cb) => subscribe<null>('download:complete', cb)
 }
 
 contextBridge.exposeInMainWorld('api', api)

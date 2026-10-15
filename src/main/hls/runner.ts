@@ -7,24 +7,33 @@ import {
   rename,
   rm,
   stat,
+  statfs,
   writeFile,
   type FileHandle
 } from 'node:fs/promises'
 import { basename, join } from 'node:path'
 import type { DownloadTask, Segment } from '@shared/types'
-import { getDispatcher } from '../engine/http.ts'
+import { fetchGuarded, headersForResource } from '../fetch-guard.ts'
 import { QuotaExceededError, type RateLimiter } from '../engine/limiter.ts'
 import { discardReservedPath, moveFile, uniquePath } from '../engine/naming.ts'
 import { mapConcurrent } from '../engine/concurrency.ts'
 import { buildHeaders } from '../engine/probe.ts'
 import type { Runner } from '../engine/runner.ts'
-import { workspaceDir } from '../engine/workspace.ts'
+import { taskWorkspaceDir } from '../engine/workspace.ts'
 import { quotaDetail } from '../engine/task.ts'
 import { AbortedError } from '../engine/worker.ts'
 import { logger } from '../log.ts'
+import { readResponseBytes } from '../response-limit.ts'
 import { ensureFfmpeg } from './ffmpeg.ts'
+import { withEncryptedSegmentSlot } from './encrypted-pool.ts'
+import { verifyExpectedChecksum } from '../engine/checksum.ts'
+import {
+  EncryptedSegmentBuffer,
+  EncryptedSegmentTooLargeError,
+  MAX_ENCRYPTED_SEGMENT_BYTES
+} from './encrypted-buffer.ts'
 import { mux } from './mux.ts'
-import { loadMediaPlaylist, resolveVariants, type HlsSegment } from './playlist.ts'
+import { loadMediaPlaylist, resolveVariants, type HlsSegment, type MediaPlaylist } from './playlist.ts'
 import { streamResponseBody } from './stream.ts'
 
 const log = logger('hls')
@@ -83,7 +92,7 @@ interface ResolvedTrack {
   language: string | null
   isDefault: boolean
   segments: HlsSegment[]
-  initSegment: { url: string; byteRange: { offset: number; length: number } | null } | null
+  initSegment: MediaPlaylist['initSegment']
   mediaSequence: number
 }
 
@@ -113,7 +122,7 @@ export class HlsRunner implements Runner {
   }
 
   private get tempDir(): string {
-    return workspaceDir(this.task.dir, this.config.tempDir)
+    return taskWorkspaceDir(this.task.dir, this.task.id, this.config.tempDir)
   }
 
   private get partsDir(): string {
@@ -130,6 +139,59 @@ export class HlsRunner implements Runner {
 
   private get manifestPath(): string {
     return join(this.partsDir, '.playlist.json')
+  }
+
+  /*
+   * The concat lists ffmpeg reads the pieces through. They live inside the
+   * parts directory, which is removed wholesale on success and on a restart, so
+   * they need no cleanup of their own.
+   */
+  private get videoListPath(): string {
+    return join(this.partsDir, '.video.concat')
+  }
+
+  private audioListPath(index: number): string {
+    return join(this.partsDir, `.audio${index === 0 ? '' : `.${index}`}.concat`)
+  }
+
+  /**
+   * Writes one track's pieces as an ffmpeg concat list and returns their total
+   * size, which is the figure the finished file's progress is measured against.
+   *
+   * Paths are absolute and single-quoted, with `'` escaped the way the concat
+   * demuxer requires. They are Draco's own filenames in Draco's own workspace -
+   * `piecePath` builds them from a zero-padded index - so nothing a server
+   * chose ever reaches this file.
+   */
+  private async writeConcatList(track: ResolvedTrack, listPath: string): Promise<number> {
+    const paths: string[] = []
+    if (track.initSegment) paths.push(this.initPath(track.id))
+    for (let index = 0; index < track.segments.length; index++) {
+      paths.push(this.piecePath(track.id, index))
+    }
+
+    const sizes = await mapConcurrent(paths, FILE_SCAN_CONCURRENCY, async (path) =>
+      (await stat(path).catch(() => null))?.size ?? 0
+    )
+
+    const lines = paths.map((path) => `file '${path.replace(/'/g, "'\\''")}'`)
+    await writeFile(listPath, lines.join('\n') + '\n', 'utf8')
+
+    return sizes.reduce((total, size) => total + size, 0)
+  }
+
+  /** MP4 fragments share one initialization header and must be read as one file. */
+  private async joinFragmentedTrack(track: ResolvedTrack, path: string): Promise<number> {
+    const handle = await open(path, 'w')
+    try {
+      if (track.initSegment) await appendPiece(handle, this.initPath(track.id), this.controller.signal)
+      for (let index = 0; index < track.segments.length; index++) {
+        await appendPiece(handle, this.piecePath(track.id, index), this.controller.signal)
+      }
+    } finally {
+      await handle.close()
+    }
+    return (await stat(path)).size
   }
 
   async start(): Promise<void> {
@@ -262,7 +324,9 @@ export class HlsRunner implements Runner {
 
     let videoUrl = this.task.url
     if ((!this.task.audioTracks || this.task.audioTracks.length === 0) && !this.task.audioUrl) {
-      const variants = await resolveVariants(this.task.url, this.task.headers)
+      const variants = await resolveVariants(this.task.url, this.task.headers, {
+        signal: this.controller.signal, timeoutMs: this.config.timeoutMs, estimateSizes: false, credentialUrl: this.task.url
+      })
       const selected = variants[0]
       if (selected) {
         videoUrl = selected.url
@@ -274,7 +338,9 @@ export class HlsRunner implements Runner {
       }
     }
 
-    const playlist = await loadMediaPlaylist(videoUrl, this.task.headers)
+    const playlist = await loadMediaPlaylist(videoUrl, this.task.headers, {
+      signal: this.controller.signal, timeoutMs: this.config.timeoutMs, credentialUrl: this.task.url
+    })
     this.throwIfAborted()
 
     if (playlist.isLive) {
@@ -306,7 +372,9 @@ export class HlsRunner implements Runner {
 
     for (let index = 0; index < uniqueAudio.length; index++) {
       const declared = uniqueAudio[index]
-      const audioPlaylist = await loadMediaPlaylist(declared.url, this.task.headers)
+      const audioPlaylist = await loadMediaPlaylist(declared.url, this.task.headers, {
+        signal: this.controller.signal, timeoutMs: this.config.timeoutMs, credentialUrl: this.task.url
+      })
       this.throwIfAborted()
       if (audioPlaylist.isLive) throw new Error(`Audio track “${declared.label}” is a live stream`)
       if (audioPlaylist.segments.length === 0) throw new Error(`Audio track “${declared.label}” contained no media segments`)
@@ -360,6 +428,9 @@ export class HlsRunner implements Runner {
         )
       }
     } else {
+      // Without a readable identity record none of the retained pieces can
+      // safely be associated with this playlist, even when their indices fit.
+      await clearPlaylistParts(this.partsDir)
       await writeFile(
         this.manifestPath,
         JSON.stringify({ version: PLAYLIST_MANIFEST_VERSION, identity: playlistIdentity }),
@@ -388,12 +459,15 @@ export class HlsRunner implements Runner {
         const existing = await stat(initPath).catch(() => null)
         if (!existing || existing.size === 0) {
           sampleJobs.push(async (slot) => {
-            const bytes = await this.downloadAtomic(
-              initPath,
-              track.initSegment!.url,
-              track.initSegment!.byteRange,
-              slot
-            )
+            const init = track.initSegment!
+            const bytes = init.key
+              ? await withEncryptedSegmentSlot(this.controller.signal, async () => {
+                const raw = await this.download(init.url, init.byteRange, slot)
+                const body = await this.decrypt(raw, init.key!, 0)
+                await writeAtomic(initPath, body)
+                return body.length
+              })
+              : await this.downloadAtomic(initPath, init.url, init.byteRange, slot)
             this.creditCompletedBytes(slot, bytes)
           })
         } else {
@@ -514,7 +588,18 @@ export class HlsRunner implements Runner {
 
     for (let slot = 0; slot < workerCount; slot++) workers.push(worker(slot))
 
-    await Promise.all(workers)
+    /*
+     * `allSettled`, not `all`. `all` rejects on the first worker to throw and
+     * abandons the rest mid-flight - and the first to throw is normally the one
+     * that noticed the abort, so a pause returned while its siblings were still
+     * inside a write, a close or a rename. `pause()` waits on this precisely so
+     * that `remove()` can delete the parts directory the moment it returns.
+     *
+     * A worker only ever rejects by throwing out of `throwIfAborted`; a failed
+     * job is already captured in `firstError` and returns normally. So nothing
+     * is being swallowed here that is not re-thrown two lines down.
+     */
+    await Promise.allSettled(workers)
     this.throwIfAborted()
     if (firstError) throw firstError
   }
@@ -527,11 +612,14 @@ export class HlsRunner implements Runner {
     const segment = track.segments[index]
     const path = this.piecePath(track.id, index)
     let bytes: number
-    if (segment.key) {
-      const raw = await this.download(segment.url, segment.byteRange, slot)
-      const body = await this.decrypt(raw, segment.key, track.mediaSequence + index)
-      await writeAtomic(path, body)
-      bytes = body.length
+    const key = segment.key
+    if (key) {
+      bytes = await withEncryptedSegmentSlot(this.controller.signal, async () => {
+        const raw = await this.download(segment.url, segment.byteRange, slot)
+        const body = await this.decrypt(raw, key, track.mediaSequence + index)
+        await writeAtomic(path, body)
+        return body.length
+      })
     } else {
       // Plain pieces go straight to their temp file. This keeps memory bounded
       // to one network chunk per connection instead of one complete HLS piece.
@@ -564,12 +652,15 @@ export class HlsRunner implements Runner {
     byteRange: { offset: number; length: number } | null,
     slot: number
   ): Promise<Buffer> {
-    let chunks: Buffer[] = []
+    if (byteRange && byteRange.length > MAX_ENCRYPTED_SEGMENT_BYTES) {
+      throw new EncryptedSegmentTooLargeError()
+    }
+    const buffer = new EncryptedSegmentBuffer()
     await this.transfer(url, byteRange, slot, {
-      reset: () => { chunks = [] },
-      write: (chunk) => { chunks.push(chunk) }
+      reset: () => buffer.reset(),
+      write: (chunk) => buffer.write(chunk)
     })
-    return Buffer.concat(chunks)
+    return buffer.value()
   }
 
   /** Streams an unencrypted piece to a temp name and atomically publishes it. */
@@ -634,71 +725,78 @@ export class HlsRunner implements Runner {
 
       if (attempt > 0) {
         // Exponential with jitter, so a stream whose CDN hiccups does not have
-        // every connection retry in lockstep.
-        const backoff = Math.min(15_000, 500 * 2 ** attempt) * (0.5 + Math.random())
-        await delay(backoff, this.controller.signal)
+        // every connection retry in lockstep. The jitter stays either way -
+        // turning the setting off asks for a predictable delay, not for every
+        // connection on the stream to retry on the same millisecond.
+        const base = this.config.exponentialBackoff === false
+          ? 2000
+          : Math.min(15_000, 500 * 2 ** attempt)
+        await delay(base * (0.5 + Math.random()), this.controller.signal)
       }
 
       try {
         await sink.reset()
         const state = this.active.get(slot)
         if (state) state.bytes = 0
-        const headers = buildHeaders(this.task.headers)
+        const headers = headersForResource(url, this.task.url, buildHeaders(this.task.headers))
         if (byteRange) {
           headers.range = `bytes=${byteRange.offset}-${byteRange.offset + byteRange.length - 1}`
         }
 
-        const res = await fetch(url, {
+        const res = await fetchGuarded(url, {
           headers,
-          redirect: 'follow',
           signal: this.controller.signal,
-          dispatcher: getDispatcher(this.config.timeoutMs)
-        } as RequestInit)
+          timeoutMs: this.config.timeoutMs
+        })
 
-        if (!res.ok) throw new Error(`HTTP ${res.status} ${res.statusText}`)
-        if (byteRange) {
-          if (res.status !== 206) {
-            throw new Error('HLS byte-range request was not honoured by the server')
+        try {
+          if (!res.ok) throw new Error(`HTTP ${res.status} ${res.statusText}`)
+          if (byteRange) {
+            if (res.status !== 206) {
+              throw new Error('HLS byte-range request was not honoured by the server')
+            }
+
+            const contentRange = res.headers.get('content-range') ?? ''
+            const match = /^bytes\s+(\d+)-(\d+)\/(\d+|\*)$/i.exec(contentRange)
+            const rangeStart = match ? Number(match[1]) : NaN
+            const rangeEnd = match ? Number(match[2]) : NaN
+            const total = match && match[3] !== '*' ? Number(match[3]) : null
+            const expectedEnd = byteRange.offset + byteRange.length - 1
+            if (
+              !match ||
+              !Number.isSafeInteger(rangeStart) ||
+              !Number.isSafeInteger(rangeEnd) ||
+              (total !== null && (!Number.isSafeInteger(total) || total < rangeEnd + 1)) ||
+              rangeStart !== byteRange.offset ||
+              rangeEnd !== expectedEnd
+            ) {
+              throw new Error('HLS byte-range response did not match the requested range')
+            }
           }
 
-          const contentRange = res.headers.get('content-range') ?? ''
-          const match = /^bytes\s+(\d+)-(\d+)\/(\d+|\*)$/i.exec(contentRange)
-          const rangeStart = match ? Number(match[1]) : NaN
-          const rangeEnd = match ? Number(match[2]) : NaN
-          const total = match && match[3] !== '*' ? Number(match[3]) : null
-          const expectedEnd = byteRange.offset + byteRange.length - 1
-          if (
-            !match ||
-            !Number.isSafeInteger(rangeStart) ||
-            !Number.isSafeInteger(rangeEnd) ||
-            (total !== null && (!Number.isSafeInteger(total) || total < rangeEnd + 1)) ||
-            rangeStart !== byteRange.offset ||
-            rangeEnd !== expectedEnd
-          ) {
-            throw new Error('HLS byte-range response did not match the requested range')
+          if (!res.body) throw new Error('HLS response had no body')
+          // Applying the budget per chunk propagates backpressure to the body
+          // stream instead of downloading a whole piece in an unbounded burst.
+          const received = await streamResponseBody(
+            res.body,
+            (chunk) => sink.write(chunk),
+            (bytes) => this.deps.limiter.consume(bytes, this.controller.signal),
+            this.controller.signal,
+            (bytes) => { if (state) state.bytes = bytes }
+          )
+
+          if (byteRange && received !== byteRange.length) {
+            throw new Error(`HLS byte-range returned ${received} bytes, expected ${byteRange.length}`)
           }
+          return received
+        } finally {
+          await res.body?.cancel().catch(() => {})
         }
-
-        if (!res.body) throw new Error('HLS response had no body')
-        // Applying the budget per chunk propagates backpressure to the body
-        // stream instead of downloading a whole piece in an unbounded burst.
-        const received = await streamResponseBody(
-          res.body,
-          (chunk) => sink.write(chunk),
-          (bytes) => this.deps.limiter.consume(bytes, this.controller.signal),
-          this.controller.signal,
-          (bytes) => { if (state) state.bytes = bytes }
-        )
-
-        if (byteRange && received !== byteRange.length) {
-          throw new Error(`HLS byte-range returned ${received} bytes, expected ${byteRange.length}`)
-        }
-        return received
       } catch (err) {
         if (this.controller.signal.aborted) throw new AbortedError()
         // Retrying cannot conjure budget that is already spent, and burning the
         // attempts here would turn the hold into "failed after 5 attempts".
-        if (err instanceof QuotaExceededError) throw err
+        if (err instanceof QuotaExceededError || err instanceof EncryptedSegmentTooLargeError) throw err
         lastError = err instanceof Error ? err : new Error(String(err))
       }
     }
@@ -722,15 +820,19 @@ export class HlsRunner implements Runner {
           await delay(backoff, this.controller.signal)
         }
         try {
-          const res = await fetch(key.url, {
-            headers: buildHeaders(this.task.headers),
-            redirect: 'follow',
+          const res = await fetchGuarded(key.url, {
+            headers: headersForResource(key.url, this.task.url, buildHeaders(this.task.headers)),
             signal: this.controller.signal,
-            dispatcher: getDispatcher(this.config.timeoutMs)
-          } as RequestInit)
+            timeoutMs: this.config.timeoutMs
+          })
 
-          if (!res.ok) throw new Error(`Could not fetch the decryption key (HTTP ${res.status})`)
-          const candidate = Buffer.from(await res.arrayBuffer())
+          let candidate: Buffer
+          try {
+            if (!res.ok) throw new Error(`Could not fetch the decryption key (HTTP ${res.status})`)
+            candidate = await readResponseBytes(res, 16)
+          } finally {
+            await res.body?.cancel().catch(() => {})
+          }
           if (candidate.length !== 16) throw new Error('Decryption key was not 16 bytes')
           material = candidate
           this.keys.set(key.url, material)
@@ -754,37 +856,52 @@ export class HlsRunner implements Runner {
   /* Assembly                                                          */
   /* ---------------------------------------------------------------- */
 
+  /**
+   * Prepares each track for the mux and hands the result to ffmpeg.
+   *
+   * The pieces are read where they lie. This used to concatenate every track
+   * into one joined file first - `readFile` per piece, straight back out to a
+   * `.dracodl` - which meant a 10 GB stream did a complete extra read and write
+   * pass, after the download had already finished, with the row parked at 100%
+   * and nothing saying why. ffmpeg's concat demuxer takes a list of the pieces
+   * instead, so the bytes are read exactly once, by the process that was always
+   * going to read them.
+   *
+   * The old joined files are still cleaned up: a part-finished download from a
+   * build that made them must not leave gigabytes behind.
+   */
   private async assemble(): Promise<void> {
-    await rm(this.joinedVideoPath, { force: true })
+    await rm(this.joinedVideoPath, { force: true }).catch(() => {})
     const audioTracks = this.tracks.filter((track) => track.role === 'audio')
-    await Promise.all(audioTracks.map((_track, index) => rm(this.joinedAudioPath(index), { force: true })))
+    await Promise.all(
+      audioTracks.map((_track, index) => rm(this.joinedAudioPath(index), { force: true }).catch(() => {}))
+    )
 
-    let totalJoinedSize = 0
-
+    let totalBytes = 0
     let audioIndex = 0
-    for (const track of this.tracks) {
-      const outPath = track.role === 'video' ? this.joinedVideoPath : this.joinedAudioPath(audioIndex++)
-      const handle = await open(outPath, 'w')
-      try {
-        if (track.initSegment) await appendPiece(handle, this.initPath(track.id))
-        for (let index = 0; index < track.segments.length; index++) {
-          this.throwIfAborted()
-          await appendPiece(handle, this.piecePath(track.id, index))
-        }
-      } finally {
-        await handle.close()
-      }
 
-      const joined = await stat(outPath)
-      totalJoinedSize += joined.size
+    for (const track of this.tracks) {
+      this.throwIfAborted()
+      const index = track.role === 'audio' ? audioIndex++ : 0
+      // The concat demuxer opens every listed file independently. An init.mp4
+      // and its .m4s fragments cannot be demuxed that way: they need the shared
+      // header followed by the fragment bytes in one input.
+      totalBytes += track.initSegment
+        ? await this.joinFragmentedTrack(track, track.role === 'video' ? this.joinedVideoPath : this.joinedAudioPath(index))
+        : await this.writeConcatList(track, track.role === 'video' ? this.videoListPath : this.audioListPath(index))
     }
 
-    this.received = totalJoinedSize
-    this.task.received = totalJoinedSize
+    this.received = totalBytes
+    this.task.received = totalBytes
+
+    await this.checkSpaceForMux(totalBytes)
 
     const target = await this.finalize()
+    const outputBytes = (await stat(target)).size
 
     await rm(this.partsDir, { recursive: true, force: true }).catch(() => {})
+    await rm(this.joinedVideoPath, { force: true }).catch(() => {})
+    await Promise.all(audioTracks.map((_track, index) => rm(this.joinedAudioPath(index), { force: true }).catch(() => {})))
 
     this.task.filename = basename(target)
     this.task.status = 'done'
@@ -793,8 +910,42 @@ export class HlsRunner implements Runner {
     this.task.eta = null
     this.task.segments = []
     this.task.detail = null
-    // The estimate is gone; this is the real number.
-    this.task.size = this.task.received
+    // The downloaded piece total can differ from the muxed container size.
+    this.task.size = outputBytes
+    this.task.received = outputBytes
+  }
+
+  /**
+   * The one point in a playlist download where the disk-space setting can mean
+   * anything.
+   *
+   * A stream has no Content-Length to check against up front - its size is only
+   * known once the last piece has landed. What *is* knowable, and is where these
+   * downloads actually run out, is the mux: ffmpeg writes a second copy of
+   * everything the pieces hold before the originals can be released.
+   *
+   * Checked here rather than inside `finalize` so the failure is a plain error
+   * with every piece still on disk. Start then re-runs the merge alone once
+   * space has been freed, instead of re-fetching the whole stream - and, unlike
+   * a throw from inside `finalize`, it cannot be mistaken for a mux failure and
+   * salvaged into a raw transport stream that needs the same space anyway.
+   */
+  private async checkSpaceForMux(totalBytes: number): Promise<void> {
+    if (this.config.checkDiskSpace !== true || totalBytes <= 0) return
+
+    const needed = totalBytes + 10 * 1024 * 1024
+    try {
+      const stats = await statfs(this.task.dir)
+      const free = stats.bavail * stats.bsize
+      if (free < needed) {
+        throw new Error(
+          `Not enough disk space to merge the stream. Requires ${Math.ceil(needed / (1024 * 1024))} MB.`
+        )
+      }
+    } catch (err) {
+      if (err instanceof Error && err.message.includes('Not enough disk space')) throw err
+      // statfs is unsupported on some network drives; let the mux report it.
+    }
   }
 
   /**
@@ -803,8 +954,6 @@ export class HlsRunner implements Runner {
    * name that says so. Throwing here would discard a download that finished.
    */
   private async finalize(): Promise<string> {
-    const wouldBeTarget = join(this.task.dir, this.task.filename)
-    await discardReservedPath(wouldBeTarget)
     const target = await uniquePath(this.task.dir, this.task.filename)
     const muxTemp = muxTempPath(target)
 
@@ -832,11 +981,14 @@ export class HlsRunner implements Runner {
       this.deps.onUpdate(this.task)
 
       const audioTracks = this.tracks.filter((track) => track.role === 'audio')
+      const video = this.tracks.find((track) => track.role === 'video')!
       await mux({
         ffmpegPath,
-        inputPath: this.joinedVideoPath,
+        inputPath: video.initSegment ? this.joinedVideoPath : this.videoListPath,
+        inputIsConcatList: !video.initSegment,
         audioInputs: audioTracks.map((track, index) => ({
-          path: this.joinedAudioPath(index),
+          path: track.initSegment ? this.joinedAudioPath(index) : this.audioListPath(index),
+          concatList: !track.initSegment,
           language: track.language,
           title: track.label,
           isDefault: track.isDefault
@@ -846,9 +998,13 @@ export class HlsRunner implements Runner {
       })
 
       this.throwIfAborted()
+      if (this.task.expectedChecksum) {
+        this.task.detail = 'Verifying checksum...'
+        this.deps.onUpdate(this.task)
+        await verifyExpectedChecksum(muxTemp, this.task.expectedChecksum, this.controller.signal)
+      }
+      this.throwIfAborted()
       await moveFile(muxTemp, target)
-      await rm(this.joinedVideoPath, { force: true }).catch(() => {})
-      await Promise.all(audioTracks.map((_track, index) => rm(this.joinedAudioPath(index), { force: true }).catch(() => {})))
       this.task.detail = null
       return target
     } catch (err) {
@@ -860,12 +1016,17 @@ export class HlsRunner implements Runner {
 
       const reason = err instanceof Error ? err.message : String(err)
 
+      // A checksum is for the requested output. Keep the downloaded pieces
+      // recoverable if muxing or verification fails; a raw fallback has
+      // different bytes and cannot satisfy that integrity promise.
+      if (this.task.expectedChecksum) throw new Error(`Could not verify the final stream: ${reason}`)
+
       /*
        * With a separate audio track there is no raw stream to fall back to: the
        * video half alone is a silent file, and deleting the audio to produce it
-       * throws away a track that downloaded perfectly. Keep both joined halves
-       * *and* the pieces - `assemble` only clears those on success - and report
-       * the failure, so Start re-runs the merge rather than the download.
+       * throws away a track that downloaded perfectly. The pieces are all still
+       * there - `assemble` only clears them on success - so report the failure
+       * and let Start re-run the merge rather than the download.
        */
       if (this.tracks.some((track) => track.role === 'audio')) {
         this.task.detail = null
@@ -873,16 +1034,39 @@ export class HlsRunner implements Runner {
       }
 
       log.warn(`mux unavailable or failed, keeping the raw stream: ${reason}`)
-      this.task.detail = null
 
+      /*
+       * The one case that still needs a real join. Without ffmpeg there is
+       * nothing that can read the pieces in place, so they are concatenated
+       * here - which is what every finish used to do, and is now the exception
+       * rather than the rule.
+       */
+      this.task.detail = 'Joining pieces…'
+      this.deps.onUpdate(this.task)
+
+      const video = this.tracks.find((track) => track.role === 'video')
       const fallback = await uniquePath(
         this.task.dir,
-        this.task.filename.replace(/\.([a-z0-9]+)$/i, '.ts')
+        this.task.filename.replace(/\.([a-z0-9]+)$/i, video?.initSegment ? '.mp4' : '.ts')
       )
-      await moveFile(this.joinedVideoPath, fallback)
-      const audioTracks = this.tracks.filter((track) => track.role === 'audio')
-      await Promise.all(audioTracks.map((_track, index) => rm(this.joinedAudioPath(index), { force: true }).catch(() => {})))
+      try {
+        const handle = await open(this.joinedVideoPath, 'w')
+        try {
+          if (video?.initSegment) await appendPiece(handle, this.initPath(video.id), this.controller.signal)
+          for (let index = 0; index < (video?.segments.length ?? 0); index++) {
+            await appendPiece(handle, this.piecePath(video!.id, index), this.controller.signal)
+          }
+        } finally {
+          await handle.close()
+        }
+        this.throwIfAborted()
+        await moveFile(this.joinedVideoPath, fallback)
+      } catch (error) {
+        await discardReservedPath(fallback)
+        throw error
+      }
 
+      this.task.detail = null
       this.task.description = this.task.description
         ? this.task.description
         : 'Kept as a transport stream: ' + reason
@@ -1023,15 +1207,10 @@ async function writeAtomic(path: string, body: Buffer): Promise<void> {
   const handle = await open(tmp, 'w')
   try {
     await writeAtFully(handle, body, 0)
-  } finally {
-    await handle.close().catch(() => {})
-  }
-
-  try {
+    await handle.close()
     await rename(tmp, path)
   } catch (err) {
-    // On success the rename already consumed the temp file - only clean it up
-    // when the rename itself failed and left it behind.
+    await handle.close().catch(() => {})
     await rm(tmp, { force: true }).catch(() => {})
     throw err
   }
@@ -1051,23 +1230,30 @@ async function writeAtFully(handle: FileHandle, body: Buffer, position: number):
   }
 }
 
-/**
- * Whole-piece reads rather than a stream: HLS segments are a few seconds of
- * video each, and the handle keeps its own write position, so this is an
- * ordinary sequential append with no offset arithmetic to get wrong.
- */
-async function appendPiece(handle: FileHandle, path: string): Promise<void> {
-  const body = await readFile(path)
-  let offset = 0
-  while (offset < body.length) {
-    const result = await handle.write(body, offset, body.length - offset, null)
-    const written = result.bytesWritten
-    if (!Number.isSafeInteger(written) || written <= 0) throw new Error('File write made no progress')
-    offset += written
+/** Joining also handles large single-file byte-range streams without buffering a piece. */
+async function appendPiece(handle: FileHandle, path: string, signal: AbortSignal): Promise<void> {
+  const source = await open(path, 'r')
+  const buffer = Buffer.alloc(64 * 1024)
+  try {
+    for (;;) {
+      if (signal.aborted) throw new AbortedError()
+      const { bytesRead } = await source.read(buffer, 0, buffer.length, null)
+      if (bytesRead === 0) return
+      let offset = 0
+      while (offset < bytesRead) {
+        if (signal.aborted) throw new AbortedError()
+        const result = await handle.write(buffer, offset, bytesRead - offset, null)
+        if (!Number.isSafeInteger(result.bytesWritten) || result.bytesWritten <= 0) throw new Error('File write made no progress')
+        offset += result.bytesWritten
+      }
+    }
+  } finally {
+    await source.close()
   }
 }
 
 function delay(ms: number, signal: AbortSignal): Promise<void> {
+  if (signal.aborted) return Promise.reject(new AbortedError())
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => {
       signal.removeEventListener('abort', onAbort)
@@ -1081,4 +1267,3 @@ function delay(ms: number, signal: AbortSignal): Promise<void> {
     signal.addEventListener('abort', onAbort, { once: true })
   })
 }
-

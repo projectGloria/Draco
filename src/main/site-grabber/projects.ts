@@ -83,6 +83,7 @@ export class SiteProjectManager {
         // them again as ordinary tasks would waste bandwidth and leave an online-
         // only copy whose links still point back at the site.
         for (const resource of resources.filter((candidate) => candidate.kind === 'page')) {
+          if (controller.signal.aborted) throw new Error('The site crawl was cancelled')
           const target = join(project.rootDir, resource.relativePath)
           await mkdir(dirname(target), { recursive: true })
           if (resource.tmpFile) {
@@ -97,6 +98,7 @@ export class SiteProjectManager {
       }
 
       for (const resource of fresh.filter((candidate) => candidate.kind === 'asset')) {
+        if (controller.signal.aborted) throw new Error('The site crawl was cancelled')
         const task = createTask({
           url: resource.url,
           dir: join(project.rootDir, dirname(resource.relativePath)),

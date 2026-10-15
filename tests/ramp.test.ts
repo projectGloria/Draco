@@ -37,12 +37,18 @@ describe('ConnectionRamp', () => {
     strictEqual(ramp.sample(t0 + 160, 120_000), true)
     strictEqual(ramp.cap, 4)
 
+    // A climb re-enters settling, so the connections it just opened are not
+    // measured through their own slow start. The cap holds while that runs.
+    strictEqual(ramp.sample(t0 + 270, 400_000), false)
+    strictEqual(ramp.cap, 4)
+
     // Second rung after another 100ms with speed gain: 2 -> 4 paid off
-    strictEqual(ramp.sample(t0 + 270, 400_000), true)
+    strictEqual(ramp.sample(t0 + 380, 800_000), true)
     strictEqual(ramp.cap, 8)
 
-    // Third rung at target marks settled
-    strictEqual(ramp.sample(t0 + 380, 800_000), false)
+    // Settling again, then the reading at target marks it settled
+    strictEqual(ramp.sample(t0 + 490, 1_200_000), false)
+    strictEqual(ramp.sample(t0 + 600, 1_800_000), false)
     strictEqual(ramp.settled, true)
   })
 
@@ -56,8 +62,12 @@ describe('ConnectionRamp', () => {
     strictEqual(ramp.sample(t0 + 160, 120_000), true)
     strictEqual(ramp.cap, 4)
 
-    // Next reading speed is only 1,050,000 B/s (< 1.2x gain)
-    strictEqual(ramp.sample(t0 + 270, 235_000), true)
+    // The new rung settles before it is judged
+    strictEqual(ramp.sample(t0 + 270, 235_000), false)
+    strictEqual(ramp.cap, 4)
+
+    // Next reading speed is only ~1,045,000 B/s (< 1.2x gain)
+    strictEqual(ramp.sample(t0 + 380, 350_000), true)
     // Drops back down to 2 and finishes
     strictEqual(ramp.cap, 2)
     strictEqual(ramp.settled, true)

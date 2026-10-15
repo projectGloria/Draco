@@ -14,13 +14,14 @@
  *
  * Anchored at the banner on purpose. The rest of that output lists the compiler
  * and every library ffmpeg was linked against, so a loose search for a dotted
- * number happily returns gcc's. A git snapshot (`N-113452-g1a2b3c`) has no
- * comparable version at all, and null says so rather than inventing one.
+ * number happily returns gcc's. Preserve git snapshot identifiers for display;
+ * compareToolVersions deliberately leaves these non-release builds unordered.
  */
 export function parseFfmpegVersion(output: string): string | null {
   const text = output.trim()
   const banner = /^ffmpeg\s+version\s+(\S+)/i.exec(text)
   const candidate = banner ? banner[1] : text.split(/\s/, 1)[0]
+  if (/^(?:N-\d+-g[0-9a-f]+|\d{4}-\d{2}-\d{2}-git-[0-9a-f]+)(?:-[\w.-]+)?$/i.test(candidate)) return candidate
   const version = /^(\d+\.\d+(?:\.\d+)?)/.exec(candidate)
   return version ? version[1] : null
 }

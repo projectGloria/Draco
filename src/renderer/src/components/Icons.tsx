@@ -13,6 +13,18 @@ interface GlyphProps {
   className?: string
 }
 
+export function CookieIcon(props: GlyphProps): React.ReactElement {
+  return <Svg {...props}><path d="M21 12a9 9 0 1 1-9-9 4 4 0 0 0 4 4 4 4 0 0 0 5 5Z" /><path d="M8 8h.01M7 14h.01M12 12h.01M14 17h.01" strokeWidth={3} /></Svg>
+}
+
+export function PaletteIcon(props: GlyphProps): React.ReactElement {
+  return <Svg {...props}><path d="M12 3a9 9 0 1 0 0 18h1a2 2 0 0 0 1-3.7 1.5 1.5 0 0 1 .8-2.8H17a4 4 0 0 0 4-4C21 6.4 17 3 12 3Z" /><path d="M7 10h.01M10 7h.01M15 7h.01M18 10h.01" strokeWidth={3} /></Svg>
+}
+
+export function ToolsIcon(props: GlyphProps): React.ReactElement {
+  return <Svg {...props}><path d="m14 6 4 4 3-3a6 6 0 0 1-8 7L6 21l-3-3 7-7a6 6 0 0 1 7-8Z" /></Svg>
+}
+
 function Svg({
   children,
   className,

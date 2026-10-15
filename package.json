@@ -1,20 +1,29 @@
 {
   "name": "draco",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "A personal download manager: dynamic segmented downloads, browser takeover, queues and a scheduler",
   "main": "./out/main/index.js",
   "author": "Nihil",
   "license": "MIT",
+  "engines": {
+    "node": ">=22.18.0"
+  },
   "scripts": {
     "dev": "electron-vite dev",
     "start": "npm run host && npm run build && electron-vite preview",
     "build": "npm run typecheck && npm run extension:firefox && electron-vite build",
     "typecheck": "tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.web.json",
     "test": "node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON --test \"tests/**/*.test.ts\"",
+    "bench:list": "node tools/bench/list-profile.mjs",
+    "bench:http": "node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON tools/bench/http-transfer.mjs",
     "extension:firefox": "node tools/build-firefox-extension.mjs",
-    "pack": "npm run host && npm run build && electron-builder --dir",
-    "dist": "npm run host && npm run build && electron-builder --win",
-    "host": "powershell -ExecutionPolicy Bypass -File host/build.ps1",
+    "runtime": "node tools/prepare-runtime.mjs",
+    "verify:package": "node tools/verify-package.mjs",
+    "smoke:profile": "node tools/smoke-packaged-profile.mjs",
+    "smoke:bridge": "node tools/smoke-packaged-bridge.mjs",
+    "pack": "npm run runtime && npm run host && npm run build && electron-builder --dir",
+    "dist": "npm run runtime && npm run host && npm run build && electron-builder --win",
+    "host": "node tools/build-host.mjs",
     "keygen": "node tools/gen-extension-key.mjs",
     "icon": "python tools/gen-icon.py",
     "dl": "node tools/dl.ts",
@@ -24,7 +33,7 @@
     "parse-torrent": "^11.0.24",
     "react": "^19.2.8",
     "react-dom": "^19.2.8",
-    "undici": "^7.16.0",
+    "undici": "^7.30.0",
     "webtorrent": "^3.0.21",
     "zustand": "^5.0.15"
   },
@@ -36,8 +45,8 @@
     "@types/react-dom": "^19.2.4",
     "@types/webtorrent": "^3.0.0",
     "@vitejs/plugin-react": "^5.2.0",
-    "electron": "^43.4.1",
-    "electron-builder": "^26.15.3",
+    "electron": "^43.7.9",
+    "electron-builder": "^26.17.0",
     "electron-vite": "^5.0.0",
     "postcss": "^8.5.26",
     "tailwindcss": "^4.3.3",
@@ -45,6 +54,6 @@
     "vite": "^7.3.6"
   },
   "allowScripts": {
-    "electron@43.4.1": true
+    "electron@43.7.9": true
   }
 }

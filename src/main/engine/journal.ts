@@ -51,7 +51,13 @@ export async function writeJournal(path: string, data: JournalData): Promise<voi
 export async function readJournal(path: string): Promise<JournalData | null> {
   try {
     const parsed = JSON.parse(await readFile(path, 'utf8')) as JournalData
-    if (parsed?.version !== JOURNAL_VERSION || !Array.isArray(parsed.segments)) return null
+    if (parsed?.version !== JOURNAL_VERSION ||
+      typeof parsed.url !== 'string' || typeof parsed.finalUrl !== 'string' || typeof parsed.filename !== 'string' ||
+      (parsed.size !== null && (!Number.isSafeInteger(parsed.size) || parsed.size < 0)) ||
+      (parsed.etag !== null && typeof parsed.etag !== 'string') ||
+      (parsed.lastModified !== null && typeof parsed.lastModified !== 'string') ||
+      !Number.isFinite(parsed.updatedAt) || parsed.updatedAt < 0 ||
+      !journalSegmentsValid(parsed.segments, parsed.size)) return null
     return parsed
   } catch {
     return null
@@ -71,6 +77,12 @@ export async function removeJournal(path: string): Promise<void> {
   }
 }
 
+/** Only a strong quoted ETag identifies byte-for-byte resource content. */
+export function isStrongEtag(value: string | null | undefined): value is string {
+  return typeof value === 'string' && value.length >= 2 &&
+    value.startsWith('"') && value.endsWith('"')
+}
+
 /**
  * Decides whether a journal may still be trusted against a fresh probe.
  *
@@ -82,32 +94,24 @@ export async function removeJournal(path: string): Promise<void> {
  */
 export function journalMatches(
   journal: JournalData,
-  probe: ProbeResult,
-  options: { allowFinalUrlChange?: boolean } = {}
+  probe: ProbeResult
 ): boolean {
   if (journal.size !== probe.size) return false
+
+  // An ETag is scoped to its resource. The same tag at a different redirect
+  // target does not establish that the bytes are identical.
+  if (journal.finalUrl !== probe.finalUrl) return false
 
   // A strong validator settles it outright. Weak ETags (W/"...") only promise
   // semantic equivalence, not byte equality, so they are not good enough here.
   if (journal.etag && probe.etag) {
-    const weak = journal.etag.startsWith('W/') || probe.etag.startsWith('W/')
-    return !weak && journal.etag === probe.etag
+    return isStrongEtag(journal.etag) && isStrongEtag(probe.etag) && journal.etag === probe.etag
   }
 
-  // Without a strong ETag match, a changed redirect target is not safe to resume
-  // from: the same-size URL can now point at completely different bytes.
-  // YouTube is the explicit exception because its stable page/format identity is
-  // stored separately and its signed CDN URL is expected to change.
-  if (!options.allowFinalUrlChange && journal.finalUrl !== probe.finalUrl) return false
-
-  if (journal.lastModified && probe.lastModified) {
-    return journal.lastModified === probe.lastModified
-  }
-
-  // No validator on either side. Size alone is a weak signal, but refusing to
-  // resume every such server would make resume useless on a large slice of the
-  // web - and the size check above has already ruled out the common case.
-  return journal.size !== null
+  // Last-Modified is only second-granular and servers may preserve it across
+  // replacements. Size and timestamp together do not prove byte identity.
+  // Until an explicit overlap-verified best-effort mode exists, restart safely.
+  return false
 }
 
 export function segmentsForJournal(segments: Segment[]): Segment[] {
@@ -117,6 +121,7 @@ export function segmentsForJournal(segments: Segment[]): Segment[] {
 /** Validates a persisted segment snapshot before Segmenter.restore consumes it. */
 export function journalSegmentsValid(segments: Segment[], size: number | null): boolean {
   if (!Array.isArray(segments) || segments.length === 0) return false
+  if (size !== null && (!Number.isSafeInteger(size) || size < 0)) return false
 
   // Segments must tile the file from byte zero with no hole between them.
   // `complete` only asks whether every segment reached its own end, so a gap
@@ -125,8 +130,10 @@ export function journalSegmentsValid(segments: Segment[], size: number | null): 
   let lastEnd = -1
   let total = 0
   for (const seg of segments) {
+    if (!seg || typeof seg !== 'object') return false
     if (!Number.isSafeInteger(seg.start) || !Number.isSafeInteger(seg.position)) return false
-    if (!Number.isSafeInteger(seg.end) || seg.start < 0 || seg.position < seg.start) return false
+    if (!Number.isSafeInteger(seg.end) || seg.end < -1 || seg.start < 0 || seg.position < seg.start) return false
+    if (seg.end === -1 && (segments.length !== 1 || (size !== null && size !== 0))) return false
     if (seg.end >= 0 && seg.end < seg.start) return false
     if (seg.end >= 0 && seg.position > seg.end + 1) return false
     if (seg.start <= lastEnd) return false

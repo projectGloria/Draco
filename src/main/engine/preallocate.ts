@@ -65,9 +65,26 @@ export interface PreallocateDeps {
  */
 const permitted = new Map<string, boolean>()
 
+/**
+ * Whether a volume accepted the sparse flag last time it was asked.
+ *
+ * This was the gap that made an unelevated run pay a process spawn on every
+ * single download, forever: the `setvaliddata` failure was cached, so the
+ * expensive path was skipped - and then `fsutil sparse setflag` ran
+ * unconditionally underneath it. On Windows that is 50-200 ms of
+ * `CreateProcess` per download, and a batch of twenty starting together is
+ * twenty of them competing with the transfers for the same event loop.
+ *
+ * A volume that has never refused the flag is trusted to keep accepting it. The
+ * cost of being wrong is one download that extends on demand instead, which is
+ * exactly what the `none` mode already means.
+ */
+const sparseSupported = new Map<string, boolean>()
+
 /** Only for tests, and for a settings change that could plausibly alter it. */
 export function forgetPreallocationSupport(): void {
   permitted.clear()
+  sparseSupported.clear()
 }
 
 export function volumeRootOf(path: string): string {
@@ -116,11 +133,60 @@ export async function preallocate(
     }
   }
 
+  // A volume that has already refused the sparse flag will refuse it again, and
+  // asking costs a process launch. Extend the file and let the first write to
+  // each region allocate, which is what `none` has always meant.
+  if (sparseSupported.get(root) === false) {
+    await deps.truncate(path, size).catch(() => {})
+    return 'none'
+  }
+
   try {
     await deps.run('fsutil', ['sparse', 'setflag', path])
+    sparseSupported.set(root, true)
     await deps.truncate(path, size)
     return 'sparse'
   } catch {
+    sparseSupported.set(root, false)
     return 'none'
   }
+}
+
+/**
+ * Takes the sparse flag off a finished file.
+ *
+ * The flag is a property of the file, not of the download, so it outlived the
+ * part file and followed the payload to its final name. Everything that reads
+ * the file afterwards - the player, a copy, the virus scanner - then walks an
+ * extent map that a multi-gigabyte download on sixteen connections can leave
+ * thousands of entries long, for a file that is now completely written and has
+ * no holes in it at all.
+ *
+ * Best-effort by design: a failure here costs read performance on one file and
+ * must never turn a finished download into an error.
+ *
+ * The condition is "not known to be unnecessary" rather than "known to be
+ * needed", and the difference is the whole point. `sparseSupported` is only
+ * ever populated by `preallocate`, which a resumed download does not run - so
+ * requiring a positive entry meant every download that was paused, survived a
+ * restart and then finished kept its sparse flag and carried the fragmented
+ * extent map to its final name, which is exactly what this exists to prevent.
+ *
+ * Being wrong the other way costs one `CreateProcess` on a file that did not
+ * need it. That is paid once, after the last byte is written, rather than at
+ * the start of every download the way `preallocate`'s probe would be - so the
+ * asymmetry that justifies caching there does not apply here.
+ */
+export async function clearSparseFlag(
+  path: string,
+  deps: PreallocateDeps = systemPreallocateDeps
+): Promise<void> {
+  if (process.platform !== 'win32') return
+  const root = volumeRootOf(path)
+  // This volume refuses the flag outright, so nothing on it is ever sparse.
+  if (sparseSupported.get(root) === false) return
+  // `setvaliddata` worked here in this process, so `preallocate` never reached
+  // the sparse branch for any file this run put on this volume.
+  if (permitted.get(root) === true) return
+  await deps.run('fsutil', ['sparse', 'setflag', path, '0']).catch(() => {})
 }

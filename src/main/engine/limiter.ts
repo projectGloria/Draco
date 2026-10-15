@@ -73,6 +73,24 @@ export class RateLimiter {
     return this.bytesPerSecond === Infinity ? null : this.bytesPerSecond
   }
 
+  /** Includes parent budgets, which queue and cat-mode child limiters spend. */
+  get hasSpeedLimit(): boolean {
+    return this.bytesPerSecond !== Infinity || (this.parent?.hasSpeedLimit ?? false)
+  }
+
+  /** The tightest rate visible to a child, for engines with their own throttle. */
+  get effectiveSpeedLimit(): number | null {
+    const parent = this.parent?.effectiveSpeedLimit ?? null
+    const own = this.limit
+    if (parent === null) return own
+    if (own === null) return parent
+    return Math.min(parent, own)
+  }
+
+  get hasTransferQuota(): boolean {
+    return this.quotaBytes !== Infinity || (this.parent?.hasTransferQuota ?? false)
+  }
+
   setQuota(bytes: number | null, windowMs: number): void {
     const nextBytes = bytes && bytes > 0 ? bytes : Infinity
     const nextWindow = Math.max(1, windowMs)
@@ -130,6 +148,11 @@ export class RateLimiter {
     // never allowed to move.
     if (this.parent) await this.parent.consume(bytes, signal)
 
+    // These bytes have already reached the worker. Count them before waiting:
+    // pausing during a speed-limit wait must not give their quota back.
+    this.chargeQuota(bytes)
+    if (signal?.aborted) throw new Error('aborted')
+
     if (this.bytesPerSecond !== Infinity) {
       this.refill()
       this.tokens -= bytes
@@ -140,8 +163,6 @@ export class RateLimiter {
         this.refill()
       }
     }
-
-    this.chargeQuota(bytes)
   }
 
   /** Spends `bytes` of this limiter's budget, throwing once it is gone. */

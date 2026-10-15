@@ -1,7 +1,13 @@
 import { useEffect, useState } from 'react'
 import type { DownloadTask, Settings } from '@shared/types'
+import { displaySource } from '@shared/display-source'
+import { youtubeThumbnailUrl } from '@shared/youtube-link'
+import { recoveryHint } from '@shared/recovery'
 import { formatBytes, formatEta, formatPercent, formatSpeed, hostOf, percent } from '../lib/format'
-import { applyAccent } from '../store/app'
+import { useThumbnail } from '../lib/icons'
+import { useT } from '../i18n'
+import { useApp } from '../store/app'
+import { useAppearance } from '../lib/use-appearance'
 import { SiteIcon } from './FileIcon'
 import { CloseGlyph, FolderIcon, MinimizeGlyph, PauseIcon, PlayIcon, TorrentIcon } from './Icons'
 import { GhostButton, PrimaryButton } from './Dialog'
@@ -21,24 +27,36 @@ import ProgressBar from './ProgressBar'
 export default function ProgressWindow({ id }: { id: string }): React.ReactElement {
   const [task, setTask] = useState<DownloadTask | null>(null)
   const [gone, setGone] = useState(false)
+  const settings = useApp((state) => state.settings)
+  useAppearance(settings)
 
   useEffect(() => {
+    let active = true
+    let taskEventReceived = false
+    let latestProgress: Partial<DownloadTask> = {}
+    setTask(null)
+    setGone(false)
     void window.api
       .getSettings()
-      .then((settings: Settings) => applyAccent(settings.accent))
+      .then((settings: Settings) => {
+        if (!active) return
+        useApp.setState({ settings })
+      })
       .catch(() => {})
 
     void window.api
       .getTask(id)
       .then((found) => {
-        if (found) setTask(found)
+        if (!active || taskEventReceived) return
+        if (found) setTask({ ...found, ...latestProgress })
         else setGone(true)
       })
-      .catch(() => setGone(true))
+      .catch(() => { if (active && !taskEventReceived) setGone(true) })
 
     const offProgress = window.api.onProgress((updates) => {
       const update = updates.find((entry) => entry.id === id)
       if (!update) return
+      latestProgress = update
       setTask((current) => (current ? { ...current, ...update } : current))
     })
 
@@ -46,12 +64,17 @@ export default function ProgressWindow({ id }: { id: string }): React.ReactEleme
     // by the probe, the folder the task was re-filed into - and is also how this
     // window learns the download was deleted somewhere else.
     const offTasks = window.api.onTasksChanged((tasks) => {
+      taskEventReceived = true
       const found = tasks.find((entry) => entry.id === id)
-      if (found) setTask(found)
+      if (found) {
+        setTask(found)
+        setGone(false)
+      }
       else setGone(true)
     })
 
     return () => {
+      active = false
       offProgress()
       offTasks()
     }
@@ -82,6 +105,10 @@ export default function ProgressWindow({ id }: { id: string }): React.ReactEleme
       : null
     const value = task.status === 'done'
       ? 'Complete'
+      : task.status === 'processing'
+        ? 'Processing'
+        : task.status === 'scanning'
+          ? 'Scanning'
       : task.status === 'paused'
         ? progress ? `Paused · ${progress}` : 'Paused'
         : task.status === 'error' || task.status === 'missing'
@@ -104,7 +131,7 @@ export default function ProgressWindow({ id }: { id: string }): React.ReactEleme
           <SiteIcon url={task?.sourceUrl ?? task?.youtube?.pageUrl ?? task?.url} className="w-4 h-4" />
         )}
         <span className="font-display text-[12.5px] font-bold tracking-[0.3px]">
-          {done ? 'Download complete' : 'Downloading'}
+          {done ? 'Download complete' : task?.status === 'processing' ? 'Processing download' : task?.status === 'scanning' ? 'Scanning download' : 'Downloading'}
         </span>
         <div className="flex-1" />
         <div className="no-drag flex">
@@ -141,21 +168,57 @@ export default function ProgressWindow({ id }: { id: string }): React.ReactEleme
 }
 
 function Body({ task, onClose }: { task: DownloadTask; onClose(): void }): React.ReactElement {
-  const running = task.status === 'downloading' || task.status === 'probing' || task.status === 'queued'
+  const [pausing, setPausing] = useState(false)
+  const [commandError, setCommandError] = useState<string | null>(null)
+  const t = useT()
+  const running = task.status === 'downloading' || task.status === 'probing' || task.status === 'queued' || task.status === 'processing' || task.status === 'scanning'
   const done = task.status === 'done'
   const failed = task.status === 'error' || task.status === 'missing'
+  const hint = recoveryHint(task)
+  const sourceUrl = task.youtube?.pageUrl ?? task.sourceUrl ?? task.url
+  const thumbnailUrl = task.thumbnailUrl ?? youtubeThumbnailUrl(sourceUrl)
+  const thumbnail = useThumbnail(thumbnailUrl)
 
   const bar = task.size ? percent(task.received, task.size) : done ? 100 : null
+  const retry = (): void => {
+    if (pausing) return
+    setPausing(true)
+    setCommandError(null)
+    const action = task.status === 'missing'
+      ? window.api.redownload(task.id)
+      : window.api.startTasks([task.id])
+    void action.catch((error) => setCommandError(`${t('commandFailed')}: ${String(error)}`))
+      .finally(() => setPausing(false))
+  }
+
+  const pause = (closeAfter: boolean): void => {
+    if (pausing) return
+    setPausing(true)
+    setCommandError(null)
+    void window.api.pauseTasks([task.id])
+      .then(() => { if (closeAfter) onClose() })
+      .catch((error) => setCommandError(`${t('stopFailed')}: ${String(error)}`))
+      .finally(() => setPausing(false))
+  }
 
   return (
     <>
       <div className="flex-1 min-h-0 overflow-hidden px-5 py-3.5 space-y-3">
-        <div className="min-w-0">
-          <div className="text-[12.5px] font-semibold truncate" title={task.filename}>
-            {task.filename || 'Waiting for a name…'}
+        <div className="flex items-center gap-3 min-w-0">
+          <div className="w-[112px] h-[72px] shrink-0 overflow-hidden rounded-lg border border-line bg-white/[0.04] grid place-items-center">
+            {thumbnail ? (
+              <img src={thumbnail} alt="Download preview" className="w-full h-full object-cover" />
+            ) : (
+              <SiteIcon url={sourceUrl} className="w-7 h-7" />
+            )}
           </div>
-          <div className="text-[11px] text-faint truncate" title={task.url}>
-            {hostOf(task.url) || task.url}
+          <div className="min-w-0 flex-1">
+            <div className="text-[12.5px] font-semibold line-clamp-2 break-words" title={task.filename}>
+              {task.filename || 'Waiting for a name…'}
+            </div>
+            <div className="text-[11px] text-faint truncate mt-1" title={displaySource(sourceUrl)}>
+              {hostOf(sourceUrl) || displaySource(sourceUrl)}
+            </div>
           </div>
         </div>
 
@@ -177,12 +240,12 @@ function Body({ task, onClose }: { task: DownloadTask; onClose(): void }): React
           <Fact label="Time left" value={formatEta(task.eta) || '—'} />
         </div>
 
-        {failed && task.error ? (
+        {failed && hint ? (
           <div
-            className="max-h-11 overflow-hidden rounded-lg px-3 py-2 text-[11.5px] leading-relaxed border border-[rgba(248,113,113,0.25)] bg-[rgba(248,113,113,0.08)] text-err"
-            title={task.error}
+            role="alert"
+            className="max-h-16 overflow-hidden rounded-lg px-3 py-2 text-[11.5px] leading-relaxed border border-[rgba(248,113,113,0.25)] bg-[rgba(248,113,113,0.08)] text-err"
           >
-            {task.error}
+            {t(hint)}
           </div>
         ) : (
           <div className="text-[11.5px] text-faint truncate" title={task.dir}>
@@ -198,6 +261,7 @@ function Body({ task, onClose }: { task: DownloadTask; onClose(): void }): React
                     : 'This server does not support resuming.')}
           </div>
         )}
+        {commandError && <div role="alert" className="text-[11.5px] text-err">{commandError}</div>}
       </div>
 
       <div className="shrink-0 px-5 py-3 border-t border-line flex items-center justify-end gap-2 bg-white/[0.02]">
@@ -216,33 +280,25 @@ function Body({ task, onClose }: { task: DownloadTask; onClose(): void }): React
           </>
         ) : (
           <>
-            {/*
-              Cancel stops the transfer and closes the window; it does not throw
-              the download away. What has been fetched is still on disk and the
-              row is still in the list, which is the difference between changing
-              your mind and losing an hour of bytes.
-            */}
-            <GhostButton
-              onClick={() => {
-                void window.api.pauseTasks([task.id])
-                onClose()
-              }}
+            {running && <GhostButton
+              disabled={pausing}
+              onClick={() => pause(true)}
             >
-              Cancel
-            </GhostButton>
+              {task.status === 'processing' || task.status === 'scanning' ? 'Stop checks and close' : 'Pause and close'}
+            </GhostButton>}
             <GhostButton onClick={onClose}>Hide</GhostButton>
             {running ? (
-              <PrimaryButton onClick={() => void window.api.pauseTasks([task.id])}>
+              <PrimaryButton onClick={() => pause(false)} disabled={pausing}>
                 <span className="flex items-center gap-1.5">
                   <PauseIcon className="w-3.5 h-3.5" />
-                  Pause
+                  {task.status === 'processing' || task.status === 'scanning' ? 'Stop checks' : 'Pause'}
                 </span>
               </PrimaryButton>
             ) : (
-              <PrimaryButton onClick={() => void window.api.startTasks([task.id])}>
+              <PrimaryButton onClick={retry} disabled={pausing}>
                 <span className="flex items-center gap-1.5">
                   <PlayIcon className="w-3.5 h-3.5" />
-                  {failed ? 'Retry' : 'Resume'}
+                  {task.status === 'missing' ? t('redownload') : failed ? t('retry') : t('resume')}
                 </span>
               </PrimaryButton>
             )}

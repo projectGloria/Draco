@@ -1,7 +1,7 @@
-import { deepStrictEqual, strictEqual } from 'node:assert/strict'
+import { deepStrictEqual, strictEqual, throws } from 'node:assert/strict'
 import { describe, it } from 'node:test'
 import type { DownloadTask, TaskStatus } from '../src/shared/types.ts'
-import { buildDisplayRows } from '../src/shared/groups.ts'
+import { buildDisplayRows, summarizeGroup } from '../src/shared/groups.ts'
 
 let clock = 1_000
 
@@ -154,5 +154,9 @@ describe('the row standing in for a closed group', () => {
       summaryOf([album('a', { status: 'done', completedAt: 5 }), album('b', { status: 'done', completedAt: 9 })]).completedAt,
       9
     )
+  })
+
+  it('rejects an empty task list rather than throwing TypeError on index 0', () => {
+    throws(() => summarizeGroup('empty', []), /Cannot summarize an empty group/)
   })
 })

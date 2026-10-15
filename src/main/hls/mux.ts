@@ -1,7 +1,8 @@
-import { spawn, type ChildProcess } from 'node:child_process'
-import { rm, stat, statfs } from 'node:fs/promises'
+import { spawn } from 'node:child_process'
+import { readFile, rm, stat, statfs } from 'node:fs/promises'
 import { dirname } from 'node:path'
 import { logger } from '../log.ts'
+import { killTree } from '../proc.ts'
 
 const log = logger('mux')
 
@@ -15,23 +16,47 @@ const log = logger('mux')
 
 export class MuxError extends Error {}
 
+/**
+ * One input to the mux.
+ *
+ * `concatList` is the whole point of P8: an HLS track is a few hundred piece
+ * files, and joining them into one file first meant reading every byte back and
+ * writing it out again before ffmpeg had even started - a full extra pass over
+ * a download that was already finished, with the row sitting at 100% for the
+ * duration. ffmpeg's concat demuxer reads the pieces in place, so the join pass
+ * disappears entirely and the bytes are read exactly once.
+ */
+export interface MuxInput {
+  path: string
+  /** True when `path` is a concat list file rather than a media file. */
+  concatList?: boolean
+  language?: string | null
+  title?: string | null
+  isDefault?: boolean
+}
+
 export interface MuxOptions {
   ffmpegPath: string
   inputPath: string
+  /** Whether `inputPath` is a concat list rather than a single media file. */
+  inputIsConcatList?: boolean
   audioInputPath?: string
-  audioInputs?: Array<{
-    path: string
-    language?: string | null
-    title?: string | null
-    isDefault?: boolean
-  }>
+  audioInputs?: MuxInput[]
   outputPath: string
   signal: AbortSignal
 }
 
+/** The `-f concat` preamble one input needs, or nothing for a plain file. */
+function inputArgs(input: { path: string; concatList?: boolean }): string[] {
+  // `-safe 0` because the list holds absolute paths; the list is written by
+  // Draco into its own workspace and never contains anything a server chose.
+  return input.concatList ? ['-f', 'concat', '-safe', '0', '-i', input.path] : ['-i', input.path]
+}
+
 export async function mux(options: MuxOptions): Promise<void> {
   const { ffmpegPath, inputPath, audioInputPath, outputPath, signal } = options
-  const audioInputs = options.audioInputs ?? (audioInputPath ? [{ path: audioInputPath }] : [])
+  const audioInputs: MuxInput[] =
+    options.audioInputs ?? (audioInputPath ? [{ path: audioInputPath }] : [])
 
   const args = [
     '-y',
@@ -42,12 +67,11 @@ export async function mux(options: MuxOptions): Promise<void> {
     '-hide_banner',
     '-loglevel',
     'error',
-    '-i',
-    inputPath
+    ...inputArgs({ path: inputPath, concatList: options.inputIsConcatList })
   ]
 
   if (audioInputs.length > 0) {
-    for (const input of audioInputs) args.push('-i', input.path)
+    for (const input of audioInputs) args.push(...inputArgs(input))
     args.push('-map', '0:v')
     for (let index = 0; index < audioInputs.length; index++) {
       args.push('-map', `${index + 1}:a`)
@@ -71,7 +95,13 @@ export async function mux(options: MuxOptions): Promise<void> {
 
   args.push(outputPath)
 
-  await ensureSpaceFor([inputPath, ...audioInputs.map((input) => input.path)], outputPath)
+  await ensureSpaceFor(
+    [
+      { path: inputPath, concatList: options.inputIsConcatList },
+      ...audioInputs
+    ],
+    outputPath
+  )
 
   await runFfmpeg(ffmpegPath, args, signal, outputPath)
   log.info(`muxed ${outputPath}`)
@@ -84,11 +114,18 @@ export async function mux(options: MuxOptions): Promise<void> {
  * did finish looks like it failed - so ask the volume first and say plainly
  * what is missing.
  */
-async function ensureSpaceFor(inputs: string[], outputPath: string): Promise<void> {
+async function ensureSpaceFor(
+  inputs: Array<{ path: string; concatList?: boolean }>,
+  outputPath: string
+): Promise<void> {
   let needed = 0
-  for (const path of inputs) {
+  for (const input of inputs) {
     try {
-      needed += (await stat(path)).size
+      // A concat list is a few kilobytes of filenames; what the output will
+      // cost is the sum of the pieces it names.
+      needed += input.concatList
+        ? await concatListBytes(input.path)
+        : (await stat(input.path)).size
     } catch {
       return
     }
@@ -107,6 +144,26 @@ async function ensureSpaceFor(inputs: string[], outputPath: string): Promise<voi
     `Not enough free space to merge: needs ${formatBytes(needed)}, ` +
       `${formatBytes(free)} free. Free up space and start the download again.`
   )
+}
+
+/**
+ * What the pieces named by a concat list add up to.
+ *
+ * Parsed rather than guessed, so the space check stays as honest as it was when
+ * the tracks had already been joined into one file it could simply `stat`.
+ */
+async function concatListBytes(listPath: string): Promise<number> {
+  const text = await readFile(listPath, 'utf8')
+  const paths: string[] = []
+  for (const line of text.split(/\r?\n/)) {
+    const match = /^file\s+'(.*)'\s*$/.exec(line.trim())
+    if (match) paths.push(match[1].replace(/'\\''/g, "'"))
+  }
+
+  const sizes = await Promise.all(
+    paths.map((path) => stat(path).then((info) => info.size).catch(() => 0))
+  )
+  return sizes.reduce((total, size) => total + size, 0)
 }
 
 function formatBytes(bytes: number): string {
@@ -153,50 +210,40 @@ function runFfmpeg(
     }
     signal.addEventListener('abort', onAbort, { once: true })
 
-    const done = (fn: () => void): void => {
+    let processError: Error | null = null
+    child.on('error', (err) => { processError = new MuxError(err.message) })
+
+    child.on('close', async (code) => {
       signal.removeEventListener('abort', onAbort)
-      fn()
-    }
-
-    child.on('error', (err) => done(() => reject(new MuxError(err.message))))
-
-    child.on('close', (code) => {
-      done(() => {
-        if (signal.aborted) {
-          // A half-written mp4 is worse than none: it plays for two seconds and
-          // looks like a corrupt download rather than a cancelled one.
-          void rm(outputPath, { force: true }).catch(() => {})
-          reject(new MuxError('Cancelled'))
-          return
-        }
-        if (code === 0) {
-          resolve()
-          return
-        }
-        void rm(outputPath, { force: true }).catch(() => {})
-        // ffmpeg's last line is only its summary - "Error opening output files:
-        // Invalid argument" for anything the muxer refused. What actually went
-        // wrong is on the lines above it (the stream map that matched nothing,
-        // the codec the container will not take), so reporting the tail alone
-        // turned every distinct failure into the same unactionable sentence.
-        const detail = stderr
-          .split('\n')
-          .map((line) => line.trim())
-          .filter(Boolean)
-          .slice(-4)
-          .join(' | ')
-        reject(new MuxError(`ffmpeg exited with ${code}${detail ? `: ${detail}` : ''}`))
-      })
+      if (processError) {
+        await rm(outputPath, { force: true }).catch(() => {})
+        reject(processError)
+        return
+      }
+      if (signal.aborted) {
+        // A half-written mp4 is worse than none: it plays for two seconds and
+        // looks like a corrupt download rather than a cancelled one.
+        await rm(outputPath, { force: true }).catch(() => {})
+        reject(new MuxError('Cancelled'))
+        return
+      }
+      if (code === 0) {
+        resolve()
+        return
+      }
+      await rm(outputPath, { force: true }).catch(() => {})
+      // ffmpeg's last line is only its summary - "Error opening output files:
+      // Invalid argument" for anything the muxer refused. What actually went
+      // wrong is on the lines above it (the stream map that matched nothing,
+      // the codec the container will not take), so reporting the tail alone
+      // turned every distinct failure into the same unactionable sentence.
+      const detail = stderr
+        .split('\n')
+        .map((line) => line.trim())
+        .filter(Boolean)
+        .slice(-4)
+        .join(' | ')
+      reject(new MuxError(`ffmpeg exited with ${code}${detail ? `: ${detail}` : ''}`))
     })
   })
-}
-
-function killTree(child: ChildProcess): void {
-  if (child.pid === undefined) return
-
-  const killer = spawn('taskkill', ['/PID', String(child.pid), '/T', '/F'], {
-    shell: false,
-    windowsHide: true
-  })
-  killer.on('error', () => child.kill('SIGKILL'))
 }

@@ -6,6 +6,7 @@
   "minimum_chrome_version": "116",
   "permissions": [
     "downloads",
+    "downloads.ui",
     "cookies",
     "nativeMessaging",
     "contextMenus",
@@ -13,7 +14,8 @@
     "storage",
     "webRequest",
     "tabs",
-    "notifications"
+    "notifications",
+    "alarms"
   ],
   "host_permissions": [
     "<all_urls>"
