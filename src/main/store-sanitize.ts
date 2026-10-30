@@ -185,6 +185,7 @@ export function sanitizeSettings(input: unknown, base: Settings, defaultColumns:
     takeoverExcludeHosts: lowerList(source.takeoverExcludeHosts),
     watchClipboard: source.watchClipboard === true,
     associateTorrents: source.associateTorrents !== false,
+    cliOnPath: source.cliOnPath !== false,
     showDropzone: source.showDropzone === true,
     showProgressWindow: source.showProgressWindow !== false,
     accent,

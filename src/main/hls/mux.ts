@@ -14,6 +14,15 @@ const log = logger('mux')
  * produce something the user did not ask for.
  */
 
+/**
+ * Task details a runner shows while it builds the final file from pieces it
+ * already has. The status stays 'downloading' meanwhile, so these strings are
+ * how a caller tells "bytes still arriving" from "local work only" - the CLI's
+ * queue starts the next download the moment one of these appears.
+ */
+export const MUX_DETAIL = 'Muxing…'
+export const JOIN_DETAIL = 'Joining pieces…'
+
 export class MuxError extends Error {}
 
 /**

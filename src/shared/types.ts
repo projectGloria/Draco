@@ -693,6 +693,12 @@ export interface Settings {
    */
   associateTorrents: boolean
   /**
+   * Keep the installed copy's `resourcesin` (draco.cmd) on the user PATH, so
+   * `draco <url>` works in any new terminal. Off by default: editing someone's
+   * PATH is not something to do without being asked.
+   */
+  cliOnPath: boolean
+  /**
    * Open a progress window of its own for each download the user starts, the
    * way IDM does. Off leaves the main list as the only place a download shows.
    */
@@ -796,6 +802,10 @@ export interface YouTubeResolution {
   title: string
   variants: MediaVariant[]
   thumbnailUrl?: string | null
+  /** Who published it, when the extractor said; feeds CLI output templates. */
+  uploader?: string | null
+  /** YYYYMMDD, as yt-dlp reports it. */
+  uploadDate?: string | null
 }
 
 export interface ClipboardItem {
@@ -834,6 +844,8 @@ export interface IntegrationStatus {
   registered: { chrome: boolean; edge: boolean; brave: boolean; opera: boolean; vivaldi: boolean; firefox: boolean }
   /** Whether Windows currently opens `.torrent` files and magnet links here. */
   shellHandlers: { torrentFiles: boolean; magnetLinks: boolean }
+  /** The `draco` command: where it lives, and whether PATH reaches it. */
+  cliPath: { dir: string | null; unavailableReason: string | null; onPath: boolean }
   /** True while the named-pipe server is accepting host connections. */
   bridgeListening: boolean
   /** Epoch ms of the last message received from the extension, if any. */

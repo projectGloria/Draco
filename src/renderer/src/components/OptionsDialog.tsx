@@ -535,6 +535,7 @@ function GeneralTab({ settings, patch }: {
           label="Open .torrent files and magnet links with Draco"
           hint="Double-clicking a torrent, or clicking a magnet link, shows it here for you to pick files from. If Windows has already been told to use another app for these, choose Draco once from “Open with” — Windows will not let an app take that back on its own."
         />
+        <CliPathToggle settings={settings} patch={patch} />
         <Toggle
           checked={settings.showProgressWindow}
           onChange={(next) => void patch({ showProgressWindow: next })}
@@ -559,6 +560,37 @@ function GeneralTab({ settings, patch }: {
  * by the OS, and nothing ever sends it back - the list shows a host, a realm
  * and a username, which is everything the user needs to recognise an entry.
  */
+/**
+ * The `draco` command toggle. Disabled - with the reason as its hint - on a
+ * copy that has no stable folder to offer (portable, dev), rather than letting
+ * someone switch on a setting that can do nothing.
+ */
+function CliPathToggle({ settings, patch }: {
+  settings: Settings
+  patch: (change: Partial<Settings>) => void
+}): React.ReactElement {
+  const integration = useApp((s) => s.integration)
+  const refresh = useApp((s) => s.refreshIntegration)
+  useEffect(() => {
+    void refresh()
+  }, [refresh])
+  const reason = integration?.cliPath.unavailableReason ?? null
+  return (
+    <Toggle
+      checked={settings.cliOnPath}
+      disabled={reason !== null}
+      onChange={(next) => {
+        void patch({ cliOnPath: next })
+        // The registry write runs after the save returns; re-read once it has
+        // had a moment so the Browser tab's status line is not stale.
+        setTimeout(() => void refresh(), 1500)
+      }}
+      label="Add the draco command to PATH"
+      hint={reason ?? 'Lets you run “draco <url> -best” from any new terminal. Your other PATH entries are left exactly as they are.'}
+    />
+  )
+}
+
 function SiteCredentials(): React.ReactElement {
   const [entries, setEntries] = useState<SiteCredential[]>([])
   const [host, setHost] = useState('')
@@ -1396,6 +1428,15 @@ function BrowserTab({ settings, patch }: {
           ok={integration?.shellHandlers.magnetLinks === true}
           label="magnet:"
           value={integration?.shellHandlers.magnetLinks ? 'Opens with Draco' : 'Opens with another app'}
+        />
+        <StatusLine
+          ok={integration?.cliPath.onPath === true}
+          label="draco"
+          value={
+            integration?.cliPath.onPath
+              ? 'On PATH'
+              : integration?.cliPath.unavailableReason ?? 'Not on PATH'
+          }
         />
         {integration?.lastHandoffAt && (
           <StatusLine ok label="Last handoff" value={formatWhen(integration.lastHandoffAt)} />

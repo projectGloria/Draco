@@ -10,7 +10,7 @@ import { discardReservedPath, halfSuffix, moveFile, uniquePath } from '../engine
 import { AbortedError } from '../engine/worker.ts'
 import { verifyExpectedChecksum } from '../engine/checksum.ts'
 import { ensureFfmpeg } from './ffmpeg.ts'
-import { mux } from './mux.ts'
+import { MUX_DETAIL, mux } from './mux.ts'
 
 export class DashRunner implements Runner {
   task: DownloadTask
@@ -174,7 +174,7 @@ export class DashRunner implements Runner {
       this.task.status = 'downloading'
       this.task.speed = 0
       this.task.eta = null
-      this.task.detail = 'Muxing…'
+      this.task.detail = MUX_DETAIL
       this.deps.onUpdate(this.task)
 
       const ffmpegPath = await ensureFfmpeg((progress) => {
@@ -187,7 +187,7 @@ export class DashRunner implements Runner {
 
       if (this.controller.signal.aborted) throw new AbortedError()
 
-      this.task.detail = 'Muxing…'
+      this.task.detail = MUX_DETAIL
       this.deps.onUpdate(this.task)
 
       const videoPath = join(this.task.dir, this.videoRunner.task.filename)

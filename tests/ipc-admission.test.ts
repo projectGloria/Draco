@@ -39,7 +39,7 @@ function fixture(overrides: Record<string, unknown> = {}) {
     persistTasks() {}, send() {}, closeHandoffWindow() {},
     ...overrides
   }
-  const api = runInNewContext(code + '\n({ registerIpc, expandPlaylist, cancelPlaylistExpansion })', sandbox)
+  const api = runInNewContext(code + '\n({ registerIpc, expandPlaylist, cancelPlaylistExpansion, placeTask })', sandbox)
   api.registerIpc(ctx)
   const call = (channel: string, ...args: any[]) => handlers.get(channel)!({}, ...args)
   return { api, ctx, tasks, call }
@@ -49,6 +49,15 @@ it('rejects an invalid later batch item without adding its valid prefix', async 
   const f = fixture()
   await rejects(f.call('tasks:addMany', [{ url: 'https://example.com/file.mp4' }, { url: 'not a URL' }] satisfies NewDownload[]))
   strictEqual(f.tasks.length, 0)
+})
+
+it('routes enhanced YouTube playlists through HLS even when the candidate was called a file', () => {
+  const f = fixture()
+  const task = f.api.placeTask({ url: 'https://manifest.googlevideo.com/enhanced.m3u8', kind: 'file',
+    youtube: { pageUrl: 'https://youtube.com/watch?v=fixture', videoFormatId: '616', audioFormatId: '251' },
+    audioUrl: 'https://cdn.googlevideo.com/audio', filename: 'Video.mkv' })
+  strictEqual(task.kind, 'hls')
+  strictEqual(task.filename, 'Video.mkv')
 })
 
 it('keeps a media confirmation available when its destination is invalid', async () => {

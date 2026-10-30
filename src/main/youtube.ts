@@ -8,12 +8,11 @@ import { fetchGuarded } from './fetch-guard.ts'
 import { readResponseText } from './response-limit.ts'
 import { cookieArgs, explainCookieFailure } from './ytdlp-cookies.ts'
 import { MAX_PLAYLIST_ENTRIES, parseFlatPlaylist, type PlaylistListing } from './youtube-playlist.ts'
-import { getSettings } from './store.ts'
 import { logger } from './log.ts'
 import { parseYtDlpVersion } from './tools-version.ts'
 import { verifyYtDlpDigest } from './ytdlp-digest.ts'
 import { replaceVerifiedExecutable } from './hls/replace-executable.ts'
-import type { MediaVariant, PageFormat, RequestHeaders, YouTubeResolution } from '../shared/types.ts'
+import type { MediaVariant, PageFormat, RequestHeaders, Settings, YouTubeResolution } from '../shared/types.ts'
 import {
   buildVariants,
   buildAudioVariants,
@@ -54,6 +53,21 @@ const YTDLP_LOOKUP_TIMEOUT_MS = 45_000
 
 let ytdlpProvision: Promise<string> | null = null
 
+type CookieBrowser = Settings['cookiesFromBrowser']
+
+/**
+ * Where yt-dlp borrows cookies from. A getter, not a value: the GUI's choice
+ * lives in the settings store and can change between lookups, and reading it at
+ * call time keeps that live without this module importing the store - whose
+ * sealed task file drags Electron's `safeStorage` into every importer, which is
+ * what kept the CLI from using this resolver at all.
+ */
+let cookieBrowserSource: () => CookieBrowser = () => 'none'
+
+export function setYtDlpCookieBrowser(source: () => CookieBrowser): void {
+  cookieBrowserSource = source
+}
+
 /**
  * The quality ladder without touching the network, built from what the browser
  * already had in the page. Returns null when the page gave nothing usable, in
@@ -93,12 +107,20 @@ export async function primeYouTube(
   await loadInfo(pageUrl, headers)
 }
 
+/** Uploader and date from a yt-dlp info dict, for CLI output templates. */
+function publisher(info: YtDlpInfo): { uploader: string | null; uploadDate: string | null } {
+  return {
+    uploader: info.uploader?.trim() || info.channel?.trim() || null,
+    uploadDate: /^\d{8}$/.test(info.upload_date ?? '') ? info.upload_date! : null
+  }
+}
+
 export async function resolveYouTube(
   pageUrl: string,
   headers: RequestHeaders | undefined
-): Promise<{ id: string; title: string; variants: MediaVariant[]; thumbnailUrl: string }> {
+): Promise<YouTubeResolution & { thumbnailUrl: string }> {
   const info = await loadInfo(pageUrl, headers)
-  const formats = formatsFromYtDlp(Array.isArray(info.formats) ? info.formats : [])
+  const formats = formatsFromYtDlp(Array.isArray(info.formats) ? info.formats : [], true)
   const variants = [...buildVariants(formats), ...buildAudioVariants(formats)]
 
   if (variants.length === 0) {
@@ -113,7 +135,8 @@ export async function resolveYouTube(
     id,
     title: info.title?.trim() || 'YouTube video',
     variants,
-    thumbnailUrl: safeYouTubeThumbnail(info.thumbnail) ?? `https://i.ytimg.com/vi/${encodeURIComponent(id)}/hqdefault.jpg`
+    thumbnailUrl: safeYouTubeThumbnail(info.thumbnail) ?? `https://i.ytimg.com/vi/${encodeURIComponent(id)}/hqdefault.jpg`,
+    ...publisher(info)
   }
 }
 
@@ -127,7 +150,7 @@ export async function resolveYouTube(
  */
 export async function resolvePlaylist(pageUrl: string): Promise<PlaylistListing> {
   const executable = await ensureYtDlp()
-  const cookieBrowser = getSettings().cookiesFromBrowser
+  const cookieBrowser = cookieBrowserSource()
 
   const { stdout, stderr, code } = await runCapture(
     executable,
@@ -227,7 +250,8 @@ export async function resolveMediaPage(
         id: info.id?.trim() || pageUrl,
         title: info.title?.trim() || 'Media',
         variants: choices,
-        thumbnailUrl: safeHttpsThumbnail(info.thumbnail)
+        thumbnailUrl: safeHttpsThumbnail(info.thumbnail),
+        ...publisher(info)
       }
     })(),
     resolveHtmlPageMedia(pageUrl, headers)
@@ -252,7 +276,9 @@ export async function resolveMediaPage(
     id: extractorResult.id || htmlResult.id,
     title: extractorResult.title || htmlResult.title,
     variants: [...variants.values()],
-    thumbnailUrl: extractorResult.thumbnailUrl || htmlResult.thumbnailUrl
+    thumbnailUrl: extractorResult.thumbnailUrl || htmlResult.thumbnailUrl,
+    uploader: extractorResult.uploader ?? null,
+    uploadDate: extractorResult.uploadDate ?? null
   }
 }
 
@@ -315,7 +341,7 @@ export async function refreshYouTubeFormat(
         describeQualityShortfall({
           wantedLabel: tier === null ? `${requestedHeight}p` : tierLabel(tier, null),
           offeredLabels: offeredTiers(info.formats ?? []),
-          cookieBrowser: getSettings().cookiesFromBrowser
+          cookieBrowser: cookieBrowserSource()
         })
       )
     }
@@ -413,7 +439,7 @@ async function loadInfo(
   force = false
 ): Promise<YtDlpInfo> {
   const videoId = extractYouTubeId(pageUrl)
-  const browser = getSettings().cookiesFromBrowser
+  const browser = cookieBrowserSource()
   // A public result must never satisfy a later lookup with captured cookies.
   // Hash the context so credentials cannot appear in cache diagnostics.
   const context = createHash('sha256').update(JSON.stringify(headers ?? {})).digest('hex')
@@ -669,7 +695,7 @@ async function dumpJson(
   executable: string,
   url: string,
   headers?: RequestHeaders,
-  cookieBrowser = getSettings().cookiesFromBrowser
+  cookieBrowser = cookieBrowserSource()
 ): Promise<YtDlpInfo> {
   // Borrowed from the browser when the user has chosen one. This is the only
   // way a members-only or age-gated page resolves at all, and it applies to

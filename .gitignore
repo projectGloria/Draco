@@ -7,3 +7,4 @@ resources/.runtime-*/
 *.tsbuildinfo
 extension/key.pem
 extension-firefox/
+/draco.cfg

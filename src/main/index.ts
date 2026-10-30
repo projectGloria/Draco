@@ -21,7 +21,7 @@ import type {
   TaskStatus,
   Queue
 } from '@shared/types'
-import { ensureDirs, getPaths } from './bootstrap/paths.ts'
+import { configurePaths, ensureDirs, getPaths } from './bootstrap/paths.ts'
 import { loadCredentials, resolveCredentials } from './credentials.ts'
 import { ClipboardWatcher } from './clipboard.ts'
 import { ensureRegistered } from './bridge/integration.ts'
@@ -36,7 +36,7 @@ import { closeDispatchers } from './engine/http.ts'
 import { DownloadManager } from './engine/manager.ts'
 import { MpdRunner } from './dash/runner.ts'
 import { HlsRunner } from './hls/runner.ts'
-import { announce, handoffToTask, openShellTarget, prepareClipboardItem, pushPendingHandoff, recordMedia, refileTask, registerIpc, type AppContext } from './ipc.ts'
+import { announce, syncCliPath, handoffToTask, openShellTarget, prepareClipboardItem, pushPendingHandoff, recordMedia, refileTask, registerIpc, type AppContext } from './ipc.ts'
 import { logger, setLogDirectory } from './log.ts'
 import { publicTasks } from './public-task.ts'
 import { Scheduler } from './queue/scheduler.ts'
@@ -85,7 +85,8 @@ import {
   refreshYouTubeFormat,
   resolveMediaPage,
   resolveYouTube,
-  resolveYouTubeInstant
+  resolveYouTubeInstant,
+  setYtDlpCookieBrowser
 } from './youtube.ts'
 import { isSupportedYouTubeUrl, youtubeFormatId } from './youtube-url.ts'
 import { xPostUrl } from '../shared/x-post.ts'
@@ -109,6 +110,17 @@ if (diagnosticRoot) {
   mkdirSync(root, { recursive: true })
   app.setPath('userData', root)
 }
+// After the diagnostic override above, so a scratch profile is what gets baked
+// into every path. `paths.ts` no longer reads Electron itself - see there.
+configurePaths({
+  userData: app.getPath('userData'),
+  resourceRoot: app.isPackaged ? process.resourcesPath : app.getAppPath(),
+  isPackaged: app.isPackaged,
+  downloads: app.getPath('downloads')
+})
+// yt-dlp's cookie source lives in the sealed settings store, which only this
+// process can open; the resolver asks through this seam instead of importing it.
+setYtDlpCookieBrowser(() => getSettings().cookiesFromBrowser)
 const lastPersistenceNotice = new Map<string, number>()
 setPersistenceErrorHandler((scope, error) => {
   log.error(`could not save ${scope}: ${String(error)}`)
@@ -333,7 +345,7 @@ async function main(): Promise<void> {
           limiter: context.limiter,
           onUpdate: context.onUpdate,
           onFinished: context.onFinished,
-          onProbed: context.onProbed
+          refreshYouTube: context.refreshYouTube, onProbed: context.onProbed
         }
       ),
     createMpdRunner: (task, context) => new MpdRunner(task, context),
@@ -355,7 +367,8 @@ async function main(): Promise<void> {
       // resolves to the same quality rather than failing the download.
       return refreshYouTubeFormat(task.youtube.pageUrl, task.headers, formatId, force, {
         kind: audio ? 'audio' : 'video',
-        height: audio ? null : task.youtube.height ?? null
+        height: audio ? null : task.youtube.height ?? null,
+        delivery: !audio && task.kind === 'hls' ? 'hls' : undefined
       })
     }
   })
@@ -587,6 +600,12 @@ async function runBootstrapOnce(): Promise<void> {
         log.warn(`could not register the torrent handlers: ${String(error)}`)
       )
     }
+    // Synced both ways each start. Setup adds the entry unconditionally, so a
+    // user who switched it off gets it removed again after an update, and one
+    // who left it on gets it re-pointed after a reinstall into another folder.
+    // A no-op for dev and portable copies, which have no folder to offer.
+    // Best-effort, like the handlers above.
+    await syncCliPath(getSettings().cliOnPath).catch((error) => log.warn(`could not update PATH: ${String(error)}`))
 
     const registered = await ensureRegistered()
     if (!Object.values(registered).some(Boolean)) {

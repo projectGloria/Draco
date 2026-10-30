@@ -44,14 +44,15 @@ export async function download(url, path, expected) {
 }
 
 export function run(command, args, options = {}) {
+  const { timeoutMs = 5 * 60_000, ...spawnOptions } = options
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, {
-      shell: false, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'], ...options
+      shell: false, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'], ...spawnOptions
     })
     let output = ''
     child.stdout?.on('data', (chunk) => { output = (output + chunk).slice(-32_000) })
     child.stderr?.on('data', (chunk) => { output = (output + chunk).slice(-32_000) })
-    const timer = setTimeout(() => { child.kill(); reject(new Error(`Timed out: ${command}`)) }, 5 * 60_000)
+    const timer = setTimeout(() => { child.kill(); reject(new Error(`Timed out: ${command}`)) }, timeoutMs)
     child.on('error', (error) => { clearTimeout(timer); reject(error) })
     child.on('close', (code) => {
       clearTimeout(timer)

@@ -233,6 +233,51 @@ test('fragmented MP4 HLS preserves every frame and never adopts pieces without a
   }
 })
 
+test('enhanced YouTube HLS merges a direct Opus track without changing its packets', async (t) => {
+  try { await stat(ffmpegPath) } catch { t.skip('bundled FFmpeg is unavailable'); return }
+  const work = await mkdtemp(join(tmpdir(), 'draco-hybrid-hls-'))
+  t.after(() => rm(work, { recursive: true, force: true }))
+  await execute(ffmpegPath, ['-y', '-nostdin', '-v', 'error', '-f', 'lavfi', '-i', 'color=c=orange:s=64x64:r=10',
+    '-t', '3', '-c:v', 'libx264', '-g', '10', '-f', 'hls', '-hls_time', '1', '-hls_list_size', '0', join(work, 'video.m3u8')], { windowsHide: true })
+  const audioPath = join(work, 'audio.webm')
+  await execute(ffmpegPath, ['-y', '-nostdin', '-v', 'error', '-f', 'lavfi', '-i', 'sine=frequency=440:sample_rate=48000',
+    '-t', '3', '-c:a', 'libopus', audioPath], { windowsHide: true })
+  const server = createServer(async (request, response) => {
+    const name = (request.url ?? '').slice(1)
+    if (!/^[\w.-]+$/.test(name)) { response.writeHead(404).end(); return }
+    try { response.end(await readFile(join(work, name))) } catch { response.writeHead(404).end() }
+  })
+  await new Promise<void>(done => server.listen(0, '127.0.0.1', done))
+  t.after(async () => { await closeDispatchers(); server.closeAllConnections(); await new Promise<void>(done => server.close(() => done())) })
+  const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`
+  const media = await bundledModule('src/main/hls/runner.ts', {
+    'ffmpeg.ts': `export async function ensureFfmpeg() { return ${JSON.stringify(ffmpegPath)} }`
+  })
+  const task = createTask({ url: base + '/expired.m3u8', kind: 'hls', dir: work, filename: 'result.mkv',
+    audioUrl: base + '/expired.webm', youtube: { pageUrl: 'https://youtube.com/watch?v=fixture', videoFormatId: '616', audioFormatId: '251' } })
+  const refreshed: string[] = []
+  let failure: Error | null = null
+  const runner = new media.HlsRunner(task, { maxConnections: 2, retryLimit: 1, timeoutMs: 5000 }, {
+    limiter: new RateLimiter(), onUpdate() {}, onFinished(_task: unknown, error: Error | null) { failure = error },
+    async refreshYouTube(target: typeof task, force: boolean) {
+      const audio = target.youtube?.role === 'audio'
+      refreshed.push(`${audio ? 'audio' : 'video'}:${force}`)
+      return base + (audio ? '/audio.webm' : '/video.m3u8')
+    }
+  })
+  await runner.start()
+  strictEqual(failure, null)
+  strictEqual(task.status, 'done', task.error ?? '')
+  deepStrictEqual(refreshed, ['video:false', 'audio:false'])
+  const result = join(work, task.filename)
+  const decoded = await execute(ffmpegPath, ['-nostdin', '-hide_banner', '-i', result, '-map', '0:v', '-f', 'null', '-'], { windowsHide: true })
+  match(decoded.stderr, /frame=\s*30\b/)
+  match(decoded.stderr, /Audio: opus/)
+  const hash = async (path: string) => (await execute(ffmpegPath, ['-nostdin', '-v', 'error', '-i', path,
+    '-map', '0:a', '-c', 'copy', '-f', 'hash', '-hash', 'sha256', '-'], { windowsHide: true })).stdout
+  strictEqual(await hash(result), await hash(audioPath))
+})
+
 test('Best available DASH saves the highest rendition as one video track', async (t) => {
   try { await stat(ffmpegPath) } catch { t.skip('bundled FFmpeg is unavailable'); return }
   const work = await mkdtemp(join(tmpdir(), 'draco-dash-audit-'))

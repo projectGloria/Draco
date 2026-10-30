@@ -30,6 +30,7 @@ export interface YtDlpFormat {
   preference?: number | null
   audio_ext?: string
   video_ext?: string
+  source_preference?: number | null
   manifest_url?: string
 }
 
@@ -44,6 +45,7 @@ export interface YtDlpFormat {
  * The page can only supply metadata, never a URL: see `formatsFromPage`.
  */
 export interface SourceFormat {
+  sourcePreference?: number | null
   id: string
   url: string | null
   width: number | null
@@ -152,8 +154,7 @@ export function tierLabel(tier: number, fps: number | null): string {
 }
 
 /**
- * Modern codecs carry more detail at the same bitrate, so they win a tie. This
- * only ever breaks one - bitrate decides first.
+ * Compare bitrate within a codec: a more efficient codec need not be larger.
  */
 function codecRank(vcodec: string | null): number {
   const codec = (vcodec ?? '').toLowerCase()
@@ -177,21 +178,17 @@ function audioCodecRank(format: SourceFormat): number {
 /** Higher is better, on every axis. */
 function betterVideo(a: SourceFormat, b: SourceFormat): number {
   return (
-    (b.bitrate ?? 0) - (a.bitrate ?? 0) ||
+    (b.sourcePreference ?? -1) - (a.sourcePreference ?? -1) ||
     (b.fps ?? 0) - (a.fps ?? 0) ||
     codecRank(b.vcodec) - codecRank(a.vcodec) ||
+    (b.bitrate ?? 0) - (a.bitrate ?? 0) ||
     (b.size ?? 0) - (a.size ?? 0)
   )
 }
 
 /**
- * One entry per quality rung, each of them the best that rung has.
- *
- * YouTube publishes the same 1080p three or four times over - mp4/avc1,
- * webm/vp9, mp4/av01, plus a progressive copy - and offering all of them asks
- * the user to know which container they want, which is not a question they came
- * here to answer. So: bucket by rung, keep the highest-bitrate entry in each,
- * and pair it with the best audio.
+ * One entry per quality rung, ranked by source preference, frame rate, codec,
+ * then bitrate within that codec. Pair the winning video with the best audio.
  */
 export function buildVariants(formats: SourceFormat[]): MediaVariant[] {
   const real = formats.filter((f) => !isStoryboardFormat(f))
@@ -261,10 +258,8 @@ function variantFor(
   video: SourceFormat,
   audio: SourceFormat | null
 ): MediaVariant {
-  const size =
-    video.size !== null || audio?.size != null
-      ? (video.size ?? 0) + (audio?.size ?? 0)
-      : null
+  const size = video.size !== null && (!audio || audio.size !== null)
+    ? video.size + (audio?.size ?? 0) : null
 
   const bandwidth = (video.bitrate ?? 0) + (audio?.bitrate ?? 0)
 
@@ -328,23 +323,16 @@ function isStoryboardFormat(format: SourceFormat): boolean {
 function pickBestAudio(formats: SourceFormat[]): SourceFormat | null {
   if (formats.length === 0) return null
 
-  // AAC in an MP4 container muxes into the .mp4 these downloads land as without
-  // argument. Opus is only reached for when there is no AAC on offer.
-  const aac = formats.filter(
-    (f) => /^(m4a|mp4)$/i.test(f.ext ?? '') && /mp4a|aac/i.test(f.acodec ?? '')
-  )
-
-  const pool = aac.length > 0 ? aac : formats
-
   // YouTube ships a dynamic-range-compressed twin of each audio track at the
   // same bitrate ("140-drc" beside "140"). The plain one is what the site plays
   // by default, so it is what a download should be.
   const drc = (f: SourceFormat): number => (/-drc$/i.test(f.id) ? 1 : 0)
 
   return (
-    [...pool].sort(
+    [...formats].sort(
       (a, b) =>
         drc(a) - drc(b) ||
+        audioCodecRank(b) - audioCodecRank(a) ||
         (b.bitrate ?? 0) - (a.bitrate ?? 0) ||
         (b.size ?? 0) - (a.size ?? 0)
     )[0] ?? null
@@ -356,18 +344,8 @@ function pickBestAudio(formats: SourceFormat[]): SourceFormat | null {
 /* ------------------------------------------------------------------ */
 
 /**
- * Whether a format is a single file this engine can actually fetch.
- *
- * yt-dlp also lists HLS and DASH repackagings of the same streams, and prices
- * them higher: for one 720p video the m3u8 entry claimed 1170 kbps against the
- * real file's 985, so ranking on bitrate alone picked the manifest at every
- * rung. Their `url` is a playlist, not media - the byte-range downloader
- * happily saves a few kilobytes of text as `.v.mp4`, and ffmpeg then rejects it
- * with "Invalid data found when processing input". They also carry no filesize,
- * so every quality ends up displaying the same audio-only estimate.
- *
- * The manifest entries add nothing anyway: they describe the same renditions
- * that are already listed as plain files.
+ * Whether a format can go through the ranged file downloader. HLS playlists
+ * must use HlsRunner instead, even when the extractor reports ext: 'mp4'.
  */
 export function isDirectDownload(format: YtDlpFormat): boolean {
   const protocol = (format.protocol ?? '').toLowerCase()
@@ -403,6 +381,7 @@ export function bestDirectVideoHeight(formats: YtDlpFormat[]): number {
 export interface WantedFormat {
   kind: 'video' | 'audio'
   height?: number | null
+  delivery?: 'hls'
 }
 
 /**
@@ -417,6 +396,9 @@ export function selectDirectYtFormat(
   formatId: string,
   wanted?: WantedFormat
 ): YtDlpFormat | null {
+  // HLS runs through the playlist runner. Never substitute a file URL into it.
+  if (wanted?.delivery === 'hls') return formats.find(candidate =>
+    candidate.format_id === formatId && isHlsDownload(candidate)) ?? null
   const direct = directFormats(formats)
   const exact = direct.find((candidate) => candidate.format_id === formatId)
   if (exact) return exact
@@ -561,7 +543,11 @@ function videoRate(f: YtDlpFormat): number {
   return Math.max(0, (f.tbr ?? 0) - (f.abr ?? NOMINAL_PROGRESSIVE_ABR))
 }
 
-export function formatsFromYtDlp(formats: YtDlpFormat[]): SourceFormat[] {
+export function isHlsDownload(format: YtDlpFormat): boolean {
+  return /^(m3u8|m3u8_native)$/.test(format.protocol ?? '') && /^https?:/i.test(format.url ?? '')
+}
+
+export function formatsFromYtDlp(formats: YtDlpFormat[], includeHls = false): SourceFormat[] {
   const preferredAudio = new Map<string, YtDlpFormat>()
   for (const format of formats) {
     const audioOnly = Boolean(format.acodec && format.acodec !== 'none') &&
@@ -577,9 +563,11 @@ export function formatsFromYtDlp(formats: YtDlpFormat[]): SourceFormat[] {
       const base = baseFormatId(format.format_id)
       return !base || !preferredAudio.has(base) || preferredAudio.get(base) === format
     })
-    .filter((f) => f.url && /^https?:/i.test(f.url) && isDirectDownload(f))
+    .filter((f) => f.url && /^https?:/i.test(f.url) &&
+      (isDirectDownload(f) || (includeHls && isHlsDownload(f) && hasVideoTrack(f))))
     .map((f) => ({
       id: f.format_id ?? '',
+      sourcePreference: f.source_preference,
       url: f.url ?? null,
       width: f.width ?? null,
       height: f.height ?? null,

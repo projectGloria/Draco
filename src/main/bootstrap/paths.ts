@@ -1,4 +1,3 @@
-import { app } from 'electron'
 import { join } from 'node:path'
 import { mkdirSync, readdirSync, renameSync, rmdirSync } from 'node:fs'
 
@@ -55,18 +54,49 @@ export interface AppPaths {
   tempDir: string
 }
 
+/**
+ * The four facts every path below is derived from.
+ *
+ * Supplied by whoever boots the process rather than read from Electron here:
+ * the GUI hands over `app.getPath(...)`, while the `draco` CLI runs under bare
+ * Node (or Electron with ELECTRON_RUN_AS_NODE, where `app` does not exist) and
+ * derives the same answers from the environment. An `electron` import in this
+ * file put the whole yt-dlp/ffmpeg graph out of reach of anything but the GUI.
+ */
+export interface PathEnvironment {
+  /** %APPDATA%/Draco - the one folder that holds everything the app writes. */
+  userData: string
+  /**
+   * Packaged, the extension and host ship as extraResources next to the asar.
+   * In dev they are just folders in the repo, so "Load unpacked" works against
+   * the working tree without a build.
+   */
+  resourceRoot: string
+  isPackaged: boolean
+  /** The user's Downloads folder. */
+  downloads: string
+}
+
+let environment: PathEnvironment | null = null
 let cached: AppPaths | null = null
+
+/**
+ * Must run before the first `getPaths()`. Calling it again (diagnostics move
+ * userData to a scratch profile) drops the cache so nothing keeps the old root.
+ */
+export function configurePaths(env: PathEnvironment): void {
+  environment = { ...env }
+  cached = null
+}
 
 export function getPaths(): AppPaths {
   if (cached) return cached
+  // Fail loud: silently guessing a root here is how a diagnostic run would end
+  // up writing into the user's real profile.
+  if (!environment) throw new Error('paths accessed before configurePaths()')
 
-  const root = app.getPath('userData')
+  const { userData: root, resourceRoot, isPackaged, downloads } = environment
   const bin = join(root, 'bin')
-
-  // Packaged, the extension and host ship as extraResources next to the asar.
-  // In dev they are just folders in the repo, so "Load unpacked" works against
-  // the working tree without a build.
-  const resourceRoot = app.isPackaged ? process.resourcesPath : app.getAppPath()
 
   cached = {
     root,
@@ -87,12 +117,12 @@ export function getPaths(): AppPaths {
     torrents: join(root, 'torrents'),
     ffmpegExe: join(bin, 'ffmpeg.exe'),
     ytDlpExe: join(bin, 'yt-dlp.exe'),
-    bundledFfmpegExe: join(resourceRoot, app.isPackaged ? 'runtime' : 'resources/runtime', 'ffmpeg.exe'),
-    bundledYtDlpExe: join(resourceRoot, app.isPackaged ? 'runtime' : 'resources/runtime', 'yt-dlp.exe'),
-    defaultDownloadDir: join(app.getPath('downloads'), 'Draco'),
+    bundledFfmpegExe: join(resourceRoot, isPackaged ? 'runtime' : 'resources/runtime', 'ffmpeg.exe'),
+    bundledYtDlpExe: join(resourceRoot, isPackaged ? 'runtime' : 'resources/runtime', 'yt-dlp.exe'),
+    defaultDownloadDir: join(downloads, 'Draco'),
     extensionDir: join(resourceRoot, 'extension'),
     firefoxExtensionDir: join(resourceRoot, 'extension-firefox'),
-    hostExe: app.isPackaged
+    hostExe: isPackaged
       ? join(resourceRoot, 'draco-host.exe')
       : join(resourceRoot, 'host', 'draco-host.exe'),
     hostManifest: join(root, 'com.nihil.draco.json'),
@@ -124,8 +154,8 @@ export function ensureDirs(): AppPaths {
  * app starting, and the worst case is the old folder staying where it is.
  */
 function migrateLegacyTempDir(paths: AppPaths): void {
-  const resourceRoot = app.isPackaged ? process.resourcesPath : app.getAppPath()
-  const legacy = join(resourceRoot, '.dracoTemp')
+  if (!environment) return
+  const legacy = join(environment.resourceRoot, '.dracoTemp')
   if (legacy === paths.tempDir) return
 
   let entries: string[]

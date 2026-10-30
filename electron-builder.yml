@@ -11,7 +11,9 @@ directories:
   buildResources: resources
 
 files:
-  - out/**/*
+  - out/main/**/*
+  - out/preload/**/*
+  - out/renderer/**/*
   - package.json
 
 extraResources:
@@ -22,6 +24,10 @@ extraResources:
     filter:
       - '**/*'
       - '!key.pem'
+  # The `draco` command. Outside the asar because cmd.exe has to run it; it
+  # points Draco.exe (as Node) at out/main/cli.js inside the asar.
+  - from: resources/bin
+    to: bin
   # The tray reads this at runtime, so it has to sit outside the asar.
   - from: resources/icon.ico
     to: icon.ico
@@ -77,6 +83,8 @@ nsis:
   # Unfinished downloads and their journals live in %APPDATA%; wiping them on
   # uninstall would throw away partial multi-GB files a reinstall could resume.
   deleteAppDataOnUninstall: false
+  # Setup puts the `draco` command on PATH and uninstall removes it.
+  include: resources/installer.nsh
 
 portable:
   artifactName: ${productName}-${version}-portable.${ext}

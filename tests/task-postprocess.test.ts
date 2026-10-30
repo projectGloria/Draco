@@ -1,8 +1,9 @@
 import { strictEqual, rejects } from 'node:assert/strict'
+import { existsSync } from 'node:fs'
 import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises'
 import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
-import { join, resolve } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 import { it } from 'node:test'
 import { execFileSync } from 'node:child_process'
 import { build } from 'esbuild'
@@ -10,8 +11,30 @@ import { createTask } from '../src/main/engine/create.ts'
 import { RateLimiter } from '../src/main/engine/limiter.ts'
 import { runConversion } from '../src/main/engine/postprocess.ts'
 
-async function localTaskRunner(): Promise<any> {
-  const ffmpeg = resolve('resources/runtime/ffmpeg.exe')
+/**
+ * A real ffmpeg for the conversion that must succeed: the bundled runtime when
+ * `npm run runtime` has provisioned it, otherwise one on PATH. Null means this
+ * machine has neither, and the test says so as a skip rather than reporting a
+ * conversion bug that is really a missing tool.
+ */
+function availableFfmpeg(): { ffmpeg: string; ffprobe: string } | null {
+  // ffprobe checks the result, so it has to come from the same build; both
+  // the bundled runtime and ordinary ffmpeg releases ship it alongside.
+  const pair = (ffmpeg: string) => {
+    const ffprobe = join(dirname(ffmpeg), 'ffprobe.exe')
+    return existsSync(ffmpeg) && existsSync(ffprobe) ? { ffmpeg, ffprobe } : null
+  }
+  const bundled = pair(resolve('resources/runtime/ffmpeg.exe'))
+  if (bundled) return bundled
+  try {
+    const found = execFileSync('where', ['ffmpeg'], { encoding: 'utf8', windowsHide: true }).split(/\r?\n/)[0]?.trim()
+    return found ? pair(found) : null
+  } catch {
+    return null
+  }
+}
+
+async function localTaskRunner(ffmpeg = resolve('resources/runtime/ffmpeg.exe')): Promise<any> {
   const bundle = await build({
     entryPoints: ['src/main/engine/task.ts'], bundle: true, platform: 'node', format: 'cjs', packages: 'external', write: false,
     define: { 'import.meta.env': '{}' },
@@ -48,8 +71,12 @@ it('failed conversion preserves the complete source in its workspace and publish
   }
 })
 
-it('publishes a playable converted file while preserving an existing destination and removing the source', async () => {
-  const TaskRunner = await localTaskRunner()
+const tools = availableFfmpeg()
+
+it('publishes a playable converted file while preserving an existing destination and removing the source', {
+  skip: tools ? false : 'needs ffmpeg and ffprobe: run npm run runtime, or put them on PATH'
+}, async () => {
+  const TaskRunner = await localTaskRunner(tools!.ffmpeg)
   const dir = await mkdtemp(join(tmpdir(), 'draco-conversion-success-'))
   try {
     const wav = Buffer.alloc(44 + 8820)
@@ -73,7 +100,7 @@ it('publishes a playable converted file while preserving an existing destination
     strictEqual(task.filename, 'song (1).mp3')
     strictEqual((await readFile(join(dir, 'song.mp3'))).toString(), 'existing file')
     strictEqual(await readFile(runner.partPath).then(() => true, () => false), false)
-    const media = JSON.parse(execFileSync(resolve('resources/runtime/ffprobe.exe'), [
+    const media = JSON.parse(execFileSync(tools!.ffprobe, [
       '-v', 'error', '-show_entries', 'stream=codec_name', '-of', 'json', join(dir, task.filename)
     ], { encoding: 'utf8', windowsHide: true }))
     strictEqual(media.streams[0].codec_name, 'mp3')

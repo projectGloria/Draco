@@ -1,8 +1,11 @@
 {
   "name": "draco",
-  "version": "0.1.2",
+  "version": "1.0.0",
   "description": "A personal download manager: dynamic segmented downloads, browser takeover, queues and a scheduler",
   "main": "./out/main/index.js",
+  "bin": {
+    "draco": "bin/draco.mjs"
+  },
   "author": "Nihil",
   "license": "MIT",
   "engines": {
@@ -13,6 +16,7 @@
     "start": "npm run host && npm run build && electron-vite preview",
     "build": "npm run typecheck && npm run extension:firefox && electron-vite build",
     "typecheck": "tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.web.json",
+    "pretest": "npm run extension:firefox",
     "test": "node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON --test \"tests/**/*.test.ts\"",
     "bench:list": "node tools/bench/list-profile.mjs",
     "bench:http": "node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON tools/bench/http-transfer.mjs",
@@ -21,13 +25,18 @@
     "verify:package": "node tools/verify-package.mjs",
     "smoke:profile": "node tools/smoke-packaged-profile.mjs",
     "smoke:bridge": "node tools/smoke-packaged-bridge.mjs",
+    "smoke:cli": "node tools/smoke-cli-console.mjs",
     "pack": "npm run runtime && npm run host && npm run build && electron-builder --dir",
-    "dist": "npm run runtime && npm run host && npm run build && electron-builder --win",
+    "dist": "npm run runtime && npm run host && npm run build && electron-builder --win && npm run dist:cli:package",
     "host": "node tools/build-host.mjs",
     "keygen": "node tools/gen-extension-key.mjs",
     "icon": "python tools/gen-icon.py",
+    "icon:terminal": "python tools/gen-terminal-icon.py",
     "dl": "node tools/dl.ts",
-    "preview": "electron-vite preview"
+    "cli": "node bin/draco.mjs",
+    "preview": "electron-vite preview",
+    "dist:cli": "npm run runtime && npm run build && npm run dist:cli:package",
+    "dist:cli:package": "node tools/build-cli-installer.mjs"
   },
   "dependencies": {
     "parse-torrent": "^11.0.24",

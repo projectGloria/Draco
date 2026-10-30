@@ -5,6 +5,10 @@ export interface YtDlpInfo {
   title?: string
   thumbnail?: string
   duration?: number
+  uploader?: string
+  channel?: string
+  /** YYYYMMDD. */
+  upload_date?: string
   formats?: YtDlpFormat[]
   entries?: Array<{ formats?: YtDlpFormat[] }>
 }

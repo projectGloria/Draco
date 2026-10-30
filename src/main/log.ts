@@ -29,6 +29,18 @@ let bytesWritten = -1
  */
 let directoryReady = false
 
+/**
+ * Whether lines are echoed to the console as well as the file. On by default
+ * outside a production bundle so `npm run dev` shows them; the `draco` CLI runs
+ * the unbundled source, where that default would interleave engine internals
+ * with its own progress output, so it switches this off unless asked.
+ */
+let consoleEcho = !import.meta.env?.PROD
+
+export function setLogConsole(enabled: boolean): void {
+  consoleEcho = enabled
+}
+
 /** Configured after Electron is ready; keeping this module Electron-free lets engine tests import it. */
 export function setLogDirectory(path: string): void {
   logDirectory = path
@@ -44,7 +56,7 @@ export function flushLogs(): Promise<void> {
 function write(level: Level, scope: string, message: string): void {
   const line = `${new Date().toISOString()} ${level.toUpperCase().padEnd(5)} [${scope}] ${message}\n`
 
-  if (!import.meta.env?.PROD) {
+  if (consoleEcho) {
     const method = level === 'error' ? console.error : level === 'warn' ? console.warn : console.log
     method(`[${scope}] ${message}`)
   }

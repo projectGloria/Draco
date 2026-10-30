@@ -78,6 +78,7 @@ function provisionalSettings(): Settings {
     takeoverExcludeHosts: [],
     watchClipboard: true,
     associateTorrents: true,
+    cliOnPath: true,
     showProgressWindow: true,
     accent: '#38bdf8',
     columns: [

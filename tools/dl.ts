@@ -10,7 +10,7 @@
  *
  * Runs directly under Node's type stripping - no build step.
  */
-import { createTask, validateUrl } from '../src/main/engine/create.ts'
+import { createTask, deterministicTaskId, validateUrl } from '../src/main/engine/create.ts'
 import { DownloadManager, type EngineSettings } from '../src/main/engine/manager.ts'
 import { Segmenter } from '../src/main/engine/segmenter.ts'
 import type { DownloadTask } from '../src/shared/types.ts'
@@ -74,7 +74,14 @@ const manager = new DownloadManager({
   onProgress: () => render()
 })
 
-const tasks = urls.map((url) => createTask({ url: validateUrl(url), dir }))
+const tasks = urls.map((url) => {
+  const task = createTask({ url: validateUrl(url), dir })
+  // The partial and its journal are keyed by task id. A random one - which is
+  // what createTask mints - meant "run the same command again to resume" below
+  // actually started over every time.
+  task.id = deterministicTaskId(task.url, dir.toLowerCase())
+  return task
+})
 for (const task of tasks) manager.add(task)
 
 function bytes(n: number | null): string {

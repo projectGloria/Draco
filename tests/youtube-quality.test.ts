@@ -1,6 +1,6 @@
 import { deepStrictEqual, match, strictEqual } from 'node:assert/strict'
 import { describe, it } from 'node:test'
-import { bestDirectVideoHeight, buildVariants, offeredTiers, rungsBelow, tierFor } from '../src/main/youtube-ladder.ts'
+import { bestDirectVideoHeight, buildVariants, formatsFromYtDlp, selectDirectYtFormat, offeredTiers, rungsBelow, tierFor } from '../src/main/youtube-ladder.ts'
 import { describeQualityShortfall, normalizeYtDlpError } from '../src/main/youtube-error.ts'
 import {
   advance,
@@ -63,6 +63,39 @@ describe('tierFor', () => {
 })
 
 describe('buildVariants on letterboxed video', () => {
+  const formats = [
+    { format_id: '137', url: 'https://cdn/v.mp4', height: 1080, width: 1918, fps: 24,
+      vcodec: 'avc1', acodec: 'none', ext: 'mp4', protocol: 'https', tbr: 2824 },
+    { format_id: '248', url: 'https://cdn/v.webm', height: 1080, width: 1918, fps: 24,
+      vcodec: 'vp9', acodec: 'none', ext: 'webm', protocol: 'https', tbr: 1710 },
+    { format_id: '616', url: 'https://cdn/premium.m3u8', height: 1080, width: 1918, fps: 24,
+      vcodec: 'vp9', acodec: 'none', ext: 'mp4', protocol: 'm3u8_native', tbr: 3974, source_preference: 99 },
+    { format_id: '140', url: 'https://cdn/a.m4a', vcodec: 'none', acodec: 'mp4a',
+      ext: 'm4a', protocol: 'https', abr: 129 },
+    { format_id: '251', url: 'https://cdn/a.webm', vcodec: 'none', acodec: 'opus',
+      ext: 'webm', protocol: 'https', abr: 138 }
+  ]
+
+  it('selects enhanced HLS video and Opus instead of discarding them for H.264/AAC', () => {
+    const [best] = buildVariants(formatsFromYtDlp(formats, true))
+    strictEqual(best.youtube?.videoFormatId, '616')
+    strictEqual(best.youtube?.audioFormatId, '251')
+    strictEqual(best.url, 'https://cdn/premium.m3u8')
+    strictEqual(best.container, 'mkv')
+    strictEqual(best.estimatedSize, null)
+  })
+
+  it('does not compare the bitrates of different codecs as if they had the same efficiency', () => {
+    const [best] = buildVariants(formatsFromYtDlp(formats))
+    strictEqual(best.youtube?.videoFormatId, '248')
+  })
+
+  it('keeps playlist and file refreshes separate and refuses to silently downgrade HLS', () => {
+    strictEqual(selectDirectYtFormat(formats, '616')?.format_id, '137')
+    strictEqual(selectDirectYtFormat(formats, '616', { kind: 'video', delivery: 'hls' })?.format_id, '616')
+    strictEqual(selectDirectYtFormat(formats.slice(0, 2), '616', { kind: 'video', delivery: 'hls' }), null)
+  })
+
   it('offers 1080p for a 2.40:1 film rather than calling it 720p', () => {
     const audio = {
       id: '140', url: 'https://x/a', width: null, height: null, fps: null,

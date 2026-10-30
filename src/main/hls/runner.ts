@@ -19,6 +19,7 @@ import { discardReservedPath, moveFile, uniquePath } from '../engine/naming.ts'
 import { mapConcurrent } from '../engine/concurrency.ts'
 import { buildHeaders } from '../engine/probe.ts'
 import type { Runner } from '../engine/runner.ts'
+import { kindForUrl } from '../engine/create.ts'
 import { taskWorkspaceDir } from '../engine/workspace.ts'
 import { quotaDetail } from '../engine/task.ts'
 import { AbortedError } from '../engine/worker.ts'
@@ -32,7 +33,7 @@ import {
   EncryptedSegmentTooLargeError,
   MAX_ENCRYPTED_SEGMENT_BYTES
 } from './encrypted-buffer.ts'
-import { mux } from './mux.ts'
+import { MUX_DETAIL, JOIN_DETAIL, mux } from './mux.ts'
 import { loadMediaPlaylist, resolveVariants, type HlsSegment, type MediaPlaylist } from './playlist.ts'
 import { streamResponseBody } from './stream.ts'
 
@@ -65,6 +66,7 @@ export interface HlsRunnerConfig {
 }
 
 export interface HlsRunnerDeps {
+  refreshYouTube?: (task: DownloadTask, force: boolean) => Promise<string>
   limiter: RateLimiter
   onUpdate(task: DownloadTask): void
   onFinished(task: DownloadTask, error: Error | null): void
@@ -322,6 +324,15 @@ export class HlsRunner implements Runner {
     this.task.detail = null
     this.deps.onUpdate(this.task)
 
+    if (this.task.youtube && this.deps.refreshYouTube) {
+      this.task.url = await this.deps.refreshYouTube(this.task, false)
+      if (this.task.youtube.audioFormatId) {
+        this.task.audioUrl = await this.deps.refreshYouTube({
+          ...this.task, kind: 'file', youtube: { ...this.task.youtube, role: 'audio' }
+        }, false)
+      }
+      this.throwIfAborted()
+    }
     let videoUrl = this.task.url
     if ((!this.task.audioTracks || this.task.audioTracks.length === 0) && !this.task.audioUrl) {
       const variants = await resolveVariants(this.task.url, this.task.headers, {
@@ -372,9 +383,14 @@ export class HlsRunner implements Runner {
 
     for (let index = 0; index < uniqueAudio.length; index++) {
       const declared = uniqueAudio[index]
-      const audioPlaylist = await loadMediaPlaylist(declared.url, this.task.headers, {
-        signal: this.controller.signal, timeoutMs: this.config.timeoutMs, credentialUrl: this.task.url
-      })
+      // YouTube's enhanced video can be HLS while its best audio is a file.
+      // Treat that file as one complete segment; the existing mux copies it.
+      const audioPlaylist: MediaPlaylist = this.task.youtube?.audioFormatId && kindForUrl(declared.url) === 'file'
+        ? { segments: [{ url: declared.url, duration: playlist.totalDuration, byteRange: null, key: null }],
+            initSegment: null, totalDuration: playlist.totalDuration, mediaSequence: 0, isLive: false }
+        : await loadMediaPlaylist(declared.url, this.task.headers, {
+            signal: this.controller.signal, timeoutMs: this.config.timeoutMs, credentialUrl: this.task.url
+          })
       this.throwIfAborted()
       if (audioPlaylist.isLive) throw new Error(`Audio track “${declared.label}” is a live stream`)
       if (audioPlaylist.segments.length === 0) throw new Error(`Audio track “${declared.label}” contained no media segments`)
@@ -977,7 +993,7 @@ export class HlsRunner implements Runner {
       })
       this.throwIfAborted()
 
-      this.task.detail = 'Muxing…'
+      this.task.detail = MUX_DETAIL
       this.deps.onUpdate(this.task)
 
       const audioTracks = this.tracks.filter((track) => track.role === 'audio')
@@ -1041,7 +1057,7 @@ export class HlsRunner implements Runner {
        * here - which is what every finish used to do, and is now the exception
        * rather than the rule.
        */
-      this.task.detail = 'Joining pieces…'
+      this.task.detail = JOIN_DETAIL
       this.deps.onUpdate(this.task)
 
       const video = this.tracks.find((track) => track.role === 'video')

@@ -9,7 +9,15 @@ export default defineConfig({
       alias: { '@shared': resolve(__dirname, 'src/shared') }
     },
     build: {
-      rollupOptions: { input: { index: resolve(__dirname, 'src/main/index.ts') } }
+      rollupOptions: {
+        input: {
+          index: resolve(__dirname, 'src/main/index.ts'),
+          // The `draco` CLI, run by resources/bin/draco.cmd inside Draco.exe.
+          cli: resolve(__dirname, 'src/cli/run.ts'),
+          // Run by the NSIS installer to put `draco` on PATH (resources/installer.nsh).
+          'path-setup': resolve(__dirname, 'src/cli/path-setup.ts')
+        }
+      }
     }
   },
   preload: {

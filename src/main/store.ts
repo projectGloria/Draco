@@ -117,6 +117,7 @@ export function defaultSettings(): Settings {
     takeoverExcludeHosts: [],
     watchClipboard: true,
     associateTorrents: true,
+    cliOnPath: true,
     showDropzone: false,
     showProgressWindow: true,
     accent: '#38bdf8',

@@ -1,7 +1,21 @@
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import type { DownloadTask, MediaAudioTrack, NewDownload, RequestHeaders, SubtitleTrack, TaskKind, TorrentFile } from '../../shared/types.ts'
 import { filenameFromUrl, sanitizeFilename } from './naming.ts'
 import { normalizeDownloadDirectory } from '../destination-path.ts'
+
+/**
+ * A task id that is the same every time it is derived from the same parts.
+ *
+ * The engine keys a task's partial file and journal by its id. `createTask`
+ * mints a random one, which is right for the GUI - its ids persist in
+ * tasks.json - but a terminal tool that rebuilds its tasks on every run would
+ * land each rerun in a fresh, empty workspace and start from zero. Shaped like
+ * a v4 UUID because the workspace's cleanup patterns expect one.
+ */
+export function deterministicTaskId(...parts: string[]): string {
+  const h = createHash('sha256').update(parts.join('\0')).digest('hex')
+  return `${h.slice(0, 8)}-${h.slice(8, 12)}-4${h.slice(13, 16)}-a${h.slice(17, 20)}-${h.slice(20, 32)}`
+}
 
 /**
  * Builds a task record. The filename here is only a placeholder - the probe

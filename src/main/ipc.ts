@@ -54,6 +54,7 @@ import {
   unregisterShellHandlers
 } from './shell-integration.ts'
 import { logger } from './log.ts'
+import { addCliToPath, cliDirFor, cliPathStatus, removeCliFromPath, type CliPathStatus } from './cli-path.ts'
 import type { Scheduler } from './queue/scheduler.ts'
 import type { SiteProjectManager } from './site-grabber/projects.ts'
 import {
@@ -316,7 +317,10 @@ export function placeTask(input: NewDownload): DownloadTask {
 
   // The grabber says what it is; anything else - the extension, the clipboard,
   // a hand-typed URL - is inferred from the address.
-  const kind = input.kind ?? kindForUrl(url)
+  // A media confirmation can still call the candidate a file after YouTube's
+  // quality resolver replaces it with an enhanced HLS rendition.
+  const inferred = kindForUrl(url)
+  const kind = input.youtube && inferred === 'hls' ? 'hls' : input.kind ?? inferred
   const chosenName = input.filename ? filenameForKind(input.filename, kind) : undefined
 
   const filename = chosenName ?? ''
@@ -429,6 +433,28 @@ export function announce(task: DownloadTask): void {
   log.info(`progress window for ${task.filename || task.url}`)
   createProgressWindow(task.id)
   updateProgressWindow(task)
+}
+
+/** Where this copy's draco.cmd lives, or why it has none. */
+export function currentCliDir(): { dir: string | null; reason: string | null } {
+  return cliDirFor({
+    isPackaged: app.isPackaged,
+    resourcesPath: process.resourcesPath,
+    // electron-builder's portable stub sets this before launching the app.
+    portable: Boolean(process.env.PORTABLE_EXECUTABLE_DIR)
+  })
+}
+
+/** Applies `cliOnPath` to the registry; returns what PATH now says. */
+export async function syncCliPath(enabled: boolean): Promise<CliPathStatus> {
+  const { dir, reason } = currentCliDir()
+  if (dir) await (enabled ? addCliToPath(dir) : removeCliFromPath(dir))
+  return cliPathStatus(dir, reason)
+}
+
+async function readCliPath(): Promise<CliPathStatus> {
+  const { dir, reason } = currentCliDir()
+  return cliPathStatus(dir, reason).catch(() => ({ dir, unavailableReason: reason, onPath: false }))
 }
 
 export function registerIpc(ctx: AppContext): void {
@@ -998,6 +1024,10 @@ export function registerIpc(ctx: AppContext): void {
       void (next.associateTorrents ? registerShellHandlers() : unregisterShellHandlers())
         .catch((error) => log.warn(`shell handler update failed: ${String(error)}`))
     }
+    if (patch.cliOnPath !== undefined) {
+      // Same reasoning as above; Options re-reads the result from `integration:get`.
+      void syncCliPath(next.cliOnPath).catch((error) => log.warn(`PATH update failed: ${String(error)}`))
+    }
     return next
   })
 
@@ -1017,6 +1047,7 @@ export function registerIpc(ctx: AppContext): void {
       extensionId: await readExtensionId(),
       registered: await checkRegistered(),
       shellHandlers: await shellHandlerStatus(),
+      cliPath: await readCliPath(),
       bridgeListening: ctx.pipe.listening,
       lastHandoffAt: ctx.lastHandoffAt
     }
@@ -1036,6 +1067,7 @@ export function registerIpc(ctx: AppContext): void {
       extensionId: await readExtensionId(),
       registered,
       shellHandlers,
+      cliPath: getSettings().cliOnPath ? await syncCliPath(true) : await readCliPath(),
       bridgeListening: ctx.pipe.listening,
       lastHandoffAt: ctx.lastHandoffAt
     }

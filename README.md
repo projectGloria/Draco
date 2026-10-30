@@ -172,7 +172,7 @@ For technical details on Chrome and Firefox integration, refer to [BROWSER_TAKEO
 Download and run the installer from the latest release:
 
 ```powershell
-dist/Draco-0.1.2-x64.exe
+dist/Draco-1.0.0-x64.exe
 ```
 
 The installer configures:
@@ -202,6 +202,48 @@ dist/Draco-0.1.2-portable.exe
 2. **Mozilla Firefox**:
    - Navigate to `about:debugging#/runtime/this-firefox`.
    - Click **Load Temporary Add-on...** and select `extension-firefox/manifest.json` (generated via `npm run extension:firefox`).
+
+### Command Line (`draco`)
+
+Run `draco` with no arguments in a terminal to open the interactive download interface. Paste a link and press Enter. The first media download offers a quality picker; later links reuse your choice automatically.
+
+The link box stays open while downloading, so pasting another link (or several at once) adds it to the **queue**. One download moves bytes at a time, and the next one starts as soon as the current one reaches its merge step. `-c` in `draco.cfg` allows more lanes. A playlist link queues every video and plays them in order into `<playlist>\NN - <title>`, looking up each entry just before its turn. From an empty link box, **↓** steps into the "Up next" list, where **Del** removes an item.
+
+Files are saved to the folder you started `draco` from, so `cd Desktop\a; draco` downloads into `a`. Started from your home folder (where Windows Terminal opens) or from System32, it uses the `-P` in `draco.cfg`, or `Downloads` if there is none. The header shows which rule applied. **F2** changes quality or the folder, and a new folder can apply to this session only or become the `draco.cfg` default. **F4** opens the folder in Explorer, including during a download. Quality persists in `%APPDATA%\Draco\cli-preferences.json`.
+
+**Ctrl+C** pauses what is downloading and keeps the queue (merges in progress finish). **F5** continues, and a second **Ctrl+C** exits. In Windows Terminal, progress also shows on the tab and taskbar, and a bell rings when a long queue finishes. The header, download bars and animated indicators adapt to the terminal size and repaint after resizing. Set `NO_COLOR` for monochrome output.
+
+The same engine and resolvers, from a terminal, with yt-dlp-style flags:
+
+```powershell
+draco "https://www.youtube.com/watch?v=..." -best      # tallest rung, video+audio merged
+draco "https://www.youtube.com/watch?v=..." -F         # list formats
+draco "https://www.youtube.com/watch?v=..." -f 720 -P D:\Videos
+draco "https://www.youtube.com/watch?v=..." -x         # best audio only
+draco "https://www.youtube.com/playlist?list=..."      # whole playlist into its own folder
+draco https://example.com/file.iso -N 16 -r 4M         # 16 connections, 4 MiB/s cap
+draco URL -o "%(uploader)s/%(title)s.%(ext)s"          # one folder per uploader
+```
+
+`-best` is the default. It picks the highest video quality, including enhanced HLS renditions, plus the best audio and merges them with ffmpeg without re-encoding. Within a resolution, source preference, frame rate and codec come before bitrate; AAC is not forced over Opus. The output container can be WebM or MKV to preserve the selected streams. Downloads land in the current directory unless `-P` says otherwise. From your home folder, they go to `draco.cfg`'s `-P`, or to `Downloads`. A playlist's videos download one after another, numbered in playlist order. Ctrl-C pauses and saves progress, and running the same command again resumes it. A file that already exists is skipped (`--force` overrides). The CLI shares the app's managed yt-dlp/ffmpeg but not its settings, and it never touches the GUI's download list. See `draco --help` for every flag.
+
+**yt-dlp media configs.** `-S` / `--format-sort`, `--merge-output-format`, `--cookies`, thumbnail conversion/embedding, metadata/chapters, `--windows-filenames` and `--no-mtime` are supported. When these options are present, yt-dlp performs the download and postprocessing, including full output templates such as `%(channel,uploader)s`. Its downloads run sequentially; `-c` controls only Draco engine downloads. Choose quality in F2 when using this mode. Other unknown options still report an error.
+
+**Output templates.** `-o` accepts yt-dlp-style fields: `title`, `ext`, `id`, `uploader`, `upload_date`, `height`, `resolution`, `format_id`, `playlist`, `playlist_index` (`%(playlist_index)03d` pads numbers). A field with no value becomes `NA`. A `/` in the template creates folders, but values cannot: a title such as `../x` is sanitised to a plain file name. A media extension left in a title (`clip.mp4`) is dropped, so you don't get `clip.mp4.mp4`.
+
+**Config file (`draco.cfg`).** This file holds default flags, written exactly as on the command line, one or more per line, with `#` for comments. It lives in Draco's root folder: next to `Draco.exe` when installed, or the repository root when running from source. The installer writes a fully commented sample. Your edits survive updates, and uninstalling keeps a copy at `%APPDATA%\Draco\draco.cfg.bak` that a reinstall restores. The command line always overrides the file. Use `--ignore-config` to skip it, `--config-location PATH` to read another file, and `-v` to see which file was used.
+
+```ini
+-P "D:\Videos"
+-N 16
+--cookies-from-browser firefox
+-o "%(uploader)s/%(title)s.%(ext)s"
+```
+
+- **CLI-only installer**: `npm run dist` also creates `dist/Draco-CLI-<version>-x64-Setup.exe`. Use `npm run dist:cli` to build only this installer. It installs its own Node runtime, download engine, yt-dlp and ffmpeg; the desktop app is not required. It has its own installation directory, PATH entry, Start menu shortcut and uninstaller. Its `draco.cfg` stays in the installation folder across updates and uninstall. If both editions are installed, the first entry on PATH handles `draco`; use the CLI Start menu shortcut to explicitly launch the standalone edition.
+- **Installed desktop copy**: the setup puts `draco` on your user `PATH`. Open a new terminal afterwards and it works. `draco.cmd` in `<install dir>\resources\bin` runs the CLI inside `Draco.exe`, so no separate Node is needed. You can switch it off in Options → General, and uninstalling removes it.
+- **Portable copy**: no `draco` command, because the portable build unpacks to a new temp folder on every launch.
+- **From source**: `npm link` (Node ≥ 22.18), or `npm run cli -- <url> -best`.
 
 ---
 
@@ -245,7 +287,7 @@ Ensure the following tools are installed on your Windows development environment
    npm run dist
    ```
    Packaged artifacts will be generated inside the `dist/` directory:
-   - `dist/Draco-0.1.2-x64.exe` (NSIS Installer)
+   - `dist/Draco-1.0.0-x64.exe` (NSIS Installer)
    - `dist/Draco-0.1.2-portable.exe` (Portable Binary)
 
 ### Running Tests & Benchmarks
