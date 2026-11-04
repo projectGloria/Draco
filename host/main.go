@@ -113,7 +113,10 @@ func main() {
 
 		if err := writeFrame(os.Stdout, reply, maxWriteFrame); err != nil {
 			logf("failed to write to stdout: %v", err)
-			os.Exit(1)
+			if wErr := writeFrame(os.Stdout, errorReply(err), maxWriteFrame); wErr != nil {
+				return
+			}
+			continue
 		}
 	}
 }

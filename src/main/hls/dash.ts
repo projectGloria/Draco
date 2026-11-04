@@ -89,7 +89,12 @@ export class DashRunner implements Runner {
         if (childTask.id === videoTask.id) void this.audioRunner?.pause().catch(() => {})
         else void this.videoRunner?.pause().catch(() => {})
       },
-      onProbed: () => {}
+      onProbed: () => {
+        if (this.videoRunner?.task?.size !== null && this.audioRunner?.task?.size !== null) {
+          this.task.size = (this.videoRunner?.task?.size ?? 0) + (this.audioRunner?.task?.size ?? 0)
+        }
+        this.deps.onProbed?.(this.task)
+      }
     }
 
     const budget = splitConnectionBudget(context.maxConnections, context.connectionCeiling)
@@ -282,6 +287,7 @@ export class DashRunner implements Runner {
     try {
       const info = await stat(path)
       if (!info.isFile() || info.size === 0) return false
+      if (runner.task.expectedSize && info.size !== runner.task.expectedSize) return false
       runner.task.size = info.size
       runner.task.received = info.size
       runner.task.status = 'done'

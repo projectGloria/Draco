@@ -1249,7 +1249,7 @@ export class DownloadManager {
       // A keep-alive burst is still a running download: it holds a connection,
       // spends the transfer budget and occupies a slot. Starting one on top of
       // a full complement would quietly exceed the limit the user set.
-      if (this.activeCount >= settings.maxConcurrentTasks) return
+      if ([...this.runners.values()].some((r) => r.task.isCatMode)) return
 
       // A queue's waiting items must not download around its concurrency/order.
       // The MPD runner hands network I/O to ffmpeg, which cannot honor the
@@ -1332,6 +1332,7 @@ export class DownloadManager {
         )
       }
 
+      const previousStartedAt = task.startedAt
       task.lastCatPingAt = Date.now()
       task.isCatMode = true
       task.status = 'downloading'
@@ -1349,6 +1350,7 @@ export class DownloadManager {
           log.info(`Cat mode ended for task ${task.id} (${task.filename})`)
           void this.pause([task.id]).then(() => {
             task.isCatMode = false
+            task.startedAt = previousStartedAt
             // Put it back to queued if it wasn't manually paused during this time
             if (!task.manualPause && task.status === 'paused') {
               task.status = 'queued'

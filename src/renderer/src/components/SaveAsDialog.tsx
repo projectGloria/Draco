@@ -127,7 +127,7 @@ export default function SaveAsDialog({
   useEffect(() => {
     let cancelled = false
     void window.api
-      .findDuplicate({ url, pageUrl: youtubeMode ? url : null })
+      .findDuplicate({ url, pageUrl: youtubeMode ? url : null, filename, dir: dir ?? undefined })
       .then((match) => {
         if (!cancelled) setDuplicate(match)
       })
@@ -138,7 +138,7 @@ export default function SaveAsDialog({
     return () => {
       cancelled = true
     }
-  }, [url, youtubeMode])
+  }, [url, youtubeMode, filename, dir])
 
   useEffect(() => {
     if (probe?.torrentFiles) {

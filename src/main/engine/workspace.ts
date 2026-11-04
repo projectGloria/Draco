@@ -57,7 +57,26 @@ export function intermediatePathsFor(
     dirs.push(taskWorkspaceDir(task.dir, task.id + '-v', tempDir))
     dirs.push(taskWorkspaceDir(task.dir, task.id + '-a', tempDir))
   }
-  return { files: [], dirs }
+  const files: string[] = []
+  if (task.audioUrl) {
+    files.push(join(task.dir, task.filename + '.v.mp4'))
+    files.push(join(task.dir, task.filename + '.a.m4a'))
+    const safeV = task.youtube?.videoFormatId?.replace(/[^a-z0-9_-]/gi, '')
+    const safeA = task.youtube?.audioFormatId?.replace(/[^a-z0-9_-]/gi, '')
+    if (safeV) files.push(join(task.dir, task.filename + '.v.' + safeV + '.mp4'))
+    if (safeA) files.push(join(task.dir, task.filename + '.a.' + safeA + '.m4a'))
+
+    const dot = task.filename.lastIndexOf('.')
+    const [baseStem, ext] = dot > 0 ? [task.filename.slice(0, dot), task.filename.slice(dot)] : [task.filename, '']
+    if (ext) {
+      files.push(join(task.dir, baseStem + '.draco-dash-temp' + ext))
+      files.push(join(task.dir, baseStem + '.draco-mux-temp' + ext))
+    }
+    files.push(join(task.dir, baseStem + '.draco-dash-temp'))
+    files.push(join(task.dir, baseStem + '.draco-mux-temp'))
+    files.push(join(task.dir, baseStem + '.draco-mux-temp.mp4'))
+  }
+  return { files: [...new Set(files)], dirs }
 }
 
 /** Old filename-based paths are read only during migration; never use for cleanup. */

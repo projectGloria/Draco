@@ -619,7 +619,9 @@ export function createSession(config: SessionConfig): Session {
     const index = pending.indexOf(job)
     if (index < 0) return
     pending.splice(index, 1)
-    if (job.plan) enqueue(job.plan, job.group)
+    let enqueued = false
+    if (job.plan) enqueued = enqueue(job.plan, job.group)
+    if (!enqueued && pending.length > 0) pump()
   }
 
   function lookUp(job: Job): void {
@@ -651,17 +653,17 @@ export function createSession(config: SessionConfig): Session {
     if (next) lookUp(next)
   }
 
-  function enqueue(plan: Planned, group: string | null): void {
+  function enqueue(plan: Planned, group: string | null): boolean {
     const existing = plan.skipIfExists === undefined ? plan.filename : plan.skipIfExists
     if (existing && !options.force && existsSync(join(plan.dir, existing))) {
       reporter.saved(join(plan.dir, existing), `Already downloaded: ${existing} (use --force to download it again)`)
-      return
+      return false
     }
     const task = taskFor(plan)
     if (ours.has(task.id)) {
       // The same download again: a retry when the last attempt settled,
       // a duplicate when it is still running.
-      if (!reported.has(task.id)) { reporter.info(`Already downloading ${task.filename}`); return }
+      if (!reported.has(task.id)) { reporter.info(`Already downloading ${task.filename}`); return false }
       reported.delete(task.id)
       pausedIds.delete(task.id)
     }
@@ -669,6 +671,7 @@ export function createSession(config: SessionConfig): Session {
     groupOf.set(task.id, group)
     startedAt.set(task.id, Date.now())
     manager.add(task)
+    return true
   }
 
   function push(job: Omit<Job, 'id'>): void {

@@ -46,6 +46,7 @@ export interface FetchGuardedOptions {
   /** Release metadata and executable downloads must stay on HTTPS. */
   requireHttps?: boolean
   maxRedirects?: number
+  allowPrivate?: boolean
 }
 
 /** Stop an unread response immediately; Undici emits its abort on the body. */
@@ -85,6 +86,7 @@ export async function fetchGuarded(
     throw new Error(`Unsupported address: ${url.protocol}`)
   }
   if (options.requireHttps && url.protocol !== 'https:') throw new Error('This request requires HTTPS')
+  if (options.allowPrivate === false && isPrivateHost(url.hostname)) throw new Error('Connecting to private network addresses is not allowed')
   let headers = { ...options.headers }
   const maxRedirects = options.maxRedirects ?? 8
 
@@ -126,6 +128,7 @@ export async function requestGuarded(
     throw new Error(`Unsupported address: ${url.protocol}`)
   }
   if (options.requireHttps && url.protocol !== 'https:') throw new Error('This request requires HTTPS')
+  if (options.allowPrivate === false && isPrivateHost(url.hostname)) throw new Error('Connecting to private network addresses is not allowed')
   let headers = { ...options.headers }
   const maxRedirects = options.maxRedirects ?? 8
 

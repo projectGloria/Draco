@@ -251,7 +251,9 @@ function parseLayer(argv: string[], source: 'cli' | 'config'): Layer {
     const valueName = VALUE_FLAGS.get(flag)
     if (valueName) {
       const value = inline ?? argv[++i]
-      if (value === undefined || value === '') throw new UsageError(`${flag} needs a value`)
+      if (value === undefined || value === '' || (inline === undefined && typeof value === 'string' && value.startsWith('-') && value !== '-')) {
+        throw new UsageError(`${flag} needs a value`)
+      }
       switch (valueName) {
         case 'format':
           setFormat(parseFormat(value), `${flag} ${value}`)

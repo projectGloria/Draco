@@ -50,7 +50,6 @@ export default function App(): React.ReactElement {
   if (window.location.hash === '#dropzone') {
     return <Dropzone />
   }
-
   const init = useApp((s) => s.init)
   const ready = useApp((s) => s.ready)
   const initializing = useApp((s) => s.initializing)
@@ -272,7 +271,7 @@ export default function App(): React.ReactElement {
       checkbox: finished.length > 0 ? t('confirmDeleteFiles') : undefined,
       onConfirm: remove
     })
-  }, [tasks, settings.confirmDelete, setSelection, t])
+  }, [settings.confirmDelete, setSelection, t])
 
   const actions: ToolbarActions = useMemo(() => ({
     onAdd: () => {
@@ -358,7 +357,9 @@ export default function App(): React.ReactElement {
         event.dataTransfer.dropEffect = 'copy'
       }}
       onDragLeave={(event) => {
-        if (event.currentTarget === event.target) setDraggingUrl(false)
+        if (!event.relatedTarget || !event.currentTarget.contains(event.relatedTarget as Node)) {
+          setDraggingUrl(false)
+        }
       }}
       onDrop={(event) => {
         event.preventDefault()

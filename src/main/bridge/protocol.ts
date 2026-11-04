@@ -158,17 +158,29 @@ export interface HostReply {
   primed?: boolean
 }
 
-/** Splits a growing buffer into complete frames, returning the leftover tail. */
-export function readFrames(buffer: Buffer): { frames: unknown[]; rest: Buffer } {
+/**
+ * Splits a growing buffer into complete frames, returning the leftover tail.
+ *
+ * `maxFrameBytes` lets a caller tighten the cap - the pipe server allows only a
+ * hello-sized frame before a socket authenticates. `maxFrames` stops after that
+ * many frames so the caller can switch limits between them: the host writes its
+ * hello and its first real message back to back, and they can share one read.
+ */
+export function readFrames(
+  buffer: Buffer,
+  maxFrameBytes = MAX_FRAME_BYTES,
+  maxFrames = Infinity
+): { frames: unknown[]; rest: Buffer } {
   const frames: unknown[] = []
   let offset = 0
 
-  while (buffer.length - offset >= 4) {
+  while (frames.length < maxFrames && buffer.length - offset >= 4) {
     const length = buffer.readUInt32LE(offset)
 
     // A bogus length would otherwise have us buffer forever waiting for bytes
-    // that are never coming.
-    if (length > MAX_FRAME_BYTES) throw new Error(`Frame of ${length} bytes exceeds the limit`)
+    // that are never coming. Checked on the prefix alone, before any body
+    // bytes are held for it.
+    if (length > maxFrameBytes) throw new Error(`Frame of ${length} bytes exceeds the limit`)
     if (buffer.length - offset - 4 < length) break
 
     const body = buffer.subarray(offset + 4, offset + 4 + length)

@@ -177,19 +177,45 @@ export default function DownloadTable({
   /* Column resizing                                                   */
   /* ---------------------------------------------------------------- */
 
+  /** Tears down a drag still in progress; set while one is. */
+  const dragCleanup = useRef<(() => void) | null>(null)
+  // Unmounting mid-drag (the window switching views) would otherwise leave the
+  // window listeners attached and the cursor stuck on col-resize.
+  useEffect(() => () => dragCleanup.current?.(), [])
+
   const startResize = useCallback(
     (event: React.MouseEvent, id: ColumnId, startWidth: number) => {
       event.preventDefault()
       event.stopPropagation()
+      dragCleanup.current?.()
       const startX = event.clientX
+      let latest = startWidth
+      let frame = 0
 
       const move = (moveEvent: MouseEvent): void => {
-        setColumnWidth(id, startWidth + (moveEvent.clientX - startX))
+        latest = startWidth + (moveEvent.clientX - startX)
+        // Mousemove can fire several times per frame. Each store write swaps
+        // `settings`, which re-renders App and - through a new grid template -
+        // every visible row, so one commit per painted frame is all that helps.
+        if (!frame) {
+          frame = requestAnimationFrame(() => {
+            frame = 0
+            setColumnWidth(id, latest)
+          })
+        }
       }
-      const up = (): void => {
+      const cleanup = (): void => {
+        cancelAnimationFrame(frame)
+        frame = 0
         window.removeEventListener('mousemove', move)
         window.removeEventListener('mouseup', up)
         document.body.style.cursor = ''
+        dragCleanup.current = null
+      }
+      const up = (): void => {
+        // The cancelled frame may have held the final position.
+        if (latest !== startWidth) setColumnWidth(id, latest)
+        cleanup()
       }
 
       // The cursor is forced for the whole drag; otherwise it reverts the moment
@@ -197,6 +223,7 @@ export default function DownloadTable({
       document.body.style.cursor = 'col-resize'
       window.addEventListener('mousemove', move)
       window.addEventListener('mouseup', up)
+      dragCleanup.current = cleanup
     },
     [setColumnWidth]
   )
@@ -213,14 +240,17 @@ export default function DownloadTable({
       // hidden behind it would remove rows the user cannot see.
       if (document.querySelector('[role="dialog"]')) return
 
+      // Read through the refs: `rows` changes on every progress tick, and
+      // depending on it re-subscribed this listener four times a second.
       if (event.key === 'a' && (event.ctrlKey || event.metaKey)) {
         event.preventDefault()
-        selectAll(rows)
+        selectAll(rowsRef.current)
         return
       }
-      if (event.key === 'Delete' && selection.length > 0) {
+      const selected = selectionRef.current
+      if (event.key === 'Delete' && selected.length > 0) {
         event.preventDefault()
-        onDelete(selection)
+        onDeleteRef.current(selected)
         return
       }
       if (event.key === 'Escape') setSelection([])
@@ -228,7 +258,7 @@ export default function DownloadTable({
 
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [rows, selection, selectAll, setSelection, onDelete])
+  }, [selectAll, setSelection])
 
   /* ---------------------------------------------------------------- */
   /* Menus                                                             */
@@ -729,7 +759,10 @@ const GroupRow = memo(function GroupRow({
 
 async function patchQueue(ids: string[], queueId: string | null, errorMessage: string): Promise<void> {
   try {
-    for (const id of ids) await window.api.updateTask(id, { queueId })
+    // One call for the whole selection: main pauses, moves, persists and
+    // broadcasts once, instead of a round trip and a full re-sort per row
+    // that could stop halfway through the group.
+    await window.api.setTaskQueue(ids, queueId)
   } catch (err) {
     reportError(errorMessage, err)
   }

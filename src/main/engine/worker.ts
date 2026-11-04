@@ -337,6 +337,9 @@ async function attemptSegment(seg: Segment, ctx: SegmentContext): Promise<void> 
         discardRequestBody(res.body)
         throw new Error('Server reported a different resource size than the probe')
       }
+      if (ctx.expectedSize === null && total !== null) {
+        ctx.expectedSize = total
+      }
     }
 
     const reader = ReadableStream.from(res.body).getReader()
@@ -419,6 +422,9 @@ async function attemptSegment(seg: Segment, ctx: SegmentContext): Promise<void> 
 
     if (openEnded) {
       if (sliceBytesRead === 0 || res.statusCode === 200) {
+        break
+      }
+      if (requestedEnd >= 0 && sliceBytesRead < (requestedEnd - requestedStart + 1)) {
         break
       }
       if (ctx.expectedSize !== null && seg.position >= ctx.expectedSize) {

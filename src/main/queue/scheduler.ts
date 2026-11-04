@@ -142,6 +142,8 @@ export class Scheduler {
     }
 
     await this.persist()
+    this.deps.onQueues(this.queues)
+    this.deps.manager.applySettings()
     this.tick()
     return normalized
   }
@@ -183,6 +185,26 @@ export class Scheduler {
     }
     const target = this.queues.find((queue) => queue.id === nextQueueId)
     if (target && !target.taskIds.includes(taskId)) target.taskIds.push(taskId)
+    await this.persist()
+  }
+
+  /**
+   * `syncTaskQueue` for many tasks at once, with a single write. Moving a
+   * 500-file playlist used to persist queues.json 500 times.
+   */
+  async syncTaskQueues(taskIds: readonly string[], nextQueueId: string | null): Promise<void> {
+    if (nextQueueId && !this.queues.some((queue) => queue.id === nextQueueId)) {
+      throw new Error('That queue no longer exists')
+    }
+    const moving = new Set(taskIds)
+    for (const queue of this.queues) {
+      if (queue.id !== nextQueueId) queue.taskIds = queue.taskIds.filter((id) => !moving.has(id))
+    }
+    const target = this.queues.find((queue) => queue.id === nextQueueId)
+    if (target) {
+      const present = new Set(target.taskIds)
+      for (const id of taskIds) if (!present.has(id)) target.taskIds.push(id)
+    }
     await this.persist()
   }
 
@@ -251,8 +273,10 @@ export class Scheduler {
       ) this.feed(queue)
     }
 
-    if (this.fingerprint() !== before) void this.persist()
-    else this.deps.onQueues(this.queues)
+    if (this.fingerprint() !== before) {
+      void this.persist()
+      this.deps.onQueues(this.queues)
+    }
     this.deps.manager.applySettings()
   }
 
@@ -390,7 +414,7 @@ export class Scheduler {
    */
   private fingerprint(): string {
     return this.queues
-      .map((q) => `${q.id}:${q.running ? 1 : 0}:${q.oneTimeCompleted ? 1 : 0}:${q.lastResult}:${q.taskIds.length}:${q.taskIds.join(',')}`)
+      .map((q) => `${q.id}:${q.running ? 1 : 0}:${q.oneTimeCompleted ? 1 : 0}:${q.lastResult}:${q.maxConcurrent}:${q.speedLimit}:${q.taskIds.length}:${q.taskIds.join(',')}`)
       .join('|')
   }
 

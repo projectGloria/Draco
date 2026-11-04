@@ -65,6 +65,8 @@ const api: RendererApi = {
   importDownloads: () => ipcRenderer.invoke('tasks:import'),
   updateTask: (id: string, patch: TaskPatch) =>
     ipcRenderer.invoke('tasks:update', id, patch),
+  setTaskQueue: (ids: string[], queueId: string | null) =>
+    ipcRenderer.invoke('tasks:setQueue', ids, queueId),
   redownload: (id: string) => ipcRenderer.invoke('tasks:redownload', id),
   openFile: (id: string) => ipcRenderer.invoke('tasks:open', id),
   revealFile: (id: string) => ipcRenderer.invoke('tasks:reveal', id),

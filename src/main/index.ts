@@ -316,6 +316,9 @@ async function main(): Promise<void> {
         powerSaveBlocker.stop(powerSaveBlockerId)
         powerSaveBlockerId = null
       }
+      if (initialRestoreDone && (newlyDone > 0 || tasks.some((t) => t.queueId && (t.status === 'done' || t.status === 'error')))) {
+        ctx?.scheduler.refresh()
+      }
     },
     onFinalizationStage: flushTasks,
     onProgress: (updates) => {
@@ -969,7 +972,7 @@ async function handleHostMessageOnce(ctx: AppContext, message: HostMessage): Pro
         const task = handoffToTask(ctx, message, false)
         task.handoffId = message.requestId
         await commitBrowserTasks(ctx.manager, [task.id], flushTasks)
-        announce(task)
+        if (!message.bulk) announce(task)
         log.info(`took over ${task.filename}`)
         showMainWindow()
         return { ok: true, taken: true }

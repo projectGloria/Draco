@@ -53,6 +53,7 @@ export async function crawlSite(
   }
   const robots = options.respectRobots ? await loadRobots(start.origin, signal) : []
   const resources = new Map<string, SiteResource>()
+  const redirectMap = new Map<string, string>()
   const maxResources = Math.min(10_000, options.maxPages * 50)
   const tmpDir = await mkdtemp(join(tmpdir(), 'draco-crawler-'))
 
@@ -87,6 +88,9 @@ export async function crawlSite(
         try {
           if (!response.ok) return
           const final = new URL(response.url || canonical)
+          if (canonical !== withoutHash(final)) {
+            redirectMap.set(canonical, withoutHash(final))
+          }
           if (final.host !== start.host) {
             if (options.stayOnHost || isPrivateHost(final.hostname)) return
           }
@@ -137,6 +141,10 @@ export async function crawlSite(
 
     if (signal?.aborted) throw new Error('The site crawl was cancelled')
     const paths = new Map([...resources.values()].map((resource) => [resource.url, resource.relativePath]))
+    for (const [from, to] of redirectMap) {
+      const rel = paths.get(to)
+      if (rel && !paths.has(from)) paths.set(from, rel)
+    }
     return { resources: [...resources.values()], paths, tmpDir }
   } catch (err) {
     await rm(tmpDir, { recursive: true, force: true }).catch(() => {})
@@ -169,7 +177,8 @@ export function extractLinks(html: string, base: URL): Array<{ url: URL; kind: '
 export function resourceFor(url: URL, kind: 'page' | 'asset', primaryOrigin?: string): SiteResource {
   let pathname = safePathname(url.pathname)
   if (kind === 'page' && (pathname.endsWith('/') || !posix.extname(pathname))) pathname += pathname.endsWith('/') ? 'index.html' : '.html'
-  if (!pathname || pathname === '/') pathname = '/index.html'
+  if (kind === 'asset' && pathname.endsWith('/')) pathname += 'index.bin'
+  if (!pathname || pathname === '/') pathname = kind === 'page' ? '/index.html' : '/index.bin'
   if (url.search) {
     const extension = posix.extname(pathname)
     const hash = createHash('sha256').update(url.search).digest('hex').slice(0, 8)

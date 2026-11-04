@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useState } from 'react'
 import type { Queue, QueueCompletionAction, QueueMode } from '@shared/types'
 import { useApp } from '../store/app'
 import { reportError, toast } from '../store/toasts'
@@ -68,14 +68,12 @@ export default function SchedulerDialog({ onClose, initialQueueId }: { onClose()
   const [draft, setDraft] = useState<Queue>(() => initial ?? blankQueue())
 
   // Keep the editor pointed at a queue that still exists after a delete.
-  useEffect(() => {
-    if (selectedId === null) return
-    const found = queues.find((q) => q.id === selectedId)
-    if (!found) {
-      setSelectedId(queues[0]?.id ?? null)
-      setDraft(queues[0] ?? blankQueue())
-    }
-  }, [queues, selectedId])
+  // Adjusted during render: an effect painted one frame of the deleted queue's
+  // editor first. Converges in one pass - the replacement id is in `queues`.
+  if (selectedId !== null && !queues.some((q) => q.id === selectedId)) {
+    setSelectedId(queues[0]?.id ?? null)
+    setDraft(queues[0] ?? blankQueue())
+  }
 
   function pick(queue: Queue): void {
     setSelectedId(queue.id)
@@ -106,11 +104,17 @@ export default function SchedulerDialog({ onClose, initialQueueId }: { onClose()
     }
   }
 
+  // `tasks` changes on every progress tick, so this runs four times a second
+  // while the dialog is open. Lookups by id keep it linear instead of
+  // queue length x list length.
+  const members = new Map<string, (typeof tasks)[number]>()
+  for (const task of tasks) if (task.queueId === draft.id) members.set(task.id, task)
+  const ordered = new Set(draft.taskIds)
   const assigned = [
     ...draft.taskIds
-      .map((id) => tasks.find((task) => task.id === id && task.queueId === draft.id))
+      .map((id) => members.get(id))
       .filter((task): task is NonNullable<typeof task> => Boolean(task)),
-    ...tasks.filter((task) => task.queueId === draft.id && !draft.taskIds.includes(task.id))
+    ...[...members.values()].filter((task) => !ordered.has(task.id))
   ]
   const timed = draft.mode !== 'manual'
   const running = queues.find((queue) => queue.id === draft.id)?.running ?? false

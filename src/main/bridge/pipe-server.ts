@@ -40,6 +40,13 @@ export const PIPE_NAME = smokePipe ?? '\\\\.\\pipe\\draco'
 /** How long a socket gets to produce a valid hello frame. */
 const AUTH_TIMEOUT_MS = 5_000
 
+/**
+ * The largest frame a socket may send before it authenticates. The hello is
+ * `{"v":1,"secret":"<43 chars>"}`, well under 100 bytes; this leaves room for
+ * a longer secret and nothing more.
+ */
+const PRE_AUTH_MAX_FRAME_BYTES = 4 * 1024
+
 export interface BridgeHandlers {
   onMessage(message: HostMessage): Promise<HostReply>
 }
@@ -111,9 +118,13 @@ export class PipeServer {
 
   private attach(socket: Socket): void {
     this.sockets.add(socket)
-    // Annotated because `subarray` widens the backing store to ArrayBufferLike,
-    // which no longer assigns back to the ArrayBuffer that `alloc` inferred.
-    let buffer: Buffer = Buffer.alloc(0)
+    // Chunks are collected and joined only once a whole frame can be present.
+    // Concatenating on every 'data' event re-copied the growing buffer each
+    // time - quadratic, about 10 s of main-thread CPU for one 64 MiB frame.
+    let chunks: Buffer[] = []
+    let pendingBytes = 0
+    /** Bytes needed before parsing can make progress: a prefix, then its body. */
+    let needBytes = 4
     let dispatchChain = Promise.resolve()
     let authenticated = false
 
@@ -126,13 +137,35 @@ export class PipeServer {
     authTimer.unref?.()
 
     socket.on('data', (chunk: Buffer) => {
-      buffer = Buffer.concat([buffer, chunk])
+      chunks.push(chunk)
+      pendingBytes += chunk.length
+      // Nothing parseable yet, so nothing is copied.
+      if (pendingBytes < needBytes) return
 
-      let frames: unknown[]
+      let buffer = chunks.length === 1 ? chunks[0] : Buffer.concat(chunks, pendingBytes)
+      let frames: unknown[] = []
       try {
-        const result = readFrames(buffer)
-        frames = result.frames
-        buffer = result.rest
+        if (!authenticated) {
+          // One hello-sized frame only. Anything larger is refused on its
+          // length prefix, so an unauthenticated peer - any local process,
+          // since the pipe DACL is not user-scoped - cannot make us buffer it.
+          const hello = readFrames(buffer, PRE_AUTH_MAX_FRAME_BYTES, 1)
+          buffer = hello.rest
+          if (hello.frames.length === 1) {
+            if (!this.acceptHello(hello.frames[0])) {
+              log.warn('host connection presented an invalid hello; dropping it')
+              socket.destroy()
+              return
+            }
+            clearTimeout(authTimer)
+            authenticated = true
+          }
+        }
+        if (authenticated) {
+          const result = readFrames(buffer)
+          frames = result.frames
+          buffer = result.rest
+        }
       } catch (err) {
         // A malformed stream cannot be resynchronised - the length prefixes are
         // no longer trustworthy - so drop the connection and let it reconnect.
@@ -141,17 +174,12 @@ export class PipeServer {
         return
       }
 
-      if (!authenticated) {
-        if (frames.length === 0) return
-        if (!this.acceptHello(frames[0])) {
-          log.warn('host connection presented an invalid hello; dropping it')
-          socket.destroy()
-          return
-        }
-        clearTimeout(authTimer)
-        authenticated = true
-        frames = frames.slice(1)
-      }
+      chunks = buffer.length > 0 ? [buffer] : []
+      pendingBytes = buffer.length
+      // The next frame's declared size says how long to wait before parsing
+      // again. Its limit was already checked if the prefix is here; a prefix
+      // still arriving waits for its 4 bytes.
+      needBytes = pendingBytes >= 4 ? 4 + buffer.readUInt32LE(0) : 4
 
       for (const frame of frames) {
         dispatchChain = dispatchChain

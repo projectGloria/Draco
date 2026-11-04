@@ -97,7 +97,10 @@ export function withConfigDir(text: string, dir: string): string {
   const line = `-P ${dir.includes('"') ? `'${dir}'` : `"${dir}"`}`
   const isFlag = (token: string | undefined): boolean => token === '-P' || token === '--paths'
   const tokens = (l: string): string[] => { try { return tokenizeConfig(l) } catch { return [] } }
-  const active = lines.findIndex(l => { const t = tokens(l); return t.length === 2 && isFlag(t[0]) })
+  const active = lines.findIndex(l => {
+    const t = tokens(l)
+    return (t.length === 2 && isFlag(t[0])) || (t.length === 1 && (t[0].startsWith('--paths=') || t[0].startsWith('-P=')))
+  })
   if (active >= 0) lines[active] = line
   else {
     const example = lines.findIndex(l => /^\s*#\s*(-P|--paths)\s/.test(l))

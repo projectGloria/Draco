@@ -1,6 +1,7 @@
 import type { MediaVariant, RequestHeaders } from '../../shared/types.ts'
 import { fetchGuarded } from '../fetch-guard.ts'
 import { readResponseText } from '../response-limit.ts'
+import { isPrivateHost } from '../engine/create.ts'
 import { buildHeaders } from '../engine/probe.ts'
 
 export interface MpdSummary {
@@ -26,6 +27,18 @@ export function inspectMpd(xml: string): MpdSummary {
     else if (/fairplay|94ce86fb/i.test(declarations)) system = 'FairPlay DRM'
     else if (/clearkey|e2719d58/i.test(declarations)) system = 'ClearKey DRM'
     throw new Error(`${system} is protected and cannot be downloaded by Draco`)
+  }
+
+  for (const baseMatch of xml.matchAll(/<BaseURL\b[^>]*>([\s\S]*?)<\/BaseURL>/gi)) {
+    const raw = baseMatch[1].trim()
+    try {
+      const parsed = new URL(raw, 'https://placeholder.invalid')
+      if (parsed.protocol === 'file:' || parsed.protocol === 'data:' || (parsed.hostname && isPrivateHost(parsed.hostname))) {
+        throw new Error('DASH manifest specifies an invalid or private BaseURL')
+      }
+    } catch (e) {
+      if (e instanceof Error && e.message.includes('BaseURL')) throw e
+    }
   }
 
   const mpdTag = /<MPD\b([^>]*)>/i.exec(xml)?.[1] ?? ''

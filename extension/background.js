@@ -908,8 +908,11 @@ async function sendUrls(urls, referer) {
   if (unique.length === 1) {
     const url = unique[0]
     const cookie = await cookieHeaderFor(url)
+    const requestId = typeof newRequestId === 'function' ? newRequestId() : undefined
     const reply = await callHost({
       type: 'download',
+      requestId,
+      handoffExpiresAt: Date.now() + (typeof HANDOFF_DEADLINE_MS !== 'undefined' ? HANDOFF_DEADLINE_MS : 3000),
       url,
       referer,
       cookie: cookie || undefined,
@@ -1127,6 +1130,13 @@ chrome.webRequest.onBeforeSendHeaders.addListener(
  * API path, a signed CDN link. The response headers say what it really is, and
  * observing those catches everything the URL patterns miss.
  */
+chrome.webRequest.onErrorOccurred?.addListener(
+  (details) => {
+    requestContexts.delete(details.requestId)
+  },
+  { urls: ['<all_urls>'] }
+)
+
 chrome.webRequest.onHeadersReceived.addListener(
   (details) => {
     if (details.tabId < 0) return

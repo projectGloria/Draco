@@ -325,6 +325,7 @@ export class HlsRunner implements Runner {
     this.deps.onUpdate(this.task)
 
     if (this.task.youtube && this.deps.refreshYouTube) {
+      this.task.youtube.pageUrl = this.task.youtube.pageUrl ?? this.task.url
       this.task.url = await this.deps.refreshYouTube(this.task, false)
       if (this.task.youtube.audioFormatId) {
         this.task.audioUrl = await this.deps.refreshYouTube({
@@ -1063,7 +1064,9 @@ export class HlsRunner implements Runner {
       const video = this.tracks.find((track) => track.role === 'video')
       const fallback = await uniquePath(
         this.task.dir,
-        this.task.filename.replace(/\.([a-z0-9]+)$/i, video?.initSegment ? '.mp4' : '.ts')
+        /\.[a-z0-9]+$/i.test(this.task.filename)
+          ? this.task.filename.replace(/\.[a-z0-9]+$/i, video?.initSegment ? '.mp4' : '.ts')
+          : this.task.filename + (video?.initSegment ? '.mp4' : '.ts')
       )
       try {
         const handle = await open(this.joinedVideoPath, 'w')

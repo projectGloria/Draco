@@ -186,3 +186,36 @@ describe('queue execution', () => {
     deepStrictEqual(moveQueueItem(['a', 'b', 'c'], 'a', 'c'), ['b', 'c', 'a'])
   })
 })
+
+describe('batch queue moves', () => {
+  it('moves many tasks between queues with a single persist', async () => {
+    let saves = 0
+    const manager = new DownloadManager({
+      getSettings: () => ({
+        maxConcurrentTasks: 1, maxConnectionsPerTask: 1, minSplitSize: 1024, retryLimit: 1, timeoutMs: 1000,
+        speedLimit: null, proxyUrl: null, hostConnectionLimits: [], quotaBytes: null, quotaWindowMinutes: 60,
+        antivirusProgram: null, antivirusArgs: [], antivirusTimeoutSeconds: 1
+      }),
+      onTasks: () => {}, onProgress: () => {}
+    })
+    const scheduler = new Scheduler({
+      manager, onQueues: () => {}, saveQueues: async () => { saves++ },
+      onPending: () => {}, onExitRequested: () => {}
+    })
+    scheduler.load(sanitizeQueues([
+      { id: 'a', name: 'A', taskIds: ['1', '2', '3'] },
+      { id: 'b', name: 'B', taskIds: ['9', '2'] }
+    ]))
+    cleanups.push(async () => { scheduler.stop(); await manager.shutdown() })
+
+    await scheduler.syncTaskQueues(['1', '2', '3'], 'b')
+    strictEqual(saves, 1)
+    const byId = new Map(scheduler.list().map((queue) => [queue.id, queue.taskIds]))
+    deepStrictEqual(byId.get('a'), [])
+    // Already-present ids keep their place; new ones append in the given order.
+    deepStrictEqual(byId.get('b'), ['9', '2', '1', '3'])
+
+    await scheduler.syncTaskQueues(['2', '9'], null)
+    deepStrictEqual(scheduler.list().find((queue) => queue.id === 'b')!.taskIds, ['1', '3'])
+  })
+})

@@ -33,6 +33,7 @@ export class MpdRunner implements Runner {
   private mediaSeconds = 0
   private lastProgressAt = 0
   private policyError: string | null = null
+  private runStartedAt = Date.now()
 
   constructor(task: DownloadTask, context: RunnerContext) {
     this.task = task
@@ -115,7 +116,7 @@ export class MpdRunner implements Runner {
     const elapsed = (now - oldest.t) / 1000
     if (elapsed >= 0.25) this.task.speed = Math.max(0, (this.task.received - oldest.received) / elapsed)
     if (this.durationSeconds && this.mediaSeconds > 0) {
-      const rate = this.mediaSeconds / Math.max(0.25, (now - (this.task.startedAt ?? now)) / 1000)
+      const rate = this.mediaSeconds / Math.max(0.25, (now - this.runStartedAt) / 1000)
       this.task.eta = rate > 0 ? Math.max(0, Math.round((this.durationSeconds - this.mediaSeconds) / rate)) : null
     }
 
@@ -175,6 +176,7 @@ export class MpdRunner implements Runner {
 
     this.task.status = 'downloading'
     this.task.detail = 'Downloading MPEG-DASH media…'
+    this.runStartedAt = Date.now()
     this.task.startedAt = this.task.startedAt ?? Date.now()
     this.lastProgressAt = Date.now()
     this.task.connections = 1
@@ -210,7 +212,7 @@ export class MpdRunner implements Runner {
     this.task.completedAt = Date.now()
     this.task.detail = null
     this.task.speed = 0
-    this.task.eta = 0
+    this.task.eta = null
     this.outputPath = null
   }
 
@@ -218,6 +220,7 @@ export class MpdRunner implements Runner {
     return new Promise((resolve, reject) => {
       this.assertSupportedPolicy()
       const args = ['-y', '-nostdin', '-hide_banner', '-loglevel', 'error']
+      args.push('-protocol_whitelist', 'http,https,tcp,tls')
       args.push('-rw_timeout', String(Math.max(1, Math.round(this.context.timeoutMs * 1000))))
       if (this.context.proxyUrl) args.push('-http_proxy', this.context.proxyUrl)
       const headerBlock = ffmpegHeaders(this.task.headers)

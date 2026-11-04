@@ -76,6 +76,9 @@ function standDown() {
   orphaned = true
   clearInterval(stateTimer)
   pageObserver?.disconnect()
+  removeEventListener('scroll', schedule, { capture: true, passive: true })
+  removeEventListener('resize', schedule, { passive: true })
+  document.removeEventListener('fullscreenchange', schedule)
   clearOverlays()
 }
 
@@ -120,6 +123,7 @@ function anchorFor(event) {
 addEventListener(
   'click',
   (event) => {
+    if (orphaned || !extensionAlive()) return
     if (event.defaultPrevented) return
     // Modified clicks mean "new tab", "save", "select" - all of them the user
     // asking the browser for something specific. Leave them alone.
@@ -174,6 +178,12 @@ addEventListener(
             if (result?.ok && result.taken) return
             if ((result?.ok && !result.pending) || Date.now() >= deadline) break
           }
+          await sendToExtension({
+            type: 'draco:handoff-status',
+            handoffId: reply.handoffId,
+            url,
+            expired: true
+          }).catch(() => {})
           replay()
           return
         }
@@ -962,8 +972,6 @@ pageObserver = new MutationObserver(() => {
 })
 pageObserver.observe(document.documentElement, { childList: true, subtree: true })
 
-addEventListener('scroll', schedule, { capture: true, passive: true })
-addEventListener('resize', schedule, { passive: true })
 document.addEventListener('fullscreenchange', schedule)
 
 function saveOffset() {

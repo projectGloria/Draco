@@ -999,6 +999,8 @@ export interface RendererApi {
   /** Reads either format back, adding rows without starting them. */
   importDownloads(): Promise<number>
   updateTask(id: string, patch: TaskPatch): Promise<DownloadTask | null>
+  /** Moves tasks into a queue, or out of every queue with null, in one step. Resolves with how many moved. */
+  setTaskQueue(ids: string[], queueId: string | null): Promise<number>
   redownload(id: string): Promise<void>
   /** Both resolve false when the file is gone, having marked the task missing. */
   openFile(id: string): Promise<boolean>

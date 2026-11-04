@@ -457,6 +457,16 @@ async function readCliPath(): Promise<CliPathStatus> {
   return cliPathStatus(dir, reason).catch(() => ({ dir, unavailableReason: reason, onPath: false }))
 }
 
+function safeOpenDialog(options: Electron.OpenDialogOptions, parent?: BrowserWindow | null): Promise<Electron.OpenDialogReturnValue> {
+  const win = parent ?? BrowserWindow.getFocusedWindow() ?? getMainWindow()
+  return win ? dialog.showOpenDialog(win, options) : dialog.showOpenDialog(options)
+}
+
+function safeSaveDialog(options: Electron.SaveDialogOptions, parent?: BrowserWindow | null): Promise<Electron.SaveDialogReturnValue> {
+  const win = parent ?? BrowserWindow.getFocusedWindow() ?? getMainWindow()
+  return win ? dialog.showSaveDialog(win, options) : dialog.showSaveDialog(options)
+}
+
 export function registerIpc(ctx: AppContext): void {
   // When the handoff-window cap evicts a window, its pending request must go
   // with it, or the request lingers until the list cap evicts it instead.
@@ -551,8 +561,7 @@ export function registerIpc(ctx: AppContext): void {
       : all
     if (chosen.length === 0) throw new Error('There is nothing to export')
 
-    const window = getMainWindow()
-    const result = await dialog.showSaveDialog(window ?? new BrowserWindow({ show: false }), {
+    const result = await safeSaveDialog( {
       title: 'Export downloads',
       defaultPath: `draco-downloads-${new Date().toISOString().slice(0, 10)}.json`,
       filters: [
@@ -576,8 +585,7 @@ export function registerIpc(ctx: AppContext): void {
 
   /** Reads either format back. Imported rows are never started by themselves. */
   handle('tasks:import', async (): Promise<number> => {
-    const window = getMainWindow()
-    const result = await dialog.showOpenDialog(window ?? new BrowserWindow({ show: false }), {
+    const result = await safeOpenDialog( {
       title: 'Import downloads',
       properties: ['openFile'],
       filters: [
@@ -763,6 +771,42 @@ export function registerIpc(ctx: AppContext): void {
     persistTaskSnapshot(ctx)
     ctx.manager.emitTasks()
     return publicTask(task)
+  })
+
+  /**
+   * Moves many tasks into one queue (or out of all of them) as one operation.
+   *
+   * The renderer used to send one `tasks:update` per row, one after another,
+   * and each one ran a full task-list broadcast and a renderer re-sort - so a
+   * 500-file playlist cost 500 of each, and a failure partway left the group
+   * split across two queues. Same rules as the single-task path: active tasks
+   * are paused before they move, and restarted only when they leave queues.
+   */
+  handle('tasks:setQueue', async (ids: string[], queueId: string | null) => {
+    if (!Array.isArray(ids) || ids.length > 10_000) throw new Error('Invalid task list')
+    if (queueId !== null && typeof queueId !== 'string') throw new Error('Invalid queue')
+    if (queueId !== null && !ctx.scheduler.list().some((queue) => queue.id === queueId)) {
+      throw new Error('That queue no longer exists')
+    }
+    const moving = ids
+      .filter((id): id is string => typeof id === 'string')
+      .map((id) => ctx.manager.get(id))
+      .filter((task): task is DownloadTask => Boolean(task) && task!.queueId !== queueId)
+    if (moving.length === 0) return 0
+
+    const active = moving
+      .filter((task) => task.status === 'downloading' || task.status === 'probing' || task.status === 'queued')
+      .map((task) => task.id)
+    // One pause for the whole batch rather than one awaited pause per row.
+    if (active.length > 0) await ctx.manager.pause(active)
+    await ctx.scheduler.syncTaskQueues(moving.map((task) => task.id), queueId)
+    for (const task of moving) task.queueId = queueId
+    if (queueId === null && active.length > 0) ctx.manager.start(active)
+    ctx.scheduler.refresh()
+    persistTaskSnapshot(ctx)
+    // One broadcast, so one renderer re-sort.
+    ctx.manager.emitTasks()
+    return moving.length
   })
 
   handle('tasks:redownload', async (id: string) => {
@@ -1032,8 +1076,7 @@ export function registerIpc(ctx: AppContext): void {
   })
 
   handle('settings:chooseDirectory', async (current?: string) => {
-    const window = getMainWindow()
-    const result = await dialog.showOpenDialog(window ?? new BrowserWindow({ show: false }), {
+    const result = await safeOpenDialog( {
       properties: ['openDirectory', 'createDirectory'],
       defaultPath: current || getSettings().downloadDir
     })
@@ -1078,8 +1121,7 @@ export function registerIpc(ctx: AppContext): void {
   handle('shell:takePending', () => ctx.pendingOpens.splice(0, ctx.pendingOpens.length))
 
   handle('torrent:chooseFile', async (): Promise<string | null> => {
-    const window = getMainWindow()
-    const result = await dialog.showOpenDialog(window ?? new BrowserWindow({ show: false }), {
+    const result = await safeOpenDialog( {
       title: 'Open torrent file',
       properties: ['openFile'],
       filters: [

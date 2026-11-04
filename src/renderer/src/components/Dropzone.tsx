@@ -37,7 +37,9 @@ export default function Dropzone(): React.ReactElement {
         event.dataTransfer.dropEffect = 'copy'
       }}
       onDragLeave={(event) => {
-        if (event.currentTarget === event.target) setDragging(false)
+        if (!event.relatedTarget || !event.currentTarget.contains(event.relatedTarget as Node)) {
+          setDragging(false)
+        }
       }}
       onDrop={(event) => {
         event.preventDefault()

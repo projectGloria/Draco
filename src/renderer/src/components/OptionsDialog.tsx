@@ -64,11 +64,15 @@ export default function OptionsDialog({
   const draftRef = useRef(liveSettings)
   const [changes, setChanges] = useState<Partial<Settings>>({})
   const changesRef = useRef<Partial<Settings>>({})
+  const categories = useApp((state) => state.categories)
+  const persistCategories = useApp((state) => state.saveCategories)
+  const [categoriesDraft, setCategoriesDraft] = useState<Category[]>(categories)
+  const categoriesDirty = JSON.stringify(categoriesDraft) !== JSON.stringify(categories)
   const [saving, setSaving] = useState(false)
   const [confirmDiscard, setConfirmDiscard] = useState(false)
   const [validationError, setValidationError] = useState<TKey | null>(null)
   const t = useT()
-  const dirty = Object.keys(changes).length > 0
+  const dirty = Object.keys(changes).length > 0 || categoriesDirty
 
   const patchDraft = useCallback((patch: Partial<Settings>): void => {
     draftRef.current = { ...draftRef.current, ...patch }
@@ -86,7 +90,7 @@ export default function OptionsDialog({
   const requestClose = (): void => {
     if (saving) return
     if (document.activeElement instanceof HTMLElement) document.activeElement.blur()
-    const hasChanges = Object.keys(changesRef.current).length > 0
+    const hasChanges = Object.keys(changesRef.current).length > 0 || categoriesDirty
     if (hasChanges && !confirmDiscard) { setConfirmDiscard(true); return }
     if (hasChanges && confirmDiscard) { setConfirmDiscard(false); return }
     onClose()
@@ -95,12 +99,17 @@ export default function OptionsDialog({
   const apply = async (): Promise<void> => {
     if (saving) return
     if (document.activeElement instanceof HTMLElement) document.activeElement.blur()
-    if (Object.keys(changesRef.current).length === 0) { onClose(); return }
+    if (Object.keys(changesRef.current).length === 0 && !categoriesDirty) { onClose(); return }
     const error = validateDraft(draftRef.current)
     if (error) { setValidationError(error); return }
     setSaving(true)
     try {
-      if (!await persist(changesRef.current)) return
+      if (categoriesDirty) {
+        await persistCategories(categoriesDraft)
+      }
+      if (Object.keys(changesRef.current).length > 0) {
+        if (!await persist(changesRef.current)) return
+      }
       onClose()
     } catch (error) {
       reportError(t('settingsSaveFailed'), error)
@@ -149,7 +158,7 @@ export default function OptionsDialog({
           {tab === 'general' && <GeneralTab settings={draft} patch={patchDraft} />}
           {tab === 'connection' && <ConnectionTab settings={draft} patch={patchDraft} />}
           {tab === 'cookies' && <CookiesTab />}
-          {tab === 'categories' && <CategoriesTab />}
+          {tab === 'categories' && <CategoriesTab draft={categoriesDraft} setDraft={setCategoriesDraft} />}
           {tab === 'browser' && <BrowserTab settings={draft} patch={patchDraft} />}
           {tab === 'appearance' && <AppearanceTab />}
           {tab === 'tools' && <NecessaryToolsTab />}
@@ -711,6 +720,24 @@ function SiteCredentials(): React.ReactElement {
   )
 }
 
+/**
+ * A text field's draft that re-derives itself when the committed value moves.
+ *
+ * Adjusted during render rather than in an effect, which is React's documented
+ * pattern for this: an effect commits the stale text first and then renders
+ * again to correct it. Typing only touches the draft; the committed value
+ * changes when the field commits on blur, or when a save replaces settings.
+ */
+function useDraft<T>(committed: T, format: (value: T) => string): [string, (text: string) => void] {
+  const [previous, setPrevious] = useState(committed)
+  const [text, setText] = useState(() => format(committed))
+  if (!Object.is(previous, committed)) {
+    setPrevious(committed)
+    setText(format(committed))
+  }
+  return [text, setText]
+}
+
 function ConnectionTab({ settings, patch }: {
   settings: Settings
   patch: (change: Partial<Settings>) => void
@@ -719,24 +746,18 @@ function ConnectionTab({ settings, patch }: {
   const [limitText, setLimitText] = useState(
     settings.speedLimit ? String(Math.round(settings.speedLimit / 1024)) : ''
   )
-  const [ceilingText, setCeilingText] = useState(
-    settings.adaptiveConnectionCeiling ? String(settings.adaptiveConnectionCeiling) : ''
-  )
-  const [uploadText, setUploadText] = useState(
-    settings.uploadLimit ? String(Math.round(settings.uploadLimit / 1024)) : ''
-  )
-  const [ratioText, setRatioText] = useState(
-    settings.seedRatioLimit !== null ? String(settings.seedRatioLimit) : ''
-  )
-  const [seedMinutesText, setSeedMinutesText] = useState(
-    settings.seedTimeMinutes !== null ? String(settings.seedTimeMinutes) : ''
-  )
-  const [proxyText, setProxyText] = useState(settings.proxyUrl ?? '')
-  const [quotaText, setQuotaText] = useState(
-    settings.quotaBytes ? String(Math.round(settings.quotaBytes / (1024 * 1024))) : ''
-  )
-  const [hostLimitsText, setHostLimitsText] = useState(
-    settings.hostConnectionLimits.map((rule) => `${rule.host}=${rule.connections}`).join('\n')
+  // Each draft follows its committed value without an effect: see useDraft.
+  const [ceilingText, setCeilingText] = useDraft(settings.adaptiveConnectionCeiling, (v) => (v ? String(v) : ''))
+  const [uploadText, setUploadText] = useDraft(settings.uploadLimit, (v) => (v ? String(Math.round(v / 1024)) : ''))
+  const [ratioText, setRatioText] = useDraft(settings.seedRatioLimit, (v) => (v !== null ? String(v) : ''))
+  const [seedMinutesText, setSeedMinutesText] = useDraft(settings.seedTimeMinutes, (v) => (v !== null ? String(v) : ''))
+  const [proxyText, setProxyText] = useDraft(settings.proxyUrl, (v) => v ?? '')
+  const [quotaText, setQuotaText] = useDraft(settings.quotaBytes, (v) => (v ? String(Math.round(v / (1024 * 1024))) : ''))
+  // An array, so this re-derives when settings are replaced by a save - the
+  // same moment the old effect fired, since it compared by identity too.
+  const [hostLimitsText, setHostLimitsText] = useDraft(
+    settings.hostConnectionLimits,
+    (rules) => rules.map((rule) => `${rule.host}=${rule.connections}`).join('\n')
   )
 
   /** Keep incomplete edits in the local draft so the next field can complete the schedule. */
@@ -748,28 +769,6 @@ function ConnectionTab({ settings, patch }: {
     const empty = !next.startTime && !next.stopTime && next.bytesPerSecond <= 0
     return patch({ scheduledLimit: empty ? null : next })
   }
-
-  useEffect(() => setProxyText(settings.proxyUrl ?? ''), [settings.proxyUrl])
-  useEffect(() => {
-    setUploadText(settings.uploadLimit ? String(Math.round(settings.uploadLimit / 1024)) : '')
-  }, [settings.uploadLimit])
-  useEffect(() => {
-    setRatioText(settings.seedRatioLimit !== null ? String(settings.seedRatioLimit) : '')
-  }, [settings.seedRatioLimit])
-  useEffect(() => {
-    setSeedMinutesText(settings.seedTimeMinutes !== null ? String(settings.seedTimeMinutes) : '')
-  }, [settings.seedTimeMinutes])
-  useEffect(() => {
-    setCeilingText(
-      settings.adaptiveConnectionCeiling ? String(settings.adaptiveConnectionCeiling) : ''
-    )
-  }, [settings.adaptiveConnectionCeiling])
-  useEffect(() => {
-    setQuotaText(settings.quotaBytes ? String(Math.round(settings.quotaBytes / (1024 * 1024))) : '')
-  }, [settings.quotaBytes])
-  useEffect(() => {
-    setHostLimitsText(settings.hostConnectionLimits.map((rule) => `${rule.host}=${rule.connections}`).join('\n'))
-  }, [settings.hostConnectionLimits])
 
   return (
     <div className="space-y-4 max-h-[410px] overflow-y-auto pr-1">
@@ -1204,13 +1203,15 @@ function CookieVerdict({ result }: { result: CookieCheckResult }): React.ReactEl
 
 /* ------------------------------------------------------------------ */
 
-function CategoriesTab(): React.ReactElement {
-  const categories = useApp((s) => s.categories)
+function CategoriesTab({
+  draft,
+  setDraft
+}: {
+  draft: Category[]
+  setDraft: React.Dispatch<React.SetStateAction<Category[]>>
+}): React.ReactElement {
   const persistCategories = useApp((s) => s.saveCategories)
-  const [draft, setDraft] = useState<Category[]>(categories)
   const [selected, setSelected] = useState(0)
-
-  useEffect(() => setDraft(categories), [categories])
 
   const current = draft[selected]
 

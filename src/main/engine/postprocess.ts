@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process'
+import { killTree } from '../proc.ts'
 import { AbortedError } from './worker.ts'
 
 /** Wait for the process to release its output before cleanup or pause returns. */
@@ -10,7 +11,7 @@ export function runConversion(file: string, args: string[], signal: AbortSignal)
     let stderr = ''
     child.stderr?.on('data', (chunk: Buffer) => { stderr = (stderr + chunk.toString()).slice(-8192) })
     const onAbort = (): void => {
-      try { child.kill('SIGKILL') } catch {}
+      try { killTree(child) } catch {}
     }
     signal.addEventListener('abort', onAbort, { once: true })
     child.once('error', (error) => { failure = error })

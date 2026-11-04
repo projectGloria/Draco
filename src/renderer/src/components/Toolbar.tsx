@@ -43,7 +43,8 @@ export default function Toolbar({
   actions: ToolbarActions
 }): React.ReactElement {
   const toolbarState = useApp((s) => {
-    const selected = s.tasks.filter((t) => s.selection.includes(t.id))
+    const selSet = new Set(s.selection)
+    const selected = s.tasks.filter((t) => selSet.has(t.id))
     const canResume = selected.some((t) => !isBusy(t.status) && t.status !== 'done')
     const canPause = selected.some((t) => isBusy(t.status))
     const anyRunning = s.tasks.some((t) => isBusy(t.status))
@@ -99,7 +100,7 @@ export default function Toolbar({
       <Button
         icon={<InfoIcon />}
         label={t('details')}
-        disabled={selectionLength !== 1}
+        disabled={selectionLength === 0}
         onClick={actions.onDetails}
       />
 
