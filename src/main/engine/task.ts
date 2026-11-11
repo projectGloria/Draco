@@ -190,6 +190,8 @@ export class TaskRunner {
   private requestFullRange = false
   private sequentialRanges = false
   private pauseRequested = false
+  /** Set while finish() runs so tick() stops starting journal flushes. */
+  private finishing = false
 
   running = false
 
@@ -250,6 +252,7 @@ export class TaskRunner {
     let lastReceivedOnRestart = 0
 
     for (;;) {
+      this.finishing = false
       try {
         await this.run()
         await this.finish()
@@ -409,7 +412,7 @@ export class TaskRunner {
 
     const due =
       this.bytesSinceFlush >= FLUSH_EVERY_BYTES || now - this.lastFlush >= this.flushIntervalMs
-    if (due && now >= this.checkpointRetryAt) {
+    if (due && !this.finishing && now >= this.checkpointRetryAt) {
       void this.flushJournal(false).catch((error) => {
         this.checkpointRetryAt = Date.now() + 2000
         log.warn(`${this.task.filename}: resume checkpoint write failed: ${error instanceof Error ? error.message : String(error)}`)
@@ -603,7 +606,9 @@ export class TaskRunner {
    * clears the slate. Returns whether existing bytes were adopted.
    */
   private async restoreOrReset(size: number | null): Promise<boolean> {
-    const journal = await readJournal(this.journalPath)
+    // Only ENOENT means "no journal"; any other read error fails the task
+    // without touching the part file or journal.
+    const journal = await readJournal(this.journalPath, true)
     const part = await stat(this.partPath).catch(() => null)
 
     if (
@@ -721,6 +726,8 @@ export class TaskRunner {
       onBytes: (count) => {
         this.received += count
         this.bytesSinceFlush += count
+        // Progress means the server is serving this segment again.
+        this.busyRetries = 0
       }
     })
       .then(() => {
@@ -739,7 +746,9 @@ export class TaskRunner {
         this.fill()
       })
       .catch(async (err: Error) => {
-        seg.active = false
+        // A busy backoff keeps the slot held until the delay has elapsed.
+        const busyBackoff = err instanceof ServerBusyError && this.busyRetries < this.config.retryLimit
+        if (!busyBackoff) seg.active = false
         if (err instanceof AbortedError) return
 
         if (
@@ -753,7 +762,7 @@ export class TaskRunner {
               const now = Date.now()
               if (this.lastRefreshAt > 0 && now - this.lastRefreshAt < 5000) {
                 if (this.lastRefreshedUrl) {
-                  this.fatal = new UrlRefreshError(this.lastRefreshedUrl)
+                  if (!this.fatal) this.fatal = new UrlRefreshError(this.lastRefreshedUrl)
                   this.controller.abort()
                   return
                 }
@@ -777,7 +786,7 @@ export class TaskRunner {
               })
             }
             const refreshedUrl = await this.urlRefreshPromise
-            this.fatal = new UrlRefreshError(refreshedUrl)
+            if (!this.fatal) this.fatal = new UrlRefreshError(refreshedUrl)
             this.controller.abort()
             return
           } catch (refreshErr) {
@@ -809,6 +818,7 @@ export class TaskRunner {
             `backing off ${Math.round(waitMs / 1000)}s, cap now ${this.connectionCap}, refusal ${this.busyRetries}/${this.config.retryLimit}`
           )
           await delay(waitMs, this.controller.signal)
+          seg.active = false
           this.fill()
           return
         }
@@ -832,6 +842,7 @@ export class TaskRunner {
   }
 
   private async finish(): Promise<void> {
+    this.finishing = true
     await this.flushJournal(true)
     if (this.controller.signal.aborted) throw new AbortedError()
 
@@ -853,7 +864,15 @@ export class TaskRunner {
     if (this.task.expectedChecksum) {
       this.task.detail = 'Verifying checksum...'
       this.deps.onUpdate(this.task)
-      await verifyExpectedChecksum(this.partPath, this.task.expectedChecksum, this.controller.signal)
+      try {
+        await verifyExpectedChecksum(this.partPath, this.task.expectedChecksum, this.controller.signal)
+      } catch (error) {
+        if (error instanceof Error && error.message.startsWith('Checksum mismatch')) {
+          await rm(this.partPath, { force: true }).catch(() => {})
+          await removeJournal(this.journalPath).catch(() => {})
+        }
+        throw error
+      }
     }
 
     if (this.controller.signal.aborted) throw new AbortedError()
@@ -893,6 +912,7 @@ export class TaskRunner {
     // The payload is already safely at its final name. Journal cleanup is
     // recovery metadata, so a transient cleanup failure must not turn a finished
     // download into a visible error.
+    await this.flushPromise?.catch(() => {})
     await removeJournal(this.journalPath).catch(() => {})
     if (payloadPath !== sourcePath) await rm(sourcePath, { force: true }).catch(() => {})
 

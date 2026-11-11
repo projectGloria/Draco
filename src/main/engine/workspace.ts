@@ -34,7 +34,9 @@ export function taskWorkspaceDir(taskDir: string, taskId: string, tempDir?: stri
 
 /** The `.dracodl` a single ranged download accumulates into. */
 export function partPathFor(taskDir: string, filename: string, taskId: string, tempDir?: string): string {
-  return join(taskWorkspaceDir(taskDir, taskId, tempDir), filename + '.dracodl')
+  // Keyed on the task ID alone; `filename` is display-only and may change.
+  void filename
+  return join(taskWorkspaceDir(taskDir, taskId, tempDir), 'data.dracodl')
 }
 
 /** Suffixes that only ever belong to Draco's own intermediates. */
@@ -155,7 +157,11 @@ export async function migrateLegacyIntermediates(tasks: DownloadTask[], tempDir?
           : task.audioUrl && /\.a\.(?:[a-z0-9_-]+\.)?m4a\.dracodl(?:\.json|\.tmp)?$/i.test(name)
             ? task.id + '-a'
             : task.id
-        return { task, source, target: join(taskWorkspaceDir(task.dir, childId, tempDir), name) }
+        // The part file and its journal now use a fixed, filename-independent name.
+        const targetName = /\.dracodl(?:\.json|\.tmp|\.json\.tmp)?$/i.test(name)
+          ? 'data' + name.slice(name.toLowerCase().lastIndexOf('.dracodl'))
+          : name
+        return { task, source, target: join(taskWorkspaceDir(task.dir, childId, tempDir), targetName) }
       })
   })
   const owners = new Map<string, Set<string>>()

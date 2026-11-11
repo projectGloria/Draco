@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto'
-import { mkdir, readdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
+import { mkdir, open, readdir, readFile, rename, rm } from 'node:fs/promises'
 import { basename, dirname, join } from 'node:path'
 import type { ProbeResult, Segment } from '../../shared/types.ts'
 
@@ -38,7 +38,13 @@ export async function writeJournal(path: string, data: JournalData): Promise<voi
   // costing exactly the resume information the journal exists to hold.
   const tmp = `${path}.${randomUUID()}.tmp`
   try {
-    await writeFile(tmp, JSON.stringify(data), 'utf8')
+    const fh = await open(tmp, 'w')
+    try {
+      await fh.writeFile(JSON.stringify(data), 'utf8')
+      await fh.sync()
+    } finally {
+      await fh.close()
+    }
     await rename(tmp, path)
   } catch (err) {
     // On success the rename consumed the temp file; only clean up after a
@@ -48,9 +54,17 @@ export async function writeJournal(path: string, data: JournalData): Promise<voi
   }
 }
 
-export async function readJournal(path: string): Promise<JournalData | null> {
+export async function readJournal(path: string, strict = false): Promise<JournalData | null> {
+  let raw: string
   try {
-    const parsed = JSON.parse(await readFile(path, 'utf8')) as JournalData
+    raw = await readFile(path, 'utf8')
+  } catch (err) {
+    // Strict callers must tell "no journal" (ENOENT) from an unreadable one.
+    if (strict && (err as NodeJS.ErrnoException)?.code !== 'ENOENT') throw err
+    return null
+  }
+  try {
+    const parsed = JSON.parse(raw) as JournalData
     if (parsed?.version !== JOURNAL_VERSION ||
       typeof parsed.url !== 'string' || typeof parsed.finalUrl !== 'string' || typeof parsed.filename !== 'string' ||
       (parsed.size !== null && (!Number.isSafeInteger(parsed.size) || parsed.size < 0)) ||

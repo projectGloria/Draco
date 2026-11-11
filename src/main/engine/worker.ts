@@ -171,7 +171,7 @@ export async function runSegment(seg: Segment, ctx: SegmentContext): Promise<voi
       }
 
       attempt++
-      if (attempt >= ctx.retryLimit) throw err
+      if (attempt > ctx.retryLimit) throw err
 
       // Exponential backoff with jitter, or a fixed delay if disabled
       const baseDelay = ctx.exponentialBackoff ? 500 * 2 ** (attempt - 1) : 2000
