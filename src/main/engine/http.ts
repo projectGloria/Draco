@@ -47,7 +47,9 @@ export function setProxyUrl(next: string | null): void {
   dispatchers.clear()
 }
 
-export function getDispatcher(timeoutMs: number): Dispatcher {
+export function getDispatcher(requestedTimeoutMs: number): Dispatcher {
+  // 0 would disable undici's headers and body timeouts entirely.
+  const timeoutMs = Math.max(1, requestedTimeoutMs)
   const existing = dispatchers.get(timeoutMs)
   if (existing) {
     dispatchers.delete(timeoutMs)

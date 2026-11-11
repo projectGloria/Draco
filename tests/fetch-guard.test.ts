@@ -98,6 +98,32 @@ it('follows a real same-origin redirect with the shared dispatcher', async (t) =
   strictEqual(new URL(response.url).pathname, '/payload')
 })
 
+it('does not let the dispatcher follow a redirect before the guard sees it', async (t) => {
+  let secretHits = 0
+  const secret = createServer((_request, response) => {
+    secretHits++
+    response.writeHead(200).end('secret')
+  })
+  await new Promise<void>((resolve) => secret.listen(0, '127.0.0.1', resolve))
+  t.after(() => secret.close())
+  const secretPort = (secret.address() as AddressInfo).port
+  const source = createServer((_request, response) => {
+    response.writeHead(302, { location: `http://127.0.0.1:${secretPort}/secret` }).end()
+  })
+  await new Promise<void>((resolve) => source.listen(0, '127.0.0.1', resolve))
+  t.after(() => source.close())
+  const sourcePort = (source.address() as AddressInfo).port
+
+  await rejects(
+    fetchGuarded(`http://127.0.0.1:${sourcePort}/start`, {
+      pinHost: `127.0.0.1:${sourcePort}`,
+      headers: { Cookie: 'session=secret' }
+    }),
+    /redirect left the original host/
+  )
+  strictEqual(secretHits, 0)
+})
+
 it('streams an undici request across origins without forwarding captured secrets', async (t) => {
   let destinationCookie: string | undefined
   let destinationSecret: string | undefined
