@@ -1249,6 +1249,8 @@ export class DownloadManager {
       // A keep-alive burst is still a running download: it holds a connection,
       // spends the transfer budget and occupies a slot. Starting one on top of
       // a full complement would quietly exceed the limit the user set.
+      if (this.activeCount >= settings.maxConcurrentTasks) return
+      // One burst at a time; a second would not be a trickle.
       if ([...this.runners.values()].some((r) => r.task.isCatMode)) return
 
       // A queue's waiting items must not download around its concurrency/order.
@@ -1444,14 +1446,8 @@ async function reconcileWithJournal(task: DownloadTask, tempDir?: string): Promi
     const vSuffix = safeV ? `.v.${safeV}.mp4` : '.v.mp4'
     const aSuffix = safeA ? `.a.${safeA}.m4a` : '.a.m4a'
 
-    let vJournal = await readJournal(partPathFor(task.dir, task.filename + vSuffix, task.id + '-v', tempDir) + '.json')
-    if (!vJournal && vSuffix !== '.v.mp4') {
-      vJournal = await readJournal(partPathFor(task.dir, task.filename + '.v.mp4', task.id + '-v', tempDir) + '.json')
-    }
-    let aJournal = await readJournal(partPathFor(task.dir, task.filename + aSuffix, task.id + '-a', tempDir) + '.json')
-    if (!aJournal && aSuffix !== '.a.m4a') {
-      aJournal = await readJournal(partPathFor(task.dir, task.filename + '.a.m4a', task.id + '-a', tempDir) + '.json')
-    }
+    const vJournal = await readJournal(partPathFor(task.dir, task.filename + vSuffix, task.id + '-v', tempDir) + '.json')
+    const aJournal = await readJournal(partPathFor(task.dir, task.filename + aSuffix, task.id + '-a', tempDir) + '.json')
 
     task.received = 0
     task.segments = []

@@ -29,7 +29,7 @@ export function sanitizeFilename(name: string, fallback = 'download'): string {
     .filter((ch) => {
       const code = ch.codePointAt(0) ?? 0
       // Also drops DEL/C1 controls and format characters such as U+202E (RLO).
-      return code >= 32 && !(code >= 0x7f && code <= 0x9f) && !/\p{Cf}/u.test(ch)
+      return code >= 32 && !(code >= 0x7f && code <= 0x9f) && !(/\p{Cf}/u.test(ch) && code !== 0x200c && code !== 0x200d)
     })
     .join('')
 
@@ -254,9 +254,10 @@ export async function moveFile(src: string, dest: string): Promise<void> {
   }
 }
 
-/** Copies to `dest.part` and renames, so `dest` never holds a half-written file. */
+/** Copies to a temporary name and renames, so `dest` never holds a half-written file. */
 export async function copyAcrossVolumes(src: string, dest: string): Promise<void> {
-  const partial = dest + '.part'
+  // Named so the startup sweep recognises it if the process dies mid-copy.
+  const partial = `${dest}.dracodl.${randomUUID()}.tmp`
   try {
     await copyFile(src, partial)
     await rename(partial, dest)

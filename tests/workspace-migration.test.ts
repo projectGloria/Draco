@@ -91,3 +91,20 @@ it('keeps an existing destination fixed when restoring a task from an older vers
   strictEqual(restored.dirLocked, true)
   strictEqual(restored.dir, 'C:\\Chosen')
 })
+
+it('adopts a part and journal named after the file inside the hashed task directory', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'draco-workspace-'))
+  cleanups.push(dir)
+  const task = createTask({ url: 'https://example.test/clip.mp4', dir, filename: 'clip.mp4' })
+  const hashed = dirname(partPathFor(dir, task.filename, task.id))
+  await mkdir(hashed, { recursive: true })
+  const bytes = Buffer.from('previous layout bytes')
+  await writeFile(join(hashed, 'clip.mp4.dracodl'), bytes)
+  await writeFile(join(hashed, 'clip.mp4.dracodl.json'), JSON.stringify({ url: task.url }))
+
+  deepStrictEqual([...await migrateLegacyIntermediates([task])], [])
+  const current = partPathFor(dir, task.filename, task.id)
+  deepStrictEqual(await readFile(current), bytes)
+  strictEqual(JSON.parse(await readFile(current + '.json', 'utf8')).url, task.url)
+  strictEqual(await stat(join(hashed, 'clip.mp4.dracodl')).catch(() => null), null)
+})

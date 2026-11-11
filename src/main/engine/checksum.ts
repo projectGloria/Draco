@@ -1,6 +1,8 @@
 import { createHash } from 'node:crypto'
 import { createReadStream } from 'node:fs'
 
+export class ChecksumMismatchError extends Error {}
+
 /** Verify the bytes that will become the final file, before publishing them. */
 export async function verifyExpectedChecksum(
   path: string,
@@ -13,5 +15,5 @@ export async function verifyExpectedChecksum(
   const hash = createHash(algorithm)
   for await (const chunk of createReadStream(path, { signal })) hash.update(chunk)
   const actual = hash.digest('hex')
-  if (actual !== expected) throw new Error(`Checksum mismatch. Expected ${expected}, got ${actual}`)
+  if (actual !== expected) throw new ChecksumMismatchError(`Checksum mismatch. Expected ${expected}, got ${actual}`)
 }

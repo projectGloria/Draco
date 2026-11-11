@@ -84,7 +84,8 @@ export function intermediatePathsFor(
 /** Old filename-based paths are read only during migration; never use for cleanup. */
 function legacyIntermediatePathsFor(
   task: Pick<DownloadTask, 'dir' | 'filename' | 'audioUrl' | 'audioTracks' | 'youtube'>,
-  tempDir?: string
+  tempDir?: string,
+  taskId?: string
 ): { files: string[]; dirs: string[] } {
   const files = new Set<string>()
   const dirs = new Set<string>()
@@ -124,6 +125,19 @@ function legacyIntermediatePathsFor(
     }
   }
 
+  // The previous layout: already inside the hashed task directory, but named
+  // after the file. Those are renamed to the fixed `data.dracodl` names.
+  if (taskId !== undefined) {
+    const owned: Array<[string, string]> = [[taskId, task.filename]]
+    if (task.audioUrl) {
+      for (const stem of stems.slice(1)) owned.push([taskId + (stem.includes('.v.') ? '-v' : '-a'), stem])
+    }
+    for (const [id, stem] of owned) {
+      const hashed = taskWorkspaceDir(task.dir, id, tempDir)
+      for (const suffix of PART_SUFFIXES) files.add(join(hashed, stem + suffix))
+    }
+  }
+
   // The finished halves themselves, which live beside the destination because
   // that is where the merge reads them from.
   if (task.audioUrl) {
@@ -147,7 +161,7 @@ export async function migrateLegacyIntermediates(tasks: DownloadTask[], tempDir?
   const candidates = tasks.filter((task) =>
     task.status !== 'done' && task.status !== 'processing' && task.status !== 'scanning' && !task.finalizationStage && task.kind !== 'torrent'
   ).flatMap((task) => {
-    const legacy = legacyIntermediatePathsFor(task, tempDir)
+    const legacy = legacyIntermediatePathsFor(task, tempDir, task.id)
     return [...legacy.files, ...legacy.dirs]
       .filter((path) => isDracoIntermediate(basename(path)))
       .map((source) => {
@@ -163,6 +177,8 @@ export async function migrateLegacyIntermediates(tasks: DownloadTask[], tempDir?
           : name
         return { task, source, target: join(taskWorkspaceDir(task.dir, childId, tempDir), targetName) }
       })
+      // A file already at its current name needs no move (e.g. a download literally named "data").
+      .filter((item) => item.source.toLowerCase() !== item.target.toLowerCase())
   })
   const owners = new Map<string, Set<string>>()
   for (const item of candidates) {

@@ -14,7 +14,7 @@ import { AbortedError, HttpStatusError, NotResumableError, ServerBusyError, runS
 import { isFixedYouTubeResource, preparedYouTubeUrl, youtubeFormatId } from '../youtube-url.ts'
 import { ensureDownloadDirectory } from '../destination-path.ts'
 import { partPathFor } from './workspace.ts'
-import { verifyExpectedChecksum } from './checksum.ts'
+import { ChecksumMismatchError, verifyExpectedChecksum } from './checksum.ts'
 import { QUOTA_DETAIL_PREFIX } from '../../shared/quota.ts'
 
 /**
@@ -608,6 +608,8 @@ export class TaskRunner {
   private async restoreOrReset(size: number | null): Promise<boolean> {
     // Only ENOENT means "no journal"; any other read error fails the task
     // without touching the part file or journal.
+    // A failed read must not let teardown flush the previous run's segment map.
+    this.segmenter = null
     const journal = await readJournal(this.journalPath, true)
     const part = await stat(this.partPath).catch(() => null)
 
@@ -867,9 +869,11 @@ export class TaskRunner {
       try {
         await verifyExpectedChecksum(this.partPath, this.task.expectedChecksum, this.controller.signal)
       } catch (error) {
-        if (error instanceof Error && error.message.startsWith('Checksum mismatch')) {
+        if (error instanceof ChecksumMismatchError) {
           await rm(this.partPath, { force: true }).catch(() => {})
           await removeJournal(this.journalPath).catch(() => {})
+          // Teardown must not write the journal back for a file that is gone.
+          this.segmenter = null
         }
         throw error
       }
