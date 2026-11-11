@@ -26,7 +26,11 @@ export function sanitizeFilename(name: string, fallback = 'download'): string {
   // Control characters are filtered by codepoint: putting them in a regex
   // literal invites exactly the kind of source corruption this avoids.
   const printable = Array.from(name.trim())
-    .filter((ch) => (ch.codePointAt(0) ?? 0) >= 32)
+    .filter((ch) => {
+      const code = ch.codePointAt(0) ?? 0
+      // Also drops DEL/C1 controls and format characters such as U+202E (RLO).
+      return code >= 32 && !(code >= 0x7f && code <= 0x9f) && !/\p{Cf}/u.test(ch)
+    })
     .join('')
 
   const cleaned = printable
@@ -242,10 +246,22 @@ export async function moveFile(src: string, dest: string): Promise<void> {
     await rename(src, dest)
   } catch (err: any) {
     if (err && err.code === 'EXDEV') {
-      await copyFile(src, dest)
+      await copyAcrossVolumes(src, dest)
       await unlink(src)
     } else {
       throw err
     }
+  }
+}
+
+/** Copies to `dest.part` and renames, so `dest` never holds a half-written file. */
+export async function copyAcrossVolumes(src: string, dest: string): Promise<void> {
+  const partial = dest + '.part'
+  try {
+    await copyFile(src, partial)
+    await rename(partial, dest)
+  } catch (err) {
+    await unlink(partial).catch(() => {})
+    throw err
   }
 }

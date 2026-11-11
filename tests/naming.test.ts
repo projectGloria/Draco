@@ -1,9 +1,10 @@
 import { ok, rejects, strictEqual } from 'node:assert/strict'
-import { mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { basename, join } from 'node:path'
 import { after, before, describe, it } from 'node:test'
 import {
+  copyAcrossVolumes,
   decodeHeaderText,
   discardReservedPath,
   extensionOf,
@@ -39,6 +40,13 @@ describe('sanitizeFilename', () => {
     const bell = String.fromCodePoint(7)
     strictEqual(sanitizeFilename(`clip${bell} recording.mp4`), 'clip recording.mp4')
     strictEqual(sanitizeFilename(`a${String.fromCodePoint(0)}b.txt`), 'ab.txt')
+  })
+
+  it('drops format characters such as the right-to-left override, and DEL/C1 controls', () => {
+    const rlo = String.fromCodePoint(0x202e)
+    strictEqual(sanitizeFilename(`invoice${rlo}fdp.exe`), 'invoicefdp.exe')
+    strictEqual(sanitizeFilename(`a${String.fromCodePoint(0x200b)}b.txt`), 'ab.txt')
+    strictEqual(sanitizeFilename(`a${String.fromCodePoint(0x7f)}b${String.fromCodePoint(0x9f)}c.txt`), 'abc.txt')
   })
 
   it('escapes reserved device names, which fail at open() rather than at write', () => {
@@ -184,5 +192,27 @@ describe('moveFile', () => {
 
     strictEqual(await readFile(dest, 'utf8'), 'payload')
     strictEqual(await stat(src).then(() => true, () => false), false)
+  })
+})
+
+describe('copyAcrossVolumes (EXDEV fallback)', () => {
+  const exists = (p: string) => stat(p).then(() => true, () => false)
+
+  it('copies via dest.part and leaves no partial file behind', async () => {
+    const src = join(dir, 'xsrc.bin')
+    const dest = join(dir, 'xdest.bin')
+    await writeFile(src, 'payload', 'utf8')
+    await copyAcrossVolumes(src, dest)
+    strictEqual(await readFile(dest, 'utf8'), 'payload')
+    strictEqual(await exists(dest + '.part'), false)
+  })
+
+  it('unlinks the partial copy when the final rename fails', async () => {
+    const src = join(dir, 'fsrc.bin')
+    const dest = join(dir, 'fdest-is-a-directory')
+    await writeFile(src, 'payload', 'utf8')
+    await mkdir(dest)
+    await rejects(copyAcrossVolumes(src, dest))
+    strictEqual(await exists(dest + '.part'), false)
   })
 })

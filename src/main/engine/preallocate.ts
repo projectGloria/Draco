@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process'
-import { open, truncate } from 'node:fs/promises'
-import { parse } from 'node:path'
+import { open, stat, truncate } from 'node:fs/promises'
+import { join, parse } from 'node:path'
 import { promisify } from 'node:util'
 
 /**
@@ -94,6 +94,9 @@ export function volumeRootOf(path: string): string {
 
 const execFileAsync = promisify(execFile)
 
+/** Absolute, so a `fsutil.exe` planted in the working directory or PATH is never run. */
+const FSUTIL = join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'fsutil.exe')
+
 /** The real thing: fsutil and the filesystem. */
 export const systemPreallocateDeps: PreallocateDeps = {
   async run(file, args) {
@@ -101,8 +104,15 @@ export const systemPreallocateDeps: PreallocateDeps = {
     await execFileAsync(file, args, { windowsHide: true })
   },
   async create(path) {
-    const handle = await open(path, 'w')
-    await handle.close()
+    // `wx` never truncates. An existing empty file is fine; one with content is
+    // somebody's partial download and is refused rather than emptied.
+    try {
+      const handle = await open(path, 'wx')
+      await handle.close()
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException)?.code !== 'EEXIST') throw err
+      if ((await stat(path)).size > 0) throw err
+    }
   },
   truncate
 }
@@ -114,18 +124,33 @@ export async function preallocate(
 ): Promise<PreallocationMode> {
   if (!Number.isSafeInteger(size) || size <= 0) return 'none'
 
-  await deps.create(path)
+  try {
+    await deps.create(path)
+  } catch (err) {
+    // An existing file with content is left exactly as it is.
+    if ((err as NodeJS.ErrnoException)?.code === 'EEXIST') return 'none'
+    throw err
+  }
   const root = volumeRootOf(path)
 
   if (permitted.get(root) !== false) {
+    let extended = false
     try {
       // The range has to exist before it can be declared valid.
       await deps.truncate(path, size)
-      await deps.run('fsutil', ['file', 'setvaliddata', path, String(size)])
+      extended = true
+    } catch (err) {
+      // A full disk says nothing about privilege and must not be cached as such.
+      if ((err as NodeJS.ErrnoException)?.code === 'ENOSPC') throw err
+    }
+    try {
+      if (!extended) throw new Error('not extended')
+      await deps.run(FSUTIL, ['file', 'setvaliddata', path, String(size)])
       permitted.set(root, true)
       return 'valid-data'
     } catch {
-      permitted.set(root, false)
+      // Only fsutil itself failing counts as a refusal.
+      if (extended) permitted.set(root, false)
       // Hand the clusters back before marking the file sparse: the flag only
       // governs what is allocated from here on, so an extend left in place
       // would keep both the allocation and the zero-fill it implies.
@@ -137,19 +162,29 @@ export async function preallocate(
   // asking costs a process launch. Extend the file and let the first write to
   // each region allocate, which is what `none` has always meant.
   if (sparseSupported.get(root) === false) {
-    await deps.truncate(path, size).catch(() => {})
+    await deps.truncate(path, size).catch(rethrowIfNoSpace)
     return 'none'
   }
 
   try {
-    await deps.run('fsutil', ['sparse', 'setflag', path])
+    await deps.run(FSUTIL, ['sparse', 'setflag', path])
     sparseSupported.set(root, true)
-    await deps.truncate(path, size)
-    return 'sparse'
   } catch {
+    // Only fsutil itself failing counts as a refusal.
     sparseSupported.set(root, false)
     return 'none'
   }
+  try {
+    await deps.truncate(path, size)
+    return 'sparse'
+  } catch (err) {
+    rethrowIfNoSpace(err)
+    return 'none'
+  }
+}
+
+function rethrowIfNoSpace(err: unknown): void {
+  if ((err as NodeJS.ErrnoException)?.code === 'ENOSPC') throw err
 }
 
 /**
@@ -188,5 +223,5 @@ export async function clearSparseFlag(
   // `setvaliddata` worked here in this process, so `preallocate` never reached
   // the sparse branch for any file this run put on this volume.
   if (permitted.get(root) === true) return
-  await deps.run('fsutil', ['sparse', 'setflag', path, '0']).catch(() => {})
+  await deps.run(FSUTIL, ['sparse', 'setflag', path, '0']).catch(() => {})
 }
