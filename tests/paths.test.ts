@@ -76,7 +76,7 @@ describe('workspaceDir', () => {
     const second = partPathFor('C:\\Downloads', 'clip.mp4', 'second', 'C:\\Temp')
     ok(first.startsWith('C:\\Temp\\.draco-tasks\\'))
     ok(second.startsWith('C:\\Temp\\.draco-tasks\\'))
-    ok(first.endsWith('\\clip.mp4.dracodl'))
+    ok(first.endsWith('\\data.dracodl'))
     ok(first !== second)
     ok(partPathFor('D:\\Downloads', 'clip.mp4', 'first', 'C:\\Temp').startsWith('D:\\Downloads\\.draco-tasks\\'))
   })

@@ -202,7 +202,7 @@ describe('clearSparseFlag across a restart', () => {
     // state a freshly started process is in. The flag must still come off.
     const { deps, calls } = recordingDeps(true, false)
     await clearSparseFlag(path, deps)
-    deepStrictEqual(calls, [`fsutil sparse setflag ${path} 0`])
+    deepStrictEqual(calls, [`${join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'fsutil.exe')} sparse setflag ${path} 0`])
   })
 
   it('skips a volume that has refused the sparse flag', { skip: !win }, async () => {
