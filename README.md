@@ -308,6 +308,21 @@ npm run bench:list
 npm run verify:package
 ```
 
+### How to Release
+
+Installers are built by GitHub Actions ([`.github/workflows/build-installers.yml`](.github/workflows/build-installers.yml)) on a Windows runner.
+
+1. Bump `version` in `package.json` (the tag must match it, e.g. `1.0.0` → `v1.0.0`) and commit.
+2. Tag and push:
+   ```bash
+   git tag v1.0.0 && git push --tags
+   ```
+3. Download the installers:
+   - **Releases page** — a tag build creates a GitHub Release with the installers attached.
+   - **Actions tab** — every run (including manual *Run workflow* runs) uploads an `installers` artifact.
+
+Files produced: `Draco-<version>-windows-x64-setup.exe`, `Draco-<version>-windows-x64-portable.exe`, `Draco-CLI-<version>-windows-x64-setup.exe`, plus `SHA256SUMS.txt`.
+
 ---
 
 ## 🎨 Icon & Design Philosophy
