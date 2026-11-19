@@ -13,6 +13,7 @@ import {
 } from 'node:fs/promises'
 import { basename, join } from 'node:path'
 import type { DownloadTask, Segment } from '@shared/types'
+import { isPrivateHost } from '../engine/create.ts'
 import { fetchGuarded, headersForResource } from '../fetch-guard.ts'
 import { QuotaExceededError, type RateLimiter } from '../engine/limiter.ts'
 import { discardReservedPath, moveFile, uniquePath } from '../engine/naming.ts'
@@ -760,10 +761,12 @@ export class HlsRunner implements Runner {
           headers.range = `bytes=${byteRange.offset}-${byteRange.offset + byteRange.length - 1}`
         }
 
+        const allowPrivate = isPrivateHost(new URL(this.task.url).hostname)
         const res = await fetchGuarded(url, {
           headers,
           signal: this.controller.signal,
-          timeoutMs: this.config.timeoutMs
+          timeoutMs: this.config.timeoutMs,
+          allowPrivate
         })
 
         try {
@@ -837,10 +840,12 @@ export class HlsRunner implements Runner {
           await delay(backoff, this.controller.signal)
         }
         try {
+          const allowPrivate = isPrivateHost(new URL(this.task.url).hostname)
           const res = await fetchGuarded(key.url, {
             headers: headersForResource(key.url, this.task.url, buildHeaders(this.task.headers)),
             signal: this.controller.signal,
-            timeoutMs: this.config.timeoutMs
+            timeoutMs: this.config.timeoutMs,
+            allowPrivate
           })
 
           let candidate: Buffer

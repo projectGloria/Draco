@@ -77,6 +77,14 @@ function redirectTarget(url: URL, location: string, options: FetchGuardedOptions
   return target
 }
 
+function unwrapPrivateAddressError(err: unknown): never {
+  if (err && typeof err === 'object' && 'cause' in err) {
+    const cause = (err as { cause?: { code?: string; message?: string } }).cause
+    if (cause?.code === 'ERR_PRIVATE_ADDRESS') throw cause
+  }
+  throw err
+}
+
 export async function fetchGuarded(
   rawUrl: string | URL,
   options: FetchGuardedOptions = {}
@@ -87,18 +95,29 @@ export async function fetchGuarded(
   }
   if (options.requireHttps && url.protocol !== 'https:') throw new Error('This request requires HTTPS')
   if (options.allowPrivate === false && isPrivateHost(url.hostname)) throw new Error('Connecting to private network addresses is not allowed')
+  const initialIsPrivate = isPrivateHost(url.hostname)
+  const initialOrigin = url.origin
   let headers = { ...options.headers }
   const maxRedirects = options.maxRedirects ?? 8
 
   for (let hop = 0; ; hop++) {
     const requestHeaders = options.headersForHop?.(url, { ...headers }) ?? headers
-    const response = await fetch(url, {
-      method: options.method,
-      headers: requestHeaders,
-      redirect: 'manual',
-      signal: options.signal,
-      dispatcher: getDispatcher(options.timeoutMs ?? 30_000)
-    } as RequestInit)
+    const allowPrivateForHop =
+      options.allowPrivate === false
+        ? false
+        : hop === 0 || initialIsPrivate || url.origin === initialOrigin
+    let response: Response
+    try {
+      response = await fetch(url, {
+        method: options.method,
+        headers: requestHeaders,
+        redirect: 'manual',
+        signal: options.signal,
+        dispatcher: getDispatcher(options.timeoutMs ?? 30_000, { allowPrivate: allowPrivateForHop })
+      } as RequestInit)
+    } catch (err) {
+      unwrapPrivateAddressError(err)
+    }
 
     const location = response.status >= 300 && response.status < 400
       ? response.headers.get('location')
@@ -129,18 +148,29 @@ export async function requestGuarded(
   }
   if (options.requireHttps && url.protocol !== 'https:') throw new Error('This request requires HTTPS')
   if (options.allowPrivate === false && isPrivateHost(url.hostname)) throw new Error('Connecting to private network addresses is not allowed')
+  const initialIsPrivate = isPrivateHost(url.hostname)
+  const initialOrigin = url.origin
   let headers = { ...options.headers }
   const maxRedirects = options.maxRedirects ?? 8
 
   for (let hop = 0; ; hop++) {
     const requestHeaders = options.headersForHop?.(url, { ...headers }) ?? headers
-    const response = await request(url, {
-      method: (options.method ?? 'GET') as 'GET' | 'HEAD',
-      headers: requestHeaders,
-      signal: options.signal,
-      dispatcher: getDispatcher(options.timeoutMs ?? 30_000),
-      maxRedirections: 0
-    } as Parameters<typeof request>[1] & { maxRedirections: number })
+    const allowPrivateForHop =
+      options.allowPrivate === false
+        ? false
+        : hop === 0 || initialIsPrivate || url.origin === initialOrigin
+    let response: Awaited<ReturnType<typeof request>>
+    try {
+      response = await request(url, {
+        method: (options.method ?? 'GET') as 'GET' | 'HEAD',
+        headers: requestHeaders,
+        signal: options.signal,
+        dispatcher: getDispatcher(options.timeoutMs ?? 30_000, { allowPrivate: allowPrivateForHop }),
+        maxRedirections: 0
+      } as Parameters<typeof request>[1] & { maxRedirections: number })
+    } catch (err) {
+      unwrapPrivateAddressError(err)
+    }
 
     const rawLocation = response.statusCode >= 300 && response.statusCode < 400
       ? response.headers.location : undefined

@@ -134,7 +134,9 @@ async function fetchThumbnail(url: string): Promise<string | null> {
   const response = await fetchGuarded(url, {
     signal: AbortSignal.timeout(THUMBNAIL_TIMEOUT_MS),
     headers: { accept: 'image/*', 'user-agent': DEFAULT_USER_AGENT },
-    timeoutMs: THUMBNAIL_TIMEOUT_MS
+    timeoutMs: THUMBNAIL_TIMEOUT_MS,
+    allowPrivate: false,
+    requireHttps: true
   })
   try {
     if (!response.ok) return null

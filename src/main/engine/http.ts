@@ -1,4 +1,61 @@
+import dns, { type LookupAddress, type LookupAllOptions, type LookupOneOptions } from 'node:dns'
 import { Agent, ProxyAgent, interceptors, type Dispatcher } from 'undici'
+import { isPrivateHost } from './create.ts'
+
+export const PRIVATE_ADDRESS_ERROR = 'Connecting to private network addresses is not allowed'
+
+export type LookupFn = (
+  hostname: string,
+  options: LookupOneOptions | LookupAllOptions,
+  callback: (err: NodeJS.ErrnoException | null, address: string | LookupAddress[], family?: number) => void
+) => void
+
+/**
+ * Wraps a DNS lookup function so any resolved IPv4/IPv6 address classified as
+ * private/loopback/link-local/CGNAT/multicast by `isPrivateHost` is rejected
+ * before a TCP socket is opened (closing static DNS and DNS-rebinding SSRF).
+ */
+export function createSafeLookup(baseLookup: LookupFn = dns.lookup as unknown as LookupFn): LookupFn {
+  return (hostname, options, callback) => {
+    const opts = typeof options === 'function' ? {} : (options ?? {})
+    const cb = (typeof options === 'function' ? options : callback) as (
+      err: NodeJS.ErrnoException | null,
+      address: string | LookupAddress[],
+      family?: number
+    ) => void
+
+    if (isPrivateHost(hostname)) {
+      const err = new Error(PRIVATE_ADDRESS_ERROR) as NodeJS.ErrnoException
+      err.code = 'ERR_PRIVATE_ADDRESS'
+      cb(err, '')
+      return
+    }
+
+    baseLookup(hostname, opts, (err, address, family) => {
+      if (err) {
+        cb(err, address, family)
+        return
+      }
+      if (Array.isArray(address)) {
+        if (address.length === 0 || address.some((entry) => !entry?.address || isPrivateHost(entry.address))) {
+          const blocked = new Error(PRIVATE_ADDRESS_ERROR) as NodeJS.ErrnoException
+          blocked.code = 'ERR_PRIVATE_ADDRESS'
+          cb(blocked, [])
+          return
+        }
+        cb(null, address)
+        return
+      }
+      if (!address || isPrivateHost(address)) {
+        const blocked = new Error(PRIVATE_ADDRESS_ERROR) as NodeJS.ErrnoException
+        blocked.code = 'ERR_PRIVATE_ADDRESS'
+        cb(blocked, '')
+        return
+      }
+      cb(null, address, family)
+    })
+  }
+}
 
 /**
  * The shared connection pool.
@@ -13,10 +70,11 @@ import { Agent, ProxyAgent, interceptors, type Dispatcher } from 'undici'
  * interceptor composed onto the dispatcher.
  */
 
-const dispatchers = new Map<number, Dispatcher>()
+const dispatchers = new Map<string, Dispatcher>()
 const retiredDispatchers = new Set<Dispatcher>()
-const MAX_CACHED_DISPATCHERS = 8
+const MAX_CACHED_DISPATCHERS = 16
 let proxyUrl: string | null = null
+let customLookup: LookupFn | null = null
 /**
  * Defaults to 1280 (maxConcurrentTasks 20 x maxConnectionsPerTask 64),
  * and dynamically resizes when settings are loaded or saved.
@@ -28,6 +86,13 @@ function retire(dispatcher: Dispatcher): void {
   void dispatcher.close().catch(() => {}).finally(() => {
     retiredDispatchers.delete(dispatcher)
   })
+}
+
+/** Overrides the underlying DNS lookup (for tests). Pass null to restore `dns.lookup`. */
+export function setDnsLookup(lookup: LookupFn | null): void {
+  customLookup = lookup
+  for (const dispatcher of dispatchers.values()) retire(dispatcher)
+  dispatchers.clear()
 }
 
 /** Dynamically sizes the per-origin connection pool to match configured concurrency. */
@@ -47,15 +112,27 @@ export function setProxyUrl(next: string | null): void {
   dispatchers.clear()
 }
 
-export function getDispatcher(requestedTimeoutMs: number): Dispatcher {
+export function getDispatcher(
+  requestedTimeoutMs: number,
+  opts?: { allowPrivate?: boolean }
+): Dispatcher {
   // 0 would disable undici's headers and body timeouts entirely.
   const timeoutMs = Math.max(1, requestedTimeoutMs)
-  const existing = dispatchers.get(timeoutMs)
+  const allowPrivate = opts?.allowPrivate !== false
+  const key = `${timeoutMs}:${allowPrivate ? 'open' : 'guarded'}`
+  const existing = dispatchers.get(key)
   if (existing) {
-    dispatchers.delete(timeoutMs)
-    dispatchers.set(timeoutMs, existing)
+    dispatchers.delete(key)
+    dispatchers.set(key, existing)
     return existing
   }
+
+  const baseLookup = customLookup ?? (dns.lookup as unknown as LookupFn)
+  const connectOptions = !allowPrivate
+    ? { lookup: createSafeLookup(baseLookup) }
+    : customLookup
+      ? { lookup: customLookup }
+      : undefined
 
   const options = {
     // Must comfortably exceed maxConnectionsPerTask x maxConcurrentTasks, or
@@ -68,14 +145,15 @@ export function getDispatcher(requestedTimeoutMs: number): Dispatcher {
     keepAliveTimeout: 30_000,
     keepAliveMaxTimeout: 120_000,
     headersTimeout: timeoutMs,
-    bodyTimeout: timeoutMs
+    bodyTimeout: timeoutMs,
+    ...(connectOptions ? { connect: connectOptions } : {})
   }
   const base = proxyUrl
     ? new ProxyAgent({ uri: proxyUrl, ...options })
     : new Agent(options)
   const agent = base.compose(interceptors.redirect({ maxRedirections: 10 }))
 
-  dispatchers.set(timeoutMs, agent)
+  dispatchers.set(key, agent)
   // Editing request timeouts must not retain one connection pool per value
   // for the lifetime of the app. Retire idle entries without aborting transfers.
   while (dispatchers.size > MAX_CACHED_DISPATCHERS) {

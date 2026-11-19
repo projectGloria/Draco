@@ -204,15 +204,34 @@ export function validateUrl(raw: string, options: ValidateUrlOptions = {}): stri
  * without also pinning the socket to the address that was checked.
  */
 export function isPrivateHost(hostname: string): boolean {
-  const host = hostname.toLowerCase().replace(/^\[|\]$/g, '')
+  const host = hostname
+    .toLowerCase()
+    .replace(/^\[|\]$/g, '')
+    .split('%')[0]
+    .replace(/\.+$/, '')
   if (!host) return true
 
-  if (host === 'localhost' || host.endsWith('.localhost') || host.endsWith('.local')) return true
+  if (
+    host === 'localhost' ||
+    host.endsWith('.localhost') ||
+    host.endsWith('.local') ||
+    host.endsWith('.internal')
+  ) {
+    return true
+  }
 
-  // IPv6 loopback, unspecified, unique-local (fc00::/7) and link-local (fe80::/10).
-  if (host === '::1' || host === '::') return true
+  // IPv6 loopback, unspecified, unique-local (fc00::/7), link-local (fe80::/10), multicast (ff00::/8).
+  if (
+    host === '::1' ||
+    host === '::' ||
+    host === '0:0:0:0:0:0:0:1' ||
+    host === '0:0:0:0:0:0:0:0'
+  ) {
+    return true
+  }
   if (/^f[cd][0-9a-f]{2}:/i.test(host)) return true
   if (/^fe[89ab][0-9a-f]:/i.test(host)) return true
+  if (/^ff[0-9a-f]{2}:/i.test(host)) return true
   // An IPv4-mapped IPv6 address is still that IPv4 address.
   // WHATWG URL serialises these in hex (e.g. ::ffff:7f00:1 or ::ffff:c0a8:101).
   let candidate = host
