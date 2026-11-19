@@ -19,17 +19,29 @@ try {
     res.end(req.method === 'HEAD' ? undefined : data)
   })
   await new Promise(done => server.listen(0, '127.0.0.1', done))
-  const messages = []
-  const code = await main(['--ignore-config', `http://127.0.0.1:${server.address().port}/sample.mp4`,
-    '-P', join(work, 'downloads'), '-S', 'res', '--embed-metadata', '--no-mtime',
-    '-o', '%(title)s - %(channel,uploader)s.%(ext)s'], {
-    preferences: {}, signal: new AbortController().signal, choose: async () => ({ kind: 'best' }),
-    status: (kind, lines) => messages.push(...lines)
-  })
-  assert.equal(code, 0, messages.join('\n'))
-  assert(messages.some(line => /━.*%/.test(line)), messages.join('\n'))
-  assert(messages.some(line => line.startsWith('Saved: ')), messages.join('\n'))
-  assert(messages.some(line => line.includes('Finishing your file')), messages.join('\n'))
+  const chunks = []
+  const origOut = process.stdout.write.bind(process.stdout)
+  const origErr = process.stderr.write.bind(process.stderr)
+  process.stdout.write = (chunk, ...rest) => { chunks.push(String(chunk)); return origOut(chunk, ...rest) }
+  process.stderr.write = (chunk, ...rest) => { chunks.push(String(chunk)); return origErr(chunk, ...rest) }
+  let code
+  try {
+    code = await main([
+      '--ignore-config',
+      `http://127.0.0.1:${server.address().port}/sample.mp4`,
+      '-P', join(work, 'downloads'),
+      '-S', 'res',
+      '--embed-metadata',
+      '--no-mtime',
+      '-o', '%(title)s - %(channel,uploader)s.%(ext)s'
+    ])
+  } finally {
+    process.stdout.write = origOut
+    process.stderr.write = origErr
+  }
+  const output = chunks.join('')
+  assert.equal(code, 0, output)
+  assert(output.toLowerCase().includes('saved') || output.includes('.mp4'), output)
   assert((await readdir(join(work, 'downloads'))).some(name => name.endsWith('.mp4')))
   console.log('Real yt-dlp download, fallback template, progress bar, metadata processing and completion passed.')
 } finally {

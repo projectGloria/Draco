@@ -56,7 +56,10 @@ const settings: EngineSettings = {
   quotaWindowMinutes: 60,
   antivirusProgram: null,
   antivirusArgs: ['{file}'],
-  antivirusTimeoutSeconds: 120
+  antivirusTimeoutSeconds: 120,
+  checkDiskSpace: true,
+  exponentialBackoff: true,
+  seedTorrents: false
 }
 
 const dir = flags.get('dir') || process.cwd()
