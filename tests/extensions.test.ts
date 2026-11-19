@@ -670,4 +670,47 @@ describe('link interception security and fallback (F-01 / F-04)', () => {
     })
     strictEqual(hostPayloads.at(-1).cookie, 'lax_tok=L')
   })
+
+  it('draco:send-media accepts both /i/web/status/<id> and /i/status/<id> URLs (F-07d)', async () => {
+    const source = await readFile(resolve(root, 'extension', 'background.js'), 'utf8')
+    const onMessage = event()
+    const noop = event()
+    const mediaPayloads: any[] = []
+    const api = {
+      storage: {
+        local: { get: async () => ({}), set: async () => {}, remove: async () => {} },
+        session: { get: async () => ({}), set: async () => {}, remove: async () => {} },
+        onChanged: noop
+      },
+      downloads: { onCreated: noop },
+      runtime: {
+        onInstalled: noop,
+        onMessage,
+        sendNativeMessage: async (_host: string, message: any) => {
+          if (message.type === 'media') mediaPayloads.push(message)
+          return { ok: true, version: 'test' }
+        }
+      },
+      contextMenus: { onClicked: noop, removeAll: (cb: () => void) => cb(), create: () => {} },
+      webRequest: {
+        onBeforeRequest: { addListener: () => {} },
+        onBeforeSendHeaders: { addListener: () => {} },
+        onHeadersReceived: { addListener: () => {} }
+      },
+      tabs: { onRemoved: noop, onUpdated: noop, onActivated: noop, query: async () => [], sendMessage: async () => {} },
+      action: { setBadgeText: async () => {}, setIcon: async () => {}, setTitle: async () => {} },
+      cookies: { getAll: async () => [] }
+    }
+    runInNewContext(source, { chrome: api, URL, setTimeout, clearTimeout, navigator: { userAgent: 'test' }, console })
+
+    for (const url of ['https://x.com/i/web/status/1234567890?s=20', 'https://x.com/i/status/9876543210']) {
+      const reply = await new Promise<any>((done) =>
+        onMessage.listener!({ type: 'draco:send-media', mediaUrl: url }, { tab: { id: 1, url } }, done)
+      )
+      strictEqual(reply.ok, true, `expected ok for ${url}, got ${JSON.stringify(reply)}`)
+    }
+    strictEqual(mediaPayloads.length, 2)
+    strictEqual(mediaPayloads[0].pageUrl, 'https://x.com/i/web/status/1234567890')
+    strictEqual(mediaPayloads[1].pageUrl, 'https://x.com/i/status/9876543210')
+  })
 })

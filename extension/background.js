@@ -1479,11 +1479,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         }
         if (/(^|\.)(x\.com|twitter\.com)$/i.test(new URL(tab?.url ?? 'about:blank').hostname)) {
           const page = new URL(tab.url)
-          if (!/^\/[A-Za-z0-9_]{1,15}\/status\/\d+(?:\/|$)/i.test(page.pathname)) {
+          const match = /^\/(?:[A-Za-z0-9_]{1,15}|i(?:\/web)?)\/status\/\d+(?:\/|$)/i.exec(page.pathname)
+          if (!match) {
             sendResponse({ ok: false, error: 'Open the X post, or click Draco on its video in the feed.' })
             return
           }
-          const postUrl = `${page.origin}${page.pathname.match(/^\/[A-Za-z0-9_]{1,15}\/status\/\d+/i)[0]}`
+          const postUrl = `${page.origin}${match[0].replace(/\/$/, '')}`
           const cookie = await cookieHeaderFor(postUrl)
           const reply = await callHost({
             type: 'media', pageUrl: postUrl, pageTitle: '', mediaUrl: postUrl,

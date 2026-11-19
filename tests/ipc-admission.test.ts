@@ -13,6 +13,7 @@ import { mapConcurrent } from '../src/main/engine/concurrency.ts'
 import { isSupportedYouTubeUrl } from '../src/main/youtube-url.ts'
 import { isPlaylistUrl } from '../src/main/youtube-playlist.ts'
 import { publicTask, publicTasks } from '../src/main/public-task.ts'
+import { xPostUrl } from '../src/shared/x-post.ts'
 import type { DownloadTask, NewDownload } from '../src/shared/types.ts'
 
 function fixture(overrides: Record<string, unknown> = {}) {
@@ -20,13 +21,25 @@ function fixture(overrides: Record<string, unknown> = {}) {
   const code = stripTypeScriptTypes(source).replace(/^import[\s\S]*?from ['"][^'"]+['"]\s*$/gm, '').replace(/^export /gm, '')
   const handlers = new Map<string, (...args: any[]) => Promise<any>>()
   const tasks: DownloadTask[] = []
+  const addCalls: Array<{ task: DownloadTask; autoStart: boolean }> = []
+  let emitTasksCalls = 0
+  const syncTaskQueuesCalls: Array<{ ids: readonly string[]; queueId: string | null }> = []
   const ctx = {
     manager: {
-      add(task: DownloadTask) { tasks.push(task) },
+      add(task: DownloadTask, autoStart = true) { tasks.push(task); addCalls.push({ task, autoStart }) },
       get(id: string) { return tasks.find((task) => task.id === id) }, list: () => tasks,
-      emitTasks() {},
+      emitTasks() { emitTasksCalls++ },
       async remove(ids: string[]) { for (let i = tasks.length - 1; i >= 0; i--) if (ids.includes(tasks[i].id)) tasks.splice(i, 1) }
-    }, scheduler: { list: () => [] }, pendingHandoffs: [] as any[], handoffCommits: new Map(), media: [] as any[]
+    },
+    scheduler: {
+      list: () => [],
+      async syncTaskQueues(ids: readonly string[], queueId: string | null) {
+        syncTaskQueuesCalls.push({ ids, queueId })
+      }
+    },
+    pendingHandoffs: [] as any[],
+    handoffCommits: new Map(),
+    media: [] as any[]
   }
   const sandbox = {
     logger: () => ({ info() {}, warn() {}, error() {} }),
@@ -35,14 +48,17 @@ function fixture(overrides: Record<string, unknown> = {}) {
     getSettings: () => ({ downloadDir: 'C:\\Downloads', defaultCategoryId: null, showProgressWindow: false }), getCategories: () => [],
     randomUUID, dirname, join, AbortController, createTask, filenameForKind, kindForUrl, validateUrl, sanitizeFilename,
     normalizeDownloadDirectory, directoryFor, publicTask, publicTasks,
-    mapConcurrent, isSupportedYouTubeUrl, isPlaylistUrl,
+    mapConcurrent, isSupportedYouTubeUrl, isPlaylistUrl, xPostUrl,
+    constants: { F_OK: 0 },
+    access: async () => { throw new Error('ENOENT') },
+    broadcast() {},
     persistTasks() {}, send() {}, closeHandoffWindow() {},
     ...overrides
   }
-  const api = runInNewContext(code + '\n({ registerIpc, expandPlaylist, cancelPlaylistExpansion, placeTask })', sandbox)
+  const api = runInNewContext(code + '\n({ registerIpc, expandPlaylist, cancelPlaylistExpansion, placeTask, prepareTaskInput })', sandbox)
   api.registerIpc(ctx)
   const call = (channel: string, ...args: any[]) => handlers.get(channel)!({}, ...args)
-  return { api, ctx, tasks, call }
+  return { api, ctx, tasks, call, addCalls, syncTaskQueuesCalls, getEmitTasksCalls: () => emitTasksCalls }
 }
 
 it('rejects an invalid later batch item without adding its valid prefix', async () => {
@@ -148,4 +164,53 @@ it('rejects active renames without applying their description patch', async () =
   f.tasks.push(task)
   await rejects(f.call('tasks:update', task.id, { filename: 'changed.mp4', description: 'Changed' }), /Pause the download/)
   strictEqual(task.description, 'Original')
+})
+
+it('tasks:redownload respects queue membership and preserves dirLocked (F-07a)', async () => {
+  const f = fixture()
+  const task = createTask({ url: 'https://example.com/file.mp4', dir: 'C:\\Downloads', queueId: 'nightly', filename: 'file.mp4' })
+  task.dirLocked = false
+  f.tasks.push(task)
+
+  await f.call('tasks:redownload', task.id)
+  strictEqual(f.tasks.length, 1)
+  strictEqual(f.addCalls.length, 1)
+  strictEqual(f.addCalls[0].autoStart, false, 'queued task must not autoStart on redownload')
+  strictEqual(f.tasks[0].dirLocked, false, 'unlocked task must not become dirLocked on redownload')
+  strictEqual(f.syncTaskQueuesCalls.length, 1, 'redownloaded queued task must sync queue membership')
+  deepStrictEqual(Array.from(f.syncTaskQueuesCalls[0].ids), [f.tasks[0].id])
+  strictEqual(f.syncTaskQueuesCalls[0].queueId, 'nightly')
+})
+
+it('openable marks missing file through manager.emitTasks so it persists and notifies progress windows (F-07b)', async () => {
+  const f = fixture()
+  const task = createTask({ url: 'https://example.com/gone.zip', dir: 'C:\\Downloads', filename: 'gone.zip' })
+  task.status = 'done'
+  f.tasks.push(task)
+
+  const opened = await f.call('tasks:open', task.id)
+  strictEqual(opened, false)
+  strictEqual(task.status, 'missing')
+  strictEqual(f.getEmitTasksCalls(), 1, 'openable must call ctx.manager.emitTasks()')
+})
+
+it('prepareTaskInput resolves X/Twitter post URLs via resolveMediaPage (F-07c)', async () => {
+  let resolvedUrl = ''
+  const f = fixture({
+    resolveMediaPage: async (url: string) => {
+      resolvedUrl = url
+      return {
+        id: '1234567890',
+        title: 'Tweet Clip',
+        thumbnailUrl: 'https://pbs.twimg.com/thumb.jpg',
+        variants: [{ url: 'https://video.twimg.com/ext_tw_video/123.mp4', height: 720, container: 'mp4' }]
+      }
+    }
+  })
+
+  const prepared = await f.api.prepareTaskInput({ url: 'https://x.com/alice/status/1234567890?s=20' })
+  strictEqual(resolvedUrl, 'https://x.com/alice/status/1234567890')
+  strictEqual(prepared.url, 'https://video.twimg.com/ext_tw_video/123.mp4')
+  strictEqual(prepared.sourceUrl, 'https://x.com/alice/status/1234567890')
+  strictEqual(prepared.filename, 'Tweet Clip.mp4')
 })

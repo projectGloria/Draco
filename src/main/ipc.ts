@@ -42,6 +42,7 @@ import { couldBeHtmlPageUrl, isSupportedMediaPageUrl } from './media-url.ts'
 import { getToolStatus, updateTool } from './tools.ts'
 import { checkForUpdates } from './update.ts'
 import { chosenYouTubeUrls, isSupportedYouTubeUrl } from './youtube-url.ts'
+import { xPostUrl } from '../shared/x-post.ts'
 import { getYouTubePrimeStatus, resolveMediaPage, resolvePlaylist, resolveYouTube } from './youtube.ts'
 import { MAX_PLAYLIST_ENTRIES, isPlaylistUrl, singleVideoUrl, type PlaylistEntry } from './youtube-playlist.ts'
 import { iconForExtension, iconForSite } from './icons.ts'
@@ -67,7 +68,6 @@ import {
   persistTasks
 } from './store.ts'
 import {
-  broadcast,
   closeHandoffWindow,
   setHandoffEvictListener,
   createProgressWindow,
@@ -374,6 +374,26 @@ export async function prepareTaskInput(input: NewDownload): Promise<NewDownload>
   const url = validateUrl(input.url)
   if (input.youtube || input.kind === 'torrent') return { ...input, url }
   if (isPlaylistUrl(url)) throw new Error('Choose videos from the playlist dialog before adding this link')
+  const postUrl = xPostUrl(url)
+  if (postUrl) {
+    const resolved = await resolveMediaPage(postUrl, { ...input.headers, referer: input.headers?.referer ?? postUrl })
+    const variant = pickPlaylistVariant(resolved.variants, null, false) ?? resolved.variants[0]
+    if (!variant?.url) throw new Error('No downloadable media was found for this X post')
+    const ext =
+      variant.container ||
+      (variant.url.match(/\.([a-z0-9]{2,5})(?:[?#]|$)/i)?.[1]?.toLowerCase() ?? 'mp4')
+    return {
+      ...input,
+      url: variant.url,
+      sourceUrl: postUrl,
+      thumbnailUrl: input.thumbnailUrl ?? resolved.thumbnailUrl,
+      filename: input.filename ?? `${resolved.title}.${ext}`,
+      audioUrl: variant.audioUrl ?? null,
+      audioTracks: variant.audioTracks,
+      expectedSize: variant.estimatedSize ?? input.expectedSize,
+      headers: { ...input.headers, referer: input.headers?.referer ?? postUrl }
+    }
+  }
   if (!isSupportedYouTubeUrl(url)) return { ...input, url }
 
   const resolved = await resolveYouTube(url, { ...input.headers, referer: input.headers?.referer ?? url })
@@ -819,9 +839,11 @@ export function registerIpc(ctx: AppContext): void {
     const fresh = placeTask({
       url: task.url,
       sourceUrl: task.sourceUrl,
-      // Preserve the original destination even if settings/categories changed.
+      // Preserve the original destination when explicitly locked or grouped.
       // placeTask appends groupFolder, which task.dir already contains.
-      dir: task.groupFolder ? dirname(task.dir) : task.dir,
+      dir: task.dirLocked || task.groupFolder
+        ? (task.groupFolder ? dirname(task.dir) : task.dir)
+        : undefined,
       thumbnailUrl: task.thumbnailUrl,
       categoryId: task.categoryId ?? undefined,
       groupId: task.groupId,
@@ -841,9 +863,14 @@ export function registerIpc(ctx: AppContext): void {
       torrentFiles: task.torrentFiles,
       youtube: task.youtube ? { pageUrl: task.youtube.pageUrl, videoFormatId: task.youtube.videoFormatId, audioFormatId: task.youtube.audioFormatId ?? null, height: task.youtube.height ?? null, role: task.youtube.role } : undefined
     })
+    fresh.dirLocked = task.dirLocked
+    const startNow = task.queueId === null
     await ctx.manager.remove([id], false)
-    ctx.manager.add(fresh, true)
-    announce(fresh)
+    ctx.manager.add(fresh, startNow)
+    if (fresh.queueId) {
+      await ctx.scheduler.syncTaskQueues([fresh.id], fresh.queueId)
+    }
+    if (startNow) announce(fresh)
   })
 
   /*
@@ -1296,7 +1323,7 @@ async function openable(ctx: AppContext, id: string): Promise<string | null> {
     await access(target, constants.F_OK)
   } catch {
     task.status = 'missing'
-    broadcast('tasks:changed', publicTasks(ctx.manager.list()))
+    ctx.manager.emitTasks()
     return null
   }
   return target

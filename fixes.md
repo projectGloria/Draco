@@ -59,7 +59,7 @@ This document tracks all bugs, glitches, performance issues, and download errors
 - **Fix**:
   1. Updated `intermediatePathsFor` in `workspace.ts` to include `.v.mp4`, `.a.m4a`, their itag-suffixed paths, and all `.draco-dash-temp` / `.draco-mux-temp` permutations in `task.dir` so that `manager.remove()` cleans up all intermediate files.
   2. Implemented `onProbed` in `dash.ts` child context to aggregate total size across video and audio runners and forward the probed event to `this.deps.onProbed(this.task)`.
-  3. Enhanced `adoptFinishedHalf` to verify `info.size === runner.task.expectedSize` when expected size is available.
+  3. Enhanced `adoptFinishedHalf` to verify no `.dracodl` part workspace remains and `info.size > 0` (removing the synthetic 88%/12% child `expectedSize` check that falsely rejected valid finished halves; see F-03).
 - **Verification**: Verified via TypeScript compilation and unit tests.
 
 ### Fix 1.2: `TaskRunner` / `Worker` open-ended sliced range stream EOF loop termination (HTTP 416 fix)
@@ -288,14 +288,14 @@ Exit code: 0 (Zero errors)
 ### 2. Node Test Runner Suite
 ```
 $ npm test
-ℹ tests 673
-ℹ suites 113
-ℹ pass 673
+ℹ tests 689
+ℹ suites 115
+ℹ pass 689
 ℹ fail 0
 ℹ cancelled 0
 ℹ skipped 0
 ℹ todo 0
-Exit code: 0 (All 673 tests pass)
+Exit code: 0 (All 689 tests pass)
 ```
 
 ### 3. Native Messaging Host
