@@ -120,11 +120,16 @@ function anchorFor(event) {
   return null
 }
 
+let replayingAnchor = null
+
 addEventListener(
   'click',
   (event) => {
     if (orphaned || !extensionAlive()) return
     if (event.defaultPrevented) return
+    if (replayingAnchor && event.composedPath().includes(replayingAnchor)) return
+    if (!event.isTrusted) return
+    if (!dracoState.active) return
     // Modified clicks mean "new tab", "save", "select" - all of them the user
     // asking the browser for something specific. Leave them alone.
     if (event.button !== 0 || event.ctrlKey || event.shiftKey || event.altKey || event.metaKey) {
@@ -151,14 +156,31 @@ addEventListener(
     event.preventDefault()
     event.stopPropagation()
 
-    const suggested = anchor.getAttribute('download') || ''
+    const suggested = (anchor.getAttribute('download') || '').trim()
+
+    const triggerAnchorClick = () => {
+      replayingAnchor = anchor
+      try {
+        anchor.click()
+      } finally {
+        setTimeout(() => {
+          if (replayingAnchor === anchor) replayingAnchor = null
+        }, 0)
+      }
+    }
 
     const replay = () => {
-      if (anchor.target === '_blank') {
-        window.open(url, '_blank')
-      } else {
-        location.href = url
+      if (anchor.target === '_blank' && !named) {
+        void sendToExtension({
+          type: 'draco:fallback-download',
+          url,
+          filename: suggested || undefined
+        }).then((res) => {
+          if (!res?.ok) triggerAnchorClick()
+        })
+        return
       }
+      triggerAnchorClick()
     }
 
     void sendToExtension({ type: 'draco:link-click', url, filename: suggested || undefined })

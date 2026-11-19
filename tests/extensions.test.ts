@@ -379,3 +379,295 @@ describe('confirmation ownership', () => {
     strictEqual(stored['dracoHandoff:7'], undefined)
   })
 })
+
+describe('link interception security and fallback (F-01 / F-04)', () => {
+  async function loadContentScript(opts: {
+    active: boolean
+    linkReply?: unknown
+  }) {
+    const source = await readFile(resolve(root, 'extension', 'content.js'), 'utf8')
+    const listeners = new Map<string, Array<(event: any) => void>>()
+    const sentMessages: any[] = []
+    const onMessage = event()
+    let windowOpenCalls = 0
+    const location = { href: 'https://app.example.com/dashboard', hostname: 'app.example.com', pathname: '/dashboard', search: '' }
+
+    class FakeAnchor {
+      href: string
+      target: string
+      private attrs: Map<string, string>
+      clicks = 0
+      constructor(href: string, download?: string | null, target = '') {
+        this.href = href
+        this.target = target
+        this.attrs = new Map()
+        if (download !== undefined && download !== null) this.attrs.set('download', download)
+      }
+      hasAttribute(name: string) { return this.attrs.has(name) }
+      getAttribute(name: string) { return this.attrs.has(name) ? this.attrs.get(name)! : null }
+      click() {
+        this.clicks++
+        // Simulate browser dispatching a synthetic (untrusted) click event
+        const synthetic = makeClickEvent(this, { isTrusted: false })
+        for (const fn of listeners.get('click') ?? []) fn(synthetic)
+      }
+    }
+
+    function makeClickEvent(anchor: FakeAnchor, overrides: Record<string, any> = {}) {
+      const ev = {
+        isTrusted: true,
+        defaultPrevented: false,
+        stopped: false,
+        button: 0,
+        ctrlKey: false,
+        shiftKey: false,
+        altKey: false,
+        metaKey: false,
+        composedPath: () => [anchor],
+        preventDefault() { this.defaultPrevented = true },
+        stopPropagation() { this.stopped = true },
+        ...overrides
+      }
+      return ev
+    }
+
+    const chromeApi = {
+      runtime: {
+        id: 'draco-test-id',
+        onMessage,
+        getURL: (p: string) => `chrome-extension://draco-test-id/${p}`,
+        sendMessage: async (msg: any) => {
+          sentMessages.push(msg)
+          if (msg.type === 'draco:page-state') {
+            return { running: opts.active, paused: false, active: opts.active, excluded: false }
+          }
+          if (msg.type === 'draco:list-media') return { media: [] }
+          if (msg.type === 'draco:link-click') return opts.linkReply ?? { taken: false }
+          if (msg.type === 'draco:fallback-download') return { ok: true }
+          return { ok: true }
+        }
+      },
+      storage: { local: { get: async () => ({}), set: async () => {} } }
+    }
+
+    const timers: Array<ReturnType<typeof setTimeout>> = []
+    const ctx: Record<string, any> = {
+      chrome: chromeApi,
+      URL,
+      URLSearchParams,
+      console,
+      navigator: { userAgent: 'test' },
+      location,
+      HTMLAnchorElement: FakeAnchor,
+      HTMLAudioElement: class {},
+      MutationObserver: class { observe() {} disconnect() {} },
+      requestAnimationFrame: () => 0,
+      setInterval: () => 0,
+      clearInterval: () => {},
+      setTimeout: (fn: () => void, ms?: number) => {
+        const t = setTimeout(fn, ms)
+        timers.push(t)
+        return t
+      },
+      clearTimeout,
+      addEventListener: (type: string, fn: (e: any) => void) => {
+        const list = listeners.get(type) ?? []
+        list.push(fn)
+        listeners.set(type, list)
+      },
+      removeEventListener: () => {},
+      document: {
+        documentElement: {},
+        visibilityState: 'visible',
+        fullscreenElement: null,
+        querySelectorAll: () => [],
+        addEventListener: () => {},
+        removeEventListener: () => {}
+      },
+      window: null as any
+    }
+    ctx.window = ctx
+    ctx.top = ctx
+    ctx.window.open = () => { windowOpenCalls++; return null }
+
+    runInNewContext(source, ctx, { filename: resolve(root, 'extension', 'content.js') })
+    // Let initial refreshDracoState settle
+    await new Promise((r) => setImmediate(r))
+    await new Promise((r) => setImmediate(r))
+
+    return {
+      FakeAnchor,
+      makeClickEvent,
+      dispatchClick(ev: any) {
+        for (const fn of listeners.get('click') ?? []) fn(ev)
+      },
+      sentMessages,
+      location,
+      getWindowOpenCalls: () => windowOpenCalls,
+      cleanup: () => { for (const t of timers) clearTimeout(t) }
+    }
+  }
+
+  it('ignores untrusted synthetic clicks without preventing default or messaging background (F-01)', async () => {
+    const env = await loadContentScript({ active: true })
+    try {
+      const anchor = new env.FakeAnchor('https://victim.example/backup.zip', 'backup.zip')
+      const ev = env.makeClickEvent(anchor, { isTrusted: false })
+      env.dispatchClick(ev)
+      await new Promise((r) => setImmediate(r))
+      strictEqual(ev.defaultPrevented, false, 'untrusted click must not call preventDefault')
+      strictEqual(ev.stopped, false, 'untrusted click must not call stopPropagation')
+      strictEqual(
+        env.sentMessages.filter((m) => m.type === 'draco:link-click').length,
+        0,
+        'untrusted click must not trigger draco:link-click'
+      )
+    } finally {
+      env.cleanup()
+    }
+  })
+
+  it('does not call preventDefault or intercept when Draco is inactive (F-04)', async () => {
+    const env = await loadContentScript({ active: false })
+    try {
+      const anchor = new env.FakeAnchor('https://app.example.com/raw/data.json', 'data.json')
+      const ev = env.makeClickEvent(anchor, { isTrusted: true })
+      env.dispatchClick(ev)
+      await new Promise((r) => setImmediate(r))
+      strictEqual(ev.defaultPrevented, false, 'inactive state must not call preventDefault')
+      strictEqual(
+        env.sentMessages.filter((m) => m.type === 'draco:link-click').length,
+        0,
+        'inactive state must not send draco:link-click'
+      )
+    } finally {
+      env.cleanup()
+    }
+  })
+
+  it('replays declined <a download> links via anchor.click() without navigating away (F-04)', async () => {
+    const env = await loadContentScript({ active: true, linkReply: { taken: false } })
+    try {
+      const startHref = env.location.href
+      const anchor = new env.FakeAnchor('https://app.example.com/raw/data.json', 'data.json')
+      const ev = env.makeClickEvent(anchor, { isTrusted: true })
+      env.dispatchClick(ev)
+      await new Promise((r) => setTimeout(r, 20))
+      strictEqual(ev.defaultPrevented, true)
+      strictEqual(anchor.clicks, 1, 'declined <a download> should replay via anchor.click()')
+      strictEqual(env.location.href, startHref, 'must not navigate away by assigning location.href')
+      strictEqual(
+        env.sentMessages.filter((m) => m.type === 'draco:link-click').length,
+        1,
+        'replayed synthetic click must not re-enter the interception handler'
+      )
+    } finally {
+      env.cleanup()
+    }
+  })
+
+  it('delegates declined target="_blank" downloads to background instead of popup-blocked window.open (F-04)', async () => {
+    const env = await loadContentScript({ active: true, linkReply: { taken: false } })
+    try {
+      const anchor = new env.FakeAnchor('https://files.example.com/manual.zip', null, '_blank')
+      const ev = env.makeClickEvent(anchor, { isTrusted: true })
+      env.dispatchClick(ev)
+      await new Promise((r) => setTimeout(r, 20))
+      strictEqual(env.getWindowOpenCalls(), 0, 'must not rely on popup-blocked window.open')
+      const fallbacks = env.sentMessages.filter((m) => m.type === 'draco:fallback-download')
+      strictEqual(fallbacks.length, 1, 'should ask background to start browser download')
+      strictEqual(fallbacks[0].url, 'https://files.example.com/manual.zip')
+    } finally {
+      env.cleanup()
+    }
+  })
+
+  it('filters SameSite cookies on draco:link-click by site and frameId (F-01 / D2)', async () => {
+    const source = await readFile(resolve(root, 'extension', 'background.js'), 'utf8')
+    const onMessage = event()
+    const noop = event()
+    const hostPayloads: any[] = []
+    const cookiesByUrl: Record<string, Array<{ name: string; value: string; sameSite?: string }>> = {
+      'https://victim.example/backup.zip': [
+        { name: 'strict_tok', value: 'S', sameSite: 'strict' },
+        { name: 'lax_tok', value: 'L', sameSite: 'lax' },
+        { name: 'unspec_tok', value: 'U', sameSite: 'unspecified' },
+        { name: 'none_tok', value: 'N', sameSite: 'no_restriction' }
+      ],
+      'https://cdn.example.com/archive.zip': [
+        { name: 'strict_tok', value: 'S', sameSite: 'strict' },
+        { name: 'lax_tok', value: 'L', sameSite: 'lax' },
+        { name: 'none_tok', value: 'N', sameSite: 'no_restriction' }
+      ],
+      'https://bank.co.uk/statement.pdf': [
+        { name: 'strict_tok', value: 'S', sameSite: 'strict' },
+        { name: 'lax_tok', value: 'L', sameSite: 'lax' }
+      ]
+    }
+    const api = {
+      storage: {
+        local: { get: async () => ({}), set: async () => {}, remove: async () => {} },
+        session: { get: async () => ({}), set: async () => {}, remove: async () => {} },
+        onChanged: noop
+      },
+      downloads: { onCreated: noop, download: async () => 1 },
+      runtime: {
+        onInstalled: noop,
+        onMessage,
+        sendNativeMessage: async (_host: string, message: any) => {
+          if (message.type === 'config') return { ok: true, config: { enabled: true, minSize: 0, extensions: [], excludeHosts: [] } }
+          if (message.type === 'download') {
+            hostPayloads.push(message)
+            return { ok: true, taken: true }
+          }
+          return { ok: true, version: 'test' }
+        }
+      },
+      contextMenus: { onClicked: noop, removeAll: (cb: () => void) => cb(), create: () => {} },
+      webRequest: {
+        onBeforeRequest: { addListener: () => {} },
+        onBeforeSendHeaders: { addListener: () => {} },
+        onHeadersReceived: { addListener: () => {} }
+      },
+      tabs: { onRemoved: noop, onUpdated: noop, onActivated: noop, query: async () => [], sendMessage: async () => {} },
+      action: { setBadgeText: async () => {}, setIcon: async () => {}, setTitle: async () => {} },
+      cookies: { getAll: async ({ url }: { url: string }) => cookiesByUrl[url] ?? [] }
+    }
+    runInNewContext(source, { chrome: api, URL, setTimeout, clearTimeout, navigator: { userAgent: 'test' }, console })
+
+    const send = (url: string, sender: any) =>
+      new Promise<any>((done) => onMessage.listener!({ type: 'draco:link-click', url }, sender, done))
+
+    // 1. Cross-site top-frame click: omit strict, keep lax/unspecified/no_restriction
+    await send('https://victim.example/backup.zip', {
+      frameId: 0,
+      url: 'https://evil.example/page',
+      tab: { id: 1, url: 'https://evil.example/page' }
+    })
+    strictEqual(hostPayloads.at(-1).cookie, 'lax_tok=L; unspec_tok=U; none_tok=N')
+
+    // 2. Cross-site subframe click: omit strict, lax, and unspecified; keep only no_restriction
+    await send('https://victim.example/backup.zip', {
+      frameId: 42,
+      url: 'https://ad.tracker.example/frame',
+      tab: { id: 2, url: 'https://news.example/article' }
+    })
+    strictEqual(hostPayloads.at(-1).cookie, 'none_tok=N')
+
+    // 3. Same-site subdomain click (top frame): keep strict, lax, no_restriction
+    await send('https://cdn.example.com/archive.zip', {
+      frameId: 0,
+      url: 'https://www.example.com/downloads',
+      tab: { id: 3, url: 'https://www.example.com/downloads' }
+    })
+    strictEqual(hostPayloads.at(-1).cookie, 'strict_tok=S; lax_tok=L; none_tok=N')
+
+    // 4. Multi-part public suffix cross-site (evil.co.uk -> bank.co.uk): omit strict
+    await send('https://bank.co.uk/statement.pdf', {
+      frameId: 0,
+      url: 'https://evil.co.uk/phish',
+      tab: { id: 4, url: 'https://evil.co.uk/phish' }
+    })
+    strictEqual(hostPayloads.at(-1).cookie, 'lax_tok=L')
+  })
+})

@@ -481,13 +481,92 @@ function isTakeableUrl(url, rules) {
   return true
 }
 
-async function cookieHeaderFor(url) {
+const MULTI_PART_PUBLIC_SUFFIXES = new Set([
+  'co.uk', 'org.uk', 'ac.uk', 'gov.uk', 'me.uk', 'net.uk',
+  'com.au', 'net.au', 'org.au', 'edu.au', 'gov.au',
+  'co.jp', 'ne.jp', 'or.jp', 'ac.jp', 'go.jp',
+  'com.br', 'net.br', 'org.br', 'gov.br',
+  'com.cn', 'net.cn', 'org.cn', 'edu.cn', 'gov.cn',
+  'com.tr', 'net.tr', 'org.tr', 'edu.tr', 'gov.tr',
+  'com.mx', 'co.nz', 'co.za', 'co.in', 'co.kr', 'com.tw', 'com.hk', 'com.sg',
+  'com.ar', 'com.pl', 'co.il', 'com.ua', 'com.vn', 'com.my', 'com.ph',
+  'com.pk', 'com.eg', 'com.ng', 'com.sa', 'com.co', 'com.pe'
+])
+
+function registrableSite(hostname) {
+  const host = String(hostname || '').toLowerCase().replace(/\.$/, '')
+  if (!host) return ''
+  if (host === 'localhost' || host.includes(':') || /^\d{1,3}(?:\.\d{1,3}){3}$/.test(host)) {
+    return host
+  }
+  const parts = host.split('.').filter(Boolean)
+  if (parts.length <= 2) return parts.join('.')
+  const lastTwo = parts.slice(-2).join('.')
+  if (MULTI_PART_PUBLIC_SUFFIXES.has(lastTwo) && parts.length >= 3) {
+    return parts.slice(-3).join('.')
+  }
+  return lastTwo
+}
+
+function isSameSite(urlA, urlB) {
+  try {
+    const a = new URL(urlA)
+    const b = new URL(urlB)
+    if (a.protocol !== b.protocol) return false
+    const siteA = registrableSite(a.hostname)
+    const siteB = registrableSite(b.hostname)
+    return Boolean(siteA && siteB && siteA === siteB)
+  } catch {
+    return false
+  }
+}
+
+async function cookieHeaderFor(url, sender) {
   try {
     const cookies = await chrome.cookies.getAll({ url })
-    return cookies.map((c) => `${c.name}=${c.value}`).join('; ')
+    if (!cookies || cookies.length === 0) return ''
+    let filtered = cookies
+    if (sender) {
+      const isSubframe = typeof sender.frameId === 'number' && sender.frameId !== 0
+      const initiatingUrl = sender.url || sender.tab?.url || ''
+      let sameSite = false
+      if (initiatingUrl) {
+        if (isSubframe) {
+          sameSite = Boolean(sender.tab?.url) && isSameSite(initiatingUrl, url) && isSameSite(sender.tab.url, url)
+        } else {
+          sameSite = isSameSite(initiatingUrl, url)
+        }
+      }
+      if (!sameSite) {
+        filtered = cookies.filter((c) => {
+          const policy = String(c.sameSite || 'unspecified').toLowerCase()
+          if (policy === 'strict') return false
+          if (isSubframe && (policy === 'lax' || policy === 'unspecified')) return false
+          return true
+        })
+      }
+    }
+    return filtered.map((c) => `${c.name}=${c.value}`).join('; ')
   } catch {
     return ''
   }
+}
+
+const LINK_CLICK_WINDOW_MS = 10_000
+const LINK_CLICK_MAX_PER_WINDOW = 5
+const linkClickTimestamps = new Map()
+
+function allowLinkClick(tabId) {
+  const key = typeof tabId === 'number' ? tabId : 'global'
+  const now = Date.now()
+  const recent = (linkClickTimestamps.get(key) ?? []).filter((t) => now - t < LINK_CLICK_WINDOW_MS)
+  if (recent.length >= LINK_CLICK_MAX_PER_WINDOW) {
+    linkClickTimestamps.set(key, recent)
+    return false
+  }
+  recent.push(now)
+  linkClickTimestamps.set(key, recent)
+  return true
 }
 
 // onCreated precedes filename determination in Chromium. Keep its work visible
@@ -1464,6 +1543,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           sendResponse({ taken: false })
           return
         }
+        if (!allowLinkClick(sender.tab?.id)) {
+          await addPassThrough(message.url)
+          sendResponse({ taken: false, error: 'rate limited' })
+          return
+        }
         const rules = await refreshConfig()
         const url = message.url
 
@@ -1480,7 +1564,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         }
 
         const tab = sender.tab
-        const cookie = await cookieHeaderFor(url)
+        const cookie = await cookieHeaderFor(url, sender)
         const requestId = newRequestId()
         const reply = await callHost({
           type: 'download',
@@ -1488,7 +1572,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           handoffExpiresAt: Date.now() + HANDOFF_DEADLINE_MS,
           url,
           filename: message.filename || undefined,
-          referer: tab?.url,
+          referer: sender.url || tab?.url,
           cookie: cookie || undefined,
           userAgent: navigator.userAgent
         })
@@ -1510,6 +1594,28 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         // URL in passThrough and keep its hands off it.
         await ignoreUrl(url)
         sendResponse({ taken: false, error: reply.error })
+        return
+      }
+
+      case 'draco:fallback-download': {
+        const url = typeof message.url === 'string' ? message.url : ''
+        if (!/^https?:/i.test(url) || typeof chrome.downloads?.download !== 'function') {
+          sendResponse({ ok: false })
+          return
+        }
+        await addPassThrough(url)
+        const rawName = typeof message.filename === 'string' ? message.filename.trim() : ''
+        const safeName =
+          rawName && !/[\\/:*?"<>|]/.test(rawName) && !rawName.includes('..') ? rawName : undefined
+        try {
+          await chrome.downloads.download({
+            url,
+            ...(safeName ? { filename: safeName } : {})
+          })
+          sendResponse({ ok: true })
+        } catch {
+          sendResponse({ ok: false })
+        }
         return
       }
 
