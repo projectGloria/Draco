@@ -10,6 +10,7 @@ import type {
   ToolStatus
 } from '@shared/types'
 import { formatBytes, formatWhen } from '../lib/format'
+import { applyOptionsDraftPatch, toggleDraftColumn } from '@shared/options-draft'
 import { useApp } from '../store/app'
 import { reportError, toast } from '../store/toasts'
 import Dialog, { GhostButton, PrimaryButton } from './Dialog'
@@ -75,14 +76,14 @@ export default function OptionsDialog({
   const dirty = Object.keys(changes).length > 0 || categoriesDirty
 
   const patchDraft = useCallback((patch: Partial<Settings>): void => {
-    draftRef.current = { ...draftRef.current, ...patch }
-    setDraft(draftRef.current)
-    const next = { ...changesRef.current, ...patch }
-    for (const key of Object.keys(patch) as Array<keyof Settings>) {
-      if (JSON.stringify(next[key]) === JSON.stringify(original.current[key])) delete next[key]
-    }
-    changesRef.current = next
-    setChanges(next)
+    const nextState = applyOptionsDraftPatch(
+      { original: original.current, draft: draftRef.current, changes: changesRef.current },
+      patch
+    )
+    draftRef.current = nextState.draft
+    setDraft(nextState.draft)
+    changesRef.current = nextState.changes
+    setChanges(nextState.changes)
     setConfirmDiscard(false)
     setValidationError(null)
   }, [])
@@ -157,10 +158,10 @@ export default function OptionsDialog({
         <div className="min-w-0 pt-4">
           {tab === 'general' && <GeneralTab settings={draft} patch={patchDraft} />}
           {tab === 'connection' && <ConnectionTab settings={draft} patch={patchDraft} />}
-          {tab === 'cookies' && <CookiesTab />}
+          {tab === 'cookies' && <CookiesTab settings={draft} patch={patchDraft} />}
           {tab === 'categories' && <CategoriesTab draft={categoriesDraft} setDraft={setCategoriesDraft} />}
           {tab === 'browser' && <BrowserTab settings={draft} patch={patchDraft} />}
-          {tab === 'appearance' && <AppearanceTab />}
+          {tab === 'appearance' && <AppearanceTab settings={draft} patch={patchDraft} />}
           {tab === 'tools' && <NecessaryToolsTab />}
         </div>
       </div>
@@ -1019,9 +1020,13 @@ function ConnectionTab({ settings, patch }: {
  *
  * Hence a tab, real browser icons, and a check that goes and finds out.
  */
-function CookiesTab(): React.ReactElement {
-  const settings = useApp((s) => s.settings)
-  const patch = useApp((s) => s.patchSettings)
+function CookiesTab({
+  settings,
+  patch
+}: {
+  settings: Settings
+  patch: (patch: Partial<Settings>) => void
+}): React.ReactElement {
   const [browsers, setBrowsers] = useState<InstalledBrowser[]>([])
   const [progress, setProgress] = useState<CookieCheckProgress | null>(null)
   const [result, setResult] = useState<CookieCheckResult | null>(null)
@@ -1041,9 +1046,7 @@ function CookiesTab(): React.ReactElement {
     setResult(null)
     setProgress({ stage: 'starting', percent: 2, message: 'Starting' })
     try {
-      // Saved first, so the check measures the setting that is now in force
-      // rather than a choice that would be lost if the dialog were closed.
-      if (!await patch({ cookiesFromBrowser: browser as typeof settings.cookiesFromBrowser })) return
+      patch({ cookiesFromBrowser: browser as typeof settings.cookiesFromBrowser })
       setResult(await window.api.checkCookies(browser))
     } catch (err) {
       reportError('The cookie check could not run', err)
@@ -1568,16 +1571,19 @@ function StatusLine({
 
 const ACCENTS = ['#38bdf8', '#6366f1', '#a78bfa', '#34d399', '#fbbf24', '#f87171', '#f472b6']
 
-function AppearanceTab(): React.ReactElement {
-  const settings = useApp((s) => s.settings)
-  const patch = useApp((s) => s.patchSettings)
-
+function AppearanceTab({
+  settings,
+  patch
+}: {
+  settings: Settings
+  patch: (patch: Partial<Settings>) => void
+}): React.ReactElement {
   return (
     <div className="space-y-4">
       <Field label="Theme">
         <select
           value={settings.theme}
-          onChange={(event) => void patch({ theme: event.target.value as 'system' | 'dark' | 'light' })}
+          onChange={(event) => patch({ theme: event.target.value as 'system' | 'dark' | 'light' })}
           className="field text-[12.5px]"
         >
           <option value="system">System</option>
@@ -1590,7 +1596,8 @@ function AppearanceTab(): React.ReactElement {
           {ACCENTS.map((hex) => (
             <button
               key={hex}
-              onClick={() => void patch({ accent: hex })}
+              type="button"
+              onClick={() => patch({ accent: hex })}
               aria-label={hex}
               className="w-8 h-8 rounded-lg border-2 transition-transform hover:scale-110"
               style={{
@@ -1603,16 +1610,22 @@ function AppearanceTab(): React.ReactElement {
       </Field>
 
       <Field label="Columns" hint="Right-clicking the table header does the same thing.">
-        <ColumnToggles />
+        <ColumnToggles
+          columns={settings.columns}
+          onToggle={(id) => patch({ columns: toggleDraftColumn(settings.columns, id) })}
+        />
       </Field>
     </div>
   )
 }
 
-function ColumnToggles(): React.ReactElement {
-  const columns = useApp((s) => s.settings.columns)
-  const toggleColumn = useApp((s) => s.toggleColumn)
-
+function ColumnToggles({
+  columns,
+  onToggle
+}: {
+  columns: Settings['columns']
+  onToggle: (id: Settings['columns'][number]['id']) => void
+}): React.ReactElement {
   const NAMES: Record<string, string> = {
     name: 'Name',
     size: 'Size',
@@ -1632,7 +1645,7 @@ function ColumnToggles(): React.ReactElement {
           key={column.id}
           checked={column.visible}
           disabled={column.id === 'name'}
-          onChange={() => toggleColumn(column.id)}
+          onChange={() => onToggle(column.id)}
           label={NAMES[column.id] ?? column.id}
         />
       ))}
