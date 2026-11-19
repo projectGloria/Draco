@@ -1246,11 +1246,10 @@ export class DownloadManager {
       if (this.disposed) return
 
       const settings = this.options.getSettings()
-      // A keep-alive burst is still a running download: it holds a connection,
-      // spends the transfer budget and occupies a slot. Starting one on top of
-      // a full complement would quietly exceed the limit the user set.
-      if (this.activeCount >= settings.maxConcurrentTasks) return
-      // One burst at a time; a second would not be a trickle.
+      if (!settings.catMode) return
+      // One keep-alive trickle at a time; queued tasks only exist while normal
+      // active slots are saturated, so this burst is intentionally bounded to a
+      // single 100 KB/s connection charged against the shared app-wide limiter.
       if ([...this.runners.values()].some((r) => r.task.isCatMode)) return
 
       // A queue's waiting items must not download around its concurrency/order.

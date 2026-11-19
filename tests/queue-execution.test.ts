@@ -280,4 +280,59 @@ describe('batch queue moves', () => {
     strictEqual(t2.queueId, null, 'synchronizeMembership must clear dangling queueId')
     ok(taskUpdates.length > updatesBeforeSync, 'clearing dangling queueId must emit task updates')
   })
+
+  it('Cat Mode trickles a waiting queued task when active slots are full, at most one at a time (F-06)', async (t) => {
+    const settings: EngineSettings = {
+      maxConcurrentTasks: 1, maxConnectionsPerTask: 1, minSplitSize: 1024,
+      retryLimit: 1, timeoutMs: 1000, speedLimit: null, proxyUrl: null,
+      hostConnectionLimits: [], quotaBytes: null, quotaWindowMinutes: 60,
+      antivirusProgram: null, antivirusArgs: [], antivirusTimeoutSeconds: 1,
+      catMode: true
+    }
+    const started: string[] = []
+    t.mock.timers.enable({ apis: ['setInterval'] })
+    const manager = new DownloadManager({
+      getSettings: () => settings,
+      onTasks: () => {},
+      onProgress: () => {},
+      createHlsRunner: (task) => ({
+        task,
+        running: false,
+        async start() {
+          this.running = true
+          task.status = 'downloading'
+          started.push(task.id)
+        },
+        async pause() {
+          this.running = false
+          task.status = 'paused'
+        },
+        tick() {},
+        async resetForRestart() { return true }
+      })
+    })
+    cleanups.push(async () => {
+      t.mock.timers.reset()
+      await manager.shutdown()
+    })
+
+    const t1 = createTask({ url: 'https://example.test/1.m3u8', kind: 'hls', dir: tmpdir(), filename: '1.mp4' })
+    const t2 = createTask({ url: 'https://example.test/2.m3u8', kind: 'hls', dir: tmpdir(), filename: '2.mp4' })
+    const t3 = createTask({ url: 'https://example.test/3.m3u8', kind: 'hls', dir: tmpdir(), filename: '3.mp4' })
+    manager.add(t1, true)
+    manager.add(t2, true)
+    manager.add(t3, true)
+    strictEqual(t1.status, 'downloading')
+    strictEqual(t2.status, 'queued')
+    strictEqual(t3.status, 'queued')
+
+    // First 30s tick: Cat Mode should start a keep-alive trickle on t2
+    t.mock.timers.tick(30_000)
+    strictEqual(t2.isCatMode, true, 'Cat Mode must start a keep-alive burst for a waiting queued task')
+    strictEqual(t3.isCatMode, undefined, 'Cat Mode must run at most one burst at a time')
+
+    // Second 30s tick while t2 is still in Cat Mode: must not start a second concurrent burst
+    t.mock.timers.tick(30_000)
+    strictEqual(t3.isCatMode, undefined, 'must not start a second concurrent Cat Mode burst')
+  })
 })
