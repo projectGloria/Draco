@@ -70,9 +70,10 @@ export function createSafeLookup(baseLookup: LookupFn = dns.lookup as unknown as
  * interceptor composed onto the dispatcher.
  */
 
-const dispatchers = new Map<string, Dispatcher>()
+const openDispatchers = new Map<number, Dispatcher>()
+const guardedDispatchers = new Map<number, Dispatcher>()
 const retiredDispatchers = new Set<Dispatcher>()
-const MAX_CACHED_DISPATCHERS = 16
+const MAX_CACHED_DISPATCHERS = 8
 let proxyUrl: string | null = null
 let customLookup: LookupFn | null = null
 /**
@@ -88,11 +89,17 @@ function retire(dispatcher: Dispatcher): void {
   })
 }
 
+function retireAllCached(): void {
+  for (const dispatcher of openDispatchers.values()) retire(dispatcher)
+  for (const dispatcher of guardedDispatchers.values()) retire(dispatcher)
+  openDispatchers.clear()
+  guardedDispatchers.clear()
+}
+
 /** Overrides the underlying DNS lookup (for tests). Pass null to restore `dns.lookup`. */
 export function setDnsLookup(lookup: LookupFn | null): void {
   customLookup = lookup
-  for (const dispatcher of dispatchers.values()) retire(dispatcher)
-  dispatchers.clear()
+  retireAllCached()
 }
 
 /** Dynamically sizes the per-origin connection pool to match configured concurrency. */
@@ -100,16 +107,14 @@ export function setPoolConnections(connections: number): void {
   const next = Math.max(256, connections)
   if (next === poolConnections) return
   poolConnections = next
-  for (const dispatcher of dispatchers.values()) retire(dispatcher)
-  dispatchers.clear()
+  retireAllCached()
 }
 
 /** Applies to newly-created pools; active requests finish on their old pool. */
 export function setProxyUrl(next: string | null): void {
   if (next === proxyUrl) return
   proxyUrl = next
-  for (const dispatcher of dispatchers.values()) retire(dispatcher)
-  dispatchers.clear()
+  retireAllCached()
 }
 
 export function getDispatcher(
@@ -119,11 +124,11 @@ export function getDispatcher(
   // 0 would disable undici's headers and body timeouts entirely.
   const timeoutMs = Math.max(1, requestedTimeoutMs)
   const allowPrivate = opts?.allowPrivate !== false
-  const key = `${timeoutMs}:${allowPrivate ? 'open' : 'guarded'}`
-  const existing = dispatchers.get(key)
+  const cache = allowPrivate ? openDispatchers : guardedDispatchers
+  const existing = cache.get(timeoutMs)
   if (existing) {
-    dispatchers.delete(key)
-    dispatchers.set(key, existing)
+    cache.delete(timeoutMs)
+    cache.set(timeoutMs, existing)
     return existing
   }
 
@@ -153,13 +158,13 @@ export function getDispatcher(
     : new Agent(options)
   const agent = base.compose(interceptors.redirect({ maxRedirections: 10 }))
 
-  dispatchers.set(key, agent)
+  cache.set(timeoutMs, agent)
   // Editing request timeouts must not retain one connection pool per value
   // for the lifetime of the app. Retire idle entries without aborting transfers.
-  while (dispatchers.size > MAX_CACHED_DISPATCHERS) {
-    const oldest = dispatchers.keys().next().value!
-    const dispatcher = dispatchers.get(oldest)!
-    dispatchers.delete(oldest)
+  while (cache.size > MAX_CACHED_DISPATCHERS) {
+    const oldest = cache.keys().next().value!
+    const dispatcher = cache.get(oldest)!
+    cache.delete(oldest)
     retire(dispatcher)
   }
   return agent
@@ -167,8 +172,9 @@ export function getDispatcher(
 
 /** Closes every pool. Only for shutdown - in-flight requests are cut off. */
 export async function closeDispatchers(): Promise<void> {
-  const all = [...dispatchers.values(), ...retiredDispatchers]
-  dispatchers.clear()
+  const all = [...openDispatchers.values(), ...guardedDispatchers.values(), ...retiredDispatchers]
+  openDispatchers.clear()
+  guardedDispatchers.clear()
   retiredDispatchers.clear()
   await Promise.allSettled(all.map((d) => d.destroy()))
 }

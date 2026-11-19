@@ -288,14 +288,14 @@ Exit code: 0 (Zero errors)
 ### 2. Node Test Runner Suite
 ```
 $ npm test
-ℹ tests 689
-ℹ suites 115
-ℹ pass 689
+ℹ tests 698
+ℹ suites 117
+ℹ pass 698
 ℹ fail 0
 ℹ cancelled 0
 ℹ skipped 0
 ℹ todo 0
-Exit code: 0 (All 689 tests pass)
+Exit code: 0 (All 698 tests pass)
 ```
 
 ### 3. Native Messaging Host
