@@ -1,6 +1,8 @@
 import { rejects, strictEqual } from 'node:assert/strict'
+import { mkdtemp, readdir, rm, writeFile } from 'node:fs/promises'
 import { createServer } from 'node:http'
 import type { AddressInfo } from 'node:net'
+import { join } from 'node:path'
 import { test } from 'node:test'
 import { build } from 'esbuild'
 import { loadMediaPlaylist, resolveVariants } from '../src/main/hls/playlist.ts'
@@ -91,4 +93,103 @@ test('pausing a composite during file adoption waits for cleanup and starts no H
   strictEqual(starts, 0)
   strictEqual(finished, 1)
   strictEqual(task.status, 'paused')
+})
+
+test('DashRunner adopts a finished video half whose real size differs from the 88/12 estimate without re-downloading or creating (1) files (F-03)', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'draco-dash-adopt-'))
+  let videoHits = 0
+  let audioHits = 0
+  const videoBytes = Buffer.alloc(9_123, 0x56)
+  const audioBytes = Buffer.alloc(1_234, 0x41)
+  const server = createServer((req, res) => {
+    if (req.url === '/video') {
+      videoHits++
+      res.writeHead(200, { 'content-length': String(videoBytes.length), 'accept-ranges': 'bytes' })
+      res.end(videoBytes)
+    } else if (req.url === '/audio') {
+      audioHits++
+      res.writeHead(200, { 'content-length': String(audioBytes.length), 'accept-ranges': 'bytes' })
+      res.end(audioBytes)
+    } else {
+      res.writeHead(404).end()
+    }
+  })
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+  const port = (server.address() as AddressInfo).port
+  try {
+    const bundle = await build({
+      entryPoints: ['src/main/hls/dash.ts'],
+      bundle: true,
+      platform: 'node',
+      format: 'cjs',
+      packages: 'external',
+      write: false,
+      define: { 'import.meta.env': '{}' },
+      plugins: [{
+        name: 'dash-mux-stub',
+        setup(b) {
+          b.onLoad({ filter: /[\\/]ffmpeg\.ts$/ }, () => ({
+            contents: 'export async function ensureFfmpeg() { return "ffmpeg" }',
+            loader: 'js'
+          }))
+          b.onLoad({ filter: /[\\/]mux\.ts$/ }, () => ({
+            contents: `
+              const { writeFile } = require('node:fs/promises');
+              export const MUX_DETAIL = 'Muxing…';
+              export async function mux({ outputPath }) { await writeFile(outputPath, Buffer.from('muxed')); }
+            `,
+            loader: 'js'
+          }))
+        }
+      }]
+    })
+    const bundled = { exports: {} as { DashRunner?: any } }
+    new Function('require', 'module', 'exports', bundle.outputFiles[0].text)(
+      createRequire(import.meta.url),
+      bundled,
+      bundled.exports
+    )
+    const { DashRunner } = bundled.exports
+
+    const task = createTask({
+      url: `http://127.0.0.1:${port}/video`,
+      audioUrl: `http://127.0.0.1:${port}/audio`,
+      dir,
+      filename: 'clip.mp4',
+      expectedSize: 10_000,
+      youtube: { pageUrl: 'https://www.youtube.com/watch?v=abc12345678', videoFormatId: '137', audioFormatId: '140' }
+    })
+
+    // Pre-place the finished video half (9,123 bytes != 8,800) as left after an audio failure
+    const videoHalfPath = join(dir, 'clip.mp4.v.137.mp4')
+    await writeFile(videoHalfPath, videoBytes)
+
+    let finishedError: Error | null | undefined
+    const runner = new DashRunner(task, {
+      limiter: new RateLimiter(),
+      maxConnections: 2,
+      minSplitSize: 1024,
+      retryLimit: 1,
+      timeoutMs: 5000,
+      proxyUrl: null,
+      onUpdate() {},
+      onFinished(_t: unknown, err: Error | null) { finishedError = err }
+    })
+
+    await runner.start()
+    strictEqual(finishedError, null, 'retry should finish without error')
+    strictEqual(task.status, 'done')
+    strictEqual(videoHits, 0, 'finished video half must be adopted without re-downloading')
+    strictEqual(audioHits > 0, true, 'missing audio half should be downloaded')
+
+    const entries = await readdir(dir)
+    strictEqual(entries.some((f) => f.includes('(1)')), false, `must not leave a (1) copy: ${entries.join(', ')}`)
+    strictEqual(entries.includes('clip.mp4.v.137.mp4'), false, 'video half should be cleaned up after mux')
+    strictEqual(entries.includes('clip.mp4'), true, 'final muxed file should exist')
+  } finally {
+    await closeDispatchers()
+    server.closeAllConnections()
+    await new Promise<void>((resolve) => server.close(() => resolve()))
+    await rm(dir, { recursive: true, force: true }).catch(() => {})
+  }
 })

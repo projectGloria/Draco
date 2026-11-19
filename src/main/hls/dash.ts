@@ -30,6 +30,8 @@ export class DashRunner implements Runner {
   private reservedTarget: string | null = null
   /** Set when a child stopped on the transfer quota rather than on a failure. */
   private quotaError: QuotaExceededError | null = null
+  /** Display-only audio size estimate before probeUrl reports the real Content-Length. */
+  private audioEstimatedSize: number | null = null
   private lifecyclePromise: Promise<void> | null = null
   running = false
 
@@ -46,6 +48,7 @@ export class DashRunner implements Runner {
     // Google CDN - and the merge would look for a file that no longer exists.
     videoTask.filenameLocked = true
     videoTask.size = null
+    videoTask.expectedSize = undefined
     videoTask.received = 0
     videoTask.segments = []
     // The user's digest describes the muxed output, not either input stream.
@@ -58,6 +61,7 @@ export class DashRunner implements Runner {
     audioTask.filename = task.filename + halfSuffix('a', 'm4a', task.youtube?.audioFormatId)
     audioTask.filenameLocked = true
     audioTask.size = null
+    audioTask.expectedSize = undefined
     audioTask.received = 0
     audioTask.segments = []
     audioTask.expectedChecksum = undefined
@@ -65,10 +69,9 @@ export class DashRunner implements Runner {
       audioTask.youtube = { ...task.youtube, role: 'audio' }
     }
 
-    if (task.expectedSize) {
+    if (task.expectedSize && task.expectedSize > 0) {
       this.task.size = task.expectedSize
-      videoTask.expectedSize = Math.round(task.expectedSize * 0.88)
-      audioTask.expectedSize = task.expectedSize - videoTask.expectedSize
+      this.audioEstimatedSize = Math.max(1, task.expectedSize - Math.round(task.expectedSize * 0.88))
     }
 
     const childContext: RunnerContext = {
@@ -284,10 +287,17 @@ export class DashRunner implements Runner {
    */
   private async adoptFinishedHalf(runner: TaskRunner): Promise<boolean> {
     const path = join(this.task.dir, runner.task.filename)
+    const hasPart = await stat(runner.partPath).then(() => true, () => false)
+    if (hasPart) {
+      await rm(path, { force: true }).catch(() => {})
+      return false
+    }
     try {
       const info = await stat(path)
-      if (!info.isFile() || info.size === 0) return false
-      if (runner.task.expectedSize && info.size !== runner.task.expectedSize) return false
+      if (!info.isFile() || info.size <= 0) {
+        await rm(path, { force: true }).catch(() => {})
+        return false
+      }
       runner.task.size = info.size
       runner.task.received = info.size
       runner.task.status = 'done'
@@ -359,7 +369,7 @@ export class DashRunner implements Runner {
     if (vSize !== null && aSize !== null) {
       this.task.size = vSize + aSize
     } else if (vSize !== null) {
-      const audioEstimate = this.audioRunner.task.expectedSize ?? Math.round(vSize * 0.1)
+      const audioEstimate = this.audioEstimatedSize ?? Math.round(vSize * 0.1)
       this.task.size = vSize + audioEstimate
     } else {
       this.task.size = this.task.expectedSize ?? null
