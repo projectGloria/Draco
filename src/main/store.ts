@@ -13,6 +13,8 @@ import { getPaths } from './bootstrap/paths.ts'
 import { readJson, readJsonOrThrowIfPresent, writeJsonAtomic } from './json-file.ts'
 import { electronJsonCipher } from './electron-json-cipher.ts'
 import { readSealedJsonFile, sealJson } from './sealed-json.ts'
+import { clearProxyCredentials, saveProxyCredential } from './credentials.ts'
+import { backupHasProxyCredentials, sanitizeAndStoreProxyUrl } from './proxy-credentials.ts'
 import { defaultCategories } from './categories.ts'
 import {
   sanitizeCategories,
@@ -134,6 +136,11 @@ export function defaultSettings(): Settings {
 let settings: Settings | null = null
 let settingsSaveTail: Promise<void> = Promise.resolve()
 
+const proxyCredentialSink = {
+  save: saveProxyCredential,
+  clear: clearProxyCredentials
+}
+
 export async function loadSettings(): Promise<Settings> {
   const base = defaultSettings()
   const [stored, clipboardInbox] = await Promise.all([
@@ -145,6 +152,12 @@ export async function loadSettings(): Promise<Settings> {
   }
   settings = stored ? sanitizeSettings(stored, base, defaultColumns) : base
 
+  // Migrate any legacy plaintext proxy credentials out of settings.json / .bak
+  // into the DPAPI-sealed credential store.
+  const migrated = await sanitizeAndStoreProxyUrl(settings.proxyUrl, proxyCredentialSink)
+  settings.proxyUrl = migrated.sanitizedUrl
+  const backupHadCreds = await backupHasProxyCredentials(getPaths().settingsFile)
+
   // The old clipboard monitor defaulted off because it opened a modal whenever
   // it noticed a link. The inbox is deliberately quiet, so enable it once when
   // this new persisted store is first introduced. Later user choices survive:
@@ -154,7 +167,12 @@ export async function loadSettings(): Promise<Settings> {
 
   // Migrate the file forward when a release adds settings, so the on-disk shape
   // matches what the app actually uses and stays hand-editable.
-  await writeJsonAtomic(getPaths().settingsFile, settings)
+  await writeJsonAtomic(
+    getPaths().settingsFile,
+    settings,
+    true,
+    migrated.extracted || backupHadCreds ? 'replace' : 'previous'
+  )
   return settings
 }
 
@@ -167,8 +185,20 @@ export function saveSettings(patch: Partial<Settings>): Promise<Settings> {
   // Compute each patch against the last committed value. A failed write must
   // not become the in-memory setting or leak into a later, unrelated patch.
   const operation = settingsSaveTail.then(async () => {
-    const next = sanitizeSettings({ ...getSettings(), ...patch }, defaultSettings(), defaultColumns)
-    await writeJsonAtomic(getPaths().settingsFile, next)
+    let effectivePatch = patch
+    let extractedProxyCreds = false
+    if (patch.proxyUrl !== undefined) {
+      const result = await sanitizeAndStoreProxyUrl(patch.proxyUrl, proxyCredentialSink)
+      effectivePatch = { ...patch, proxyUrl: result.sanitizedUrl }
+      extractedProxyCreds = result.extracted
+    }
+    const next = sanitizeSettings({ ...getSettings(), ...effectivePatch }, defaultSettings(), defaultColumns)
+    await writeJsonAtomic(
+      getPaths().settingsFile,
+      next,
+      true,
+      extractedProxyCreds ? 'replace' : 'previous'
+    )
     settings = next
     return next
   })

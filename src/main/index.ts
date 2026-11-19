@@ -22,7 +22,7 @@ import type {
   Queue
 } from '@shared/types'
 import { configurePaths, ensureDirs, getPaths } from './bootstrap/paths.ts'
-import { loadCredentials, resolveCredentials } from './credentials.ts'
+import { loadCredentials, resolveCredentials, resolveProxyUrl } from './credentials.ts'
 import { ClipboardWatcher } from './clipboard.ts'
 import { ensureRegistered } from './bridge/integration.ts'
 import { PipeServer, ensurePipeSecret } from './bridge/pipe-server.ts'
@@ -262,7 +262,10 @@ async function main(): Promise<void> {
      * on `EngineSettings`, so nothing complained and four settings the Options
      * dialog offers simply did nothing.
      */
-    getSettings: () => ({ ...getSettings(), tempDir: getPaths().tempDir }),
+    getSettings: () => {
+      const current = getSettings()
+      return { ...current, proxyUrl: resolveProxyUrl(current.proxyUrl), tempDir: getPaths().tempDir }
+    },
     onTasks: (tasks) => {
       persistTasks(tasks)
       // Broadcast rather than sent: each open progress window is watching the
@@ -543,10 +546,10 @@ async function runBootstrapOnce(): Promise<void> {
 
   await runStep('settings', async () => {
     await ensureElectronJsonCipherReady(getPaths().root)
-    await loadSettings()
-    // Before any task can run, so the first protected download of the session
-    // is answered from the store rather than failing while it loads.
+    // Load credentials before settings so legacy plaintext proxy passwords in
+    // settings.json can be migrated into the DPAPI-sealed credential store.
     await loadCredentials()
+    await loadSettings()
     ctx!.manager.restoreQuota(await loadQuotaState())
     await loadCategories()
   })

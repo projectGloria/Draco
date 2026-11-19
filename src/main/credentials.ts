@@ -5,6 +5,7 @@ import type { SiteCredential } from '@shared/types'
 import { getPaths } from './bootstrap/paths.ts'
 import { logger } from './log.ts'
 import { readJsonOrThrowIfPresent, writeJsonAtomic } from './json-file.ts'
+import { assembleProxyUrl, PROXY_CREDENTIAL_REALM } from './proxy-credentials.ts'
 
 const log = logger('credentials')
 
@@ -93,15 +94,17 @@ async function persist(nextEntries: StoredCredential[]): Promise<void> {
   await writeJsonAtomic(filePath(), body)
 }
 
-/** What the renderer is allowed to see: everything except the password. */
+/** What the renderer is allowed to see: everything except the password (and internal proxy entries). */
 export function listCredentials(): SiteCredential[] {
-  return entries.map((entry) => ({
-    id: entry.id,
-    host: entry.host,
-    realm: entry.realm ?? '',
-    username: entry.username,
-    createdAt: entry.createdAt
-  }))
+  return entries
+    .filter((entry) => entry.realm !== PROXY_CREDENTIAL_REALM)
+    .map((entry) => ({
+      id: entry.id,
+      host: entry.host,
+      realm: entry.realm ?? '',
+      username: entry.username,
+      createdAt: entry.createdAt
+    }))
 }
 
 export async function saveCredential(input: {
@@ -165,7 +168,7 @@ export function resolveCredentials(url: string, realm: string): Credentials | nu
   const host = hostOf(url)
   if (!host) return null
 
-  const candidates = entries.filter((entry) => entry.host === host)
+  const candidates = entries.filter((entry) => entry.host === host && entry.realm !== PROXY_CREDENTIAL_REALM)
   const match =
     candidates.find((entry) => entry.realm && entry.realm === realm) ??
     candidates.find((entry) => !entry.realm)
@@ -186,5 +189,35 @@ export function resolveCredentials(url: string, realm: string): Credentials | nu
 /** Whether anything at all is saved for this host, for the message on a 401. */
 export function hasCredentialsFor(url: string): boolean {
   const host = hostOf(url)
-  return host !== null && entries.some((entry) => entry.host === host)
+  return host !== null && entries.some((entry) => entry.host === host && entry.realm !== PROXY_CREDENTIAL_REALM)
+}
+
+export async function saveProxyCredential(host: string, username: string, password: string): Promise<void> {
+  await saveCredential({ host, realm: PROXY_CREDENTIAL_REALM, username, password })
+}
+
+export async function clearProxyCredentials(): Promise<void> {
+  await changeCredentials(async () => {
+    if (!loaded) await loadCredentials()
+    const nextEntries = entries.filter((entry) => entry.realm !== PROXY_CREDENTIAL_REALM)
+    if (nextEntries.length === entries.length) return
+    await persist(nextEntries)
+    entries = nextEntries
+  })
+}
+
+/** Reassembles the authenticated proxy URL from the sealed credential store for dispatcher construction only. */
+export function resolveProxyUrl(sanitizedUrl: string | null): string | null {
+  if (!sanitizedUrl || !loaded) return sanitizedUrl
+  const host = hostOf(sanitizedUrl)
+  if (!host) return sanitizedUrl
+  const match = entries.find((entry) => entry.host === host && entry.realm === PROXY_CREDENTIAL_REALM)
+  if (!match) return sanitizedUrl
+  try {
+    const password = safeStorage.decryptString(Buffer.from(match.secret, 'base64'))
+    return assembleProxyUrl(sanitizedUrl, { username: match.username, password })
+  } catch (error) {
+    log.warn(`could not decrypt saved proxy password for ${host}: ${error instanceof Error ? error.message : String(error)}`)
+    return sanitizedUrl
+  }
 }
