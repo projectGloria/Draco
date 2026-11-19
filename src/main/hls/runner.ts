@@ -23,7 +23,7 @@ import type { Runner } from '../engine/runner.ts'
 import { kindForUrl } from '../engine/create.ts'
 import { taskWorkspaceDir } from '../engine/workspace.ts'
 import { quotaDetail } from '../engine/task.ts'
-import { AbortedError } from '../engine/worker.ts'
+import { AbortedError, parseRetryAfterMs, ServerBusyError } from '../engine/worker.ts'
 import { logger } from '../log.ts'
 import { readResponseBytes } from '../response-limit.ts'
 import { ensureFfmpeg } from './ffmpeg.ts'
@@ -78,6 +78,20 @@ const SPEED_WINDOW_MS = 3000
 /** Enough finished pieces from each track for its average to mean anything. */
 const ESTIMATE_AFTER_PER_TRACK = 3
 const FILE_SCAN_CONCURRENCY = 8
+/** 429 is explicit; 503 is what a connection-limited origin sends instead. */
+const BUSY_STATUS = new Set([429, 503])
+/**
+ * How many busy answers one piece may absorb before the stream fails. They do
+ * not spend the ordinary retry budget - a rate limit is the server asking us to
+ * slow down, not the piece being broken - but an origin that never relents
+ * must still end in an error rather than a download that waits forever.
+ */
+const MAX_BUSY_RETRIES = 12
+/** Backoff when a busy answer carries no Retry-After. */
+const BUSY_BASE_DELAY_MS = 2000
+const BUSY_MAX_DELAY_MS = 60_000
+/** Clean pieces in a row before one shed connection is given back. */
+const RECOVER_AFTER_PIECES = 20
 
 interface ActiveFetch {
   bytes: number
@@ -111,6 +125,12 @@ export class HlsRunner implements Runner {
   private keys = new Map<string, Buffer>()
   private inFlight: Promise<void> | null = null
   private restarted = false
+  /** Live connection ceiling; lowered each time the origin answers 429/503. */
+  private connectionCap = Number.POSITIVE_INFINITY
+  /** Shared cooldown: no connection starts a request before this time. */
+  private busyUntil = 0
+  private busyStreak = 0
+  private cleanSinceBusy = 0
 
   running = false
 
@@ -228,6 +248,7 @@ export class HlsRunner implements Runner {
       } else if (error instanceof AbortedError || this.controller.signal.aborted) {
         this.task.speed = 0
         this.task.eta = null
+        this.task.detail = null
         this.deps.onFinished(this.task, null)
       } else {
         this.task.status = 'error'
@@ -247,6 +268,7 @@ export class HlsRunner implements Runner {
     this.task.status = 'paused'
     this.task.speed = 0
     this.task.eta = null
+    this.task.detail = null
     this.controller.abort()
 
     // Waiting matters: the manager deletes the parts directory straight after a
@@ -583,13 +605,23 @@ export class HlsRunner implements Runner {
     let firstError: Error | null = null
     const workerCount = Math.min(this.config.maxConnections, jobs.length)
     const workers: Promise<void>[] = []
+    this.connectionCap = workerCount
+    this.busyUntil = 0
+    this.busyStreak = 0
+    this.cleanSinceBusy = 0
 
     const worker = async (slot: number): Promise<void> => {
       for (;;) {
         this.throwIfAborted()
         if (failed) return
+        if (cursor >= jobs.length) return
+        // A connection shed after a 429 idles rather than exiting, so it can
+        // come back once the origin has accepted a run of clean pieces.
+        if (slot >= this.connectionCap) {
+          await delay(500, this.controller.signal)
+          continue
+        }
         const index = cursor++
-        if (index >= jobs.length) return
 
         this.active.set(slot, { bytes: 0 })
         try {
@@ -737,11 +769,16 @@ export class HlsRunner implements Runner {
     sink: { reset(): void | Promise<void>; write(chunk: Buffer): void | Promise<void> }
   ): Promise<number> {
     let lastError: Error | null = null
+    let busyRetries = 0
+    let busyRetry = false
 
     for (let attempt = 0; attempt < this.config.retryLimit; attempt++) {
       this.throwIfAborted()
 
-      if (attempt > 0) {
+      const cooldown = this.busyUntil - Date.now()
+      if (cooldown > 0) await delay(cooldown * (1 + Math.random() * 0.25), this.controller.signal)
+
+      if (attempt > 0 && !busyRetry) {
         // Exponential with jitter, so a stream whose CDN hiccups does not have
         // every connection retry in lockstep. The jitter stays either way -
         // turning the setting off asks for a predictable delay, not for every
@@ -770,6 +807,9 @@ export class HlsRunner implements Runner {
         })
 
         try {
+          if (BUSY_STATUS.has(res.status)) {
+            throw new ServerBusyError(res.status, parseRetryAfterMs(res.headers.get('retry-after') ?? undefined))
+          }
           if (!res.ok) throw new Error(`HTTP ${res.status} ${res.statusText}`)
           if (byteRange) {
             if (res.status !== 206) {
@@ -808,6 +848,7 @@ export class HlsRunner implements Runner {
           if (byteRange && received !== byteRange.length) {
             throw new Error(`HLS byte-range returned ${received} bytes, expected ${byteRange.length}`)
           }
+          this.noteClean()
           return received
         } finally {
           await res.body?.cancel().catch(() => {})
@@ -818,10 +859,46 @@ export class HlsRunner implements Runner {
         // attempts here would turn the hold into "failed after 5 attempts".
         if (err instanceof QuotaExceededError || err instanceof EncryptedSegmentTooLargeError) throw err
         lastError = err instanceof Error ? err : new Error(String(err))
+        busyRetry = err instanceof ServerBusyError
+        if (busyRetry && busyRetries < MAX_BUSY_RETRIES) {
+          // Rate limited: back the whole stream off and use fewer connections,
+          // without spending this piece's retry budget. Hammering a 429 five
+          // times inside a few seconds is exactly what keeps it answering 429.
+          busyRetries++
+          attempt--
+          this.noteBusy(err as ServerBusyError)
+        }
       }
     }
 
     throw new Error(`Segment failed after ${this.config.retryLimit} attempts: ${lastError?.message}`)
+  }
+
+  /** Sheds a connection and pushes the shared cooldown out after a 429/503. */
+  private noteBusy(err: ServerBusyError): void {
+    this.cleanSinceBusy = 0
+    // Every connection in flight tends to hit the limit together. Only the
+    // first answer in a cooldown window sheds a connection and escalates the
+    // backoff; the rest just wait out the same window.
+    const fresh = Date.now() >= this.busyUntil
+    if (fresh) this.busyStreak++
+    const backoff = err.retryAfterMs ?? Math.min(BUSY_MAX_DELAY_MS, BUSY_BASE_DELAY_MS * 2 ** (Math.max(1, this.busyStreak) - 1))
+    this.busyUntil = Math.max(this.busyUntil, Date.now() + backoff)
+    if (fresh && this.connectionCap > 1) {
+      this.connectionCap = Math.max(1, Math.min(this.connectionCap, this.active.size) - 1)
+      this.task.connections = this.connectionCap
+    }
+    if (fresh) log.warn(`${this.task.filename}: server answered ${err.statusCode}; ${this.connectionCap} connection(s), waiting ${Math.round(backoff / 1000)}s`)
+  }
+
+  /** Gives a shed connection back after a run of clean pieces. */
+  private noteClean(): void {
+    this.busyStreak = 0
+    if (this.connectionCap >= this.config.maxConnections) return
+    if (++this.cleanSinceBusy < RECOVER_AFTER_PIECES) return
+    this.cleanSinceBusy = 0
+    this.connectionCap++
+    this.task.connections = this.connectionCap
   }
 
   private async decrypt(

@@ -118,4 +118,12 @@ describe('OptionsDialog draft transaction (F-11 / D4)', () => {
     const toggleMatches = source.match(/toggleColumn/g) ?? []
     strictEqual(toggleMatches.length, 0, 'ColumnToggles must not call live store toggleColumn directly')
   })
+
+  it('App requestDelete reads live store tasks rather than a stale empty closure', () => {
+    const source = readFileSync(new URL('../src/renderer/src/App.tsx', import.meta.url), 'utf8')
+    const start = source.indexOf('const requestDelete = useCallback')
+    const end = source.indexOf('const actions: ToolbarActions', start)
+    const body = source.slice(start, end)
+    strictEqual(body.includes('useApp.getState().tasks'), true, 'requestDelete must read current tasks from store')
+  })
 })

@@ -241,7 +241,8 @@ export default function App(): React.ReactElement {
   /* ---------------------------------------------------------------- */
 
   const requestDelete = useCallback((ids: string[]): void => {
-    const targets = ids.map((id) => tasks.find((t) => t.id === id)).filter((t) => t != null)
+    const currentTasks = useApp.getState().tasks
+    const targets = ids.map((id) => currentTasks.find((t) => t.id === id)).filter((t) => t != null)
     if (targets.length === 0) return
     setSelection([])
 

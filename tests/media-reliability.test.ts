@@ -339,3 +339,37 @@ test('DASH media socket stalls end in error within the configured network timeou
     if (runner.running) await runner.pause()
   }
 })
+
+test('HLS pieces back off on 429 without spending the retry budget, and shed a connection', async (t) => {
+  let refusals = 6
+  let requests = 0
+  const server = createServer((request, response) => {
+    requests++
+    if (request.url === '/always-busy.ts') { response.writeHead(429, { 'retry-after': '0' }).end(); return }
+    if (refusals > 0) { refusals--; response.writeHead(429, { 'retry-after': '0' }).end(); return }
+    response.end(Buffer.alloc(188, 0x47))
+  })
+  await new Promise<void>((done) => server.listen(0, '127.0.0.1', done))
+  t.after(async () => { await closeDispatchers(); server.closeAllConnections(); await new Promise<void>((done) => server.close(() => done())) })
+  const media = await bundledModule('src/main/hls/runner.ts', {
+    'ffmpeg.ts': 'export async function ensureFfmpeg() { return "ffmpeg" }'
+  })
+  const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`
+  const task = createTask({ url: base + '/media.m3u8', kind: 'hls', dir: tmpdir(), filename: 'film.mp4' })
+  // retryLimit 1: before the fix the first 429 was the piece's only attempt.
+  const runner = new media.HlsRunner(task, { maxConnections: 4, retryLimit: 1, timeoutMs: 5000 }, {
+    limiter: new RateLimiter(), onUpdate() {}, onFinished() {}
+  })
+  runner.connectionCap = 4
+  runner.active.set(0, { bytes: 0 })
+  runner.active.set(1, { bytes: 0 })
+  const chunks: Buffer[] = []
+  const sink = { reset() { chunks.length = 0 }, write(chunk: Buffer) { chunks.push(chunk) } }
+  const received = await runner.transfer(base + '/piece.ts', null, 0, sink)
+  strictEqual(received, 188)
+  strictEqual(requests, 7, 'six refusals then one success')
+  ok(runner.connectionCap < 4, 'a 429 must lower the connection ceiling')
+  ok(runner.connectionCap >= 1)
+
+  await rejects(runner.transfer(base + '/always-busy.ts', null, 0, sink), /Segment failed after 1 attempts: Server refused another connection \(429\)/)
+})

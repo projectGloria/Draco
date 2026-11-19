@@ -335,4 +335,37 @@ describe('batch queue moves', () => {
     t.mock.timers.tick(30_000)
     strictEqual(t3.isCatMode, undefined, 'must not start a second concurrent Cat Mode burst')
   })
+
+  it('restoring interrupted or paused tasks clears stale transient detail while preserving quota holds', async () => {
+    const settings: EngineSettings = {
+      maxConcurrentTasks: 2, maxConnectionsPerTask: 1, minSplitSize: 1024,
+      retryLimit: 1, timeoutMs: 1000, speedLimit: null, proxyUrl: null,
+      hostConnectionLimits: [], quotaBytes: null, quotaWindowMinutes: 60,
+      antivirusProgram: null, antivirusArgs: [], antivirusTimeoutSeconds: 1
+    }
+    const manager = new DownloadManager({
+      getSettings: () => settings,
+      onTasks: () => {},
+      onProgress: () => {}
+    })
+    cleanups.push(async () => { await manager.shutdown() })
+
+    const hls = createTask({ url: 'https://example.test/live.m3u8', kind: 'hls', dir: tmpdir(), filename: 'live.mp4' })
+    hls.status = 'downloading'
+    hls.detail = '4635 pieces'
+
+    const restarted = createTask({ url: 'https://example.test/file.bin', dir: tmpdir(), filename: 'file.bin' })
+    restarted.status = 'paused'
+    restarted.detail = 'Saved bytes could not be verified against the source; restarting from zero.'
+
+    const quotaHeld = createTask({ url: 'https://example.test/big.bin', dir: tmpdir(), filename: 'big.bin' })
+    quotaHeld.status = 'paused'
+    quotaHeld.detail = 'Transfer quota reached; resumes at 03:00'
+
+    await manager.load([hls, restarted, quotaHeld])
+    strictEqual(hls.status, 'paused')
+    strictEqual(hls.detail, null, 'interrupted HLS download must clear stale piece count detail')
+    strictEqual(restarted.detail, null, 'paused task must clear stale verification-restart detail')
+    strictEqual(quotaHeld.detail, 'Transfer quota reached; resumes at 03:00', 'quota hold detail must be preserved')
+  })
 })

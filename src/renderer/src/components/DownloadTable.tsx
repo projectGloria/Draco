@@ -61,6 +61,9 @@ const STATUS_COLOR: Record<TaskStatus, string> = {
   missing: 'var(--color-warn)'
 }
 
+/** Statuses whose `detail` describes work in progress rather than a stale note. */
+const DETAIL_STATUSES = new Set<TaskStatus>(['queued', 'probing', 'downloading', 'processing', 'scanning'])
+
 export default function DownloadTable({
   rows,
   display,
@@ -919,10 +922,14 @@ function Cell({
        * the warning colour.
        */
       const heldByQuota = isQuotaHold(task.status, task.detail)
+      // A detail describes live work ("4635 pieces", "restarting from zero").
+      // Once the task stops it is history, and drawing it in place of "Paused"
+      // made a stopped row read as if it were still busy.
+      const detail = heldByQuota || DETAIL_STATUSES.has(task.status) ? task.detail : null
       return (
         <div
           className={base + ' flex items-center gap-2'}
-          title={task.error ?? task.detail ?? statusLabel}
+          title={task.error ?? detail ?? statusLabel}
         >
           <span
             className={
@@ -943,7 +950,7 @@ function Cell({
               ? task.error
               : /* The detail says what a long stage is actually doing - fetching
                    ffmpeg, muxing - which "Downloading" on its own does not. */
-                (task.detail ?? statusLabel)}
+                (detail ?? statusLabel)}
             {task.isCatMode ? ' 🎭' : ''}
           </span>
         </div>

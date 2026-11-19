@@ -15,7 +15,7 @@ import { isFixedYouTubeResource, preparedYouTubeUrl, youtubeFormatId } from '../
 import { ensureDownloadDirectory } from '../destination-path.ts'
 import { partPathFor } from './workspace.ts'
 import { ChecksumMismatchError, verifyExpectedChecksum } from './checksum.ts'
-import { QUOTA_DETAIL_PREFIX } from '../../shared/quota.ts'
+import { isQuotaHold, QUOTA_DETAIL_PREFIX } from '../../shared/quota.ts'
 
 /**
  * Drives one download: probe, resume-or-start, keep the connection pool fed,
@@ -341,6 +341,7 @@ export class TaskRunner {
       this.task.status = 'paused'
       this.task.speed = 0
       this.task.eta = null
+      if (!isQuotaHold(this.task.status, this.task.detail)) this.task.detail = null
       this.deps.onUpdate(this.task)
       return
     }

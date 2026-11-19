@@ -1,6 +1,7 @@
 import { readdir, rename, rm, rmdir, stat } from 'node:fs/promises'
 import { basename, dirname, join, relative, resolve } from 'node:path'
 import type { DownloadTask, TaskLiveDetail, TaskProgress } from '../../shared/types.ts'
+import { isQuotaHold } from '../../shared/quota.ts'
 import { QuotaExceededError, RateLimiter, type QuotaState } from './limiter.ts'
 import { mapConcurrent } from './concurrency.ts'
 import { FinalizationPool } from './finalization-pool.ts'
@@ -271,6 +272,9 @@ export class DownloadManager {
         task.status = 'paused'
         task.speed = 0
         task.eta = null
+        if (!ambiguous.has(task.id)) task.detail = null
+      } else if (task.status === 'paused' && !ambiguous.has(task.id) && !isQuotaHold(task.status, task.detail)) {
+        task.detail = null
       }
       if (interruptedFinalization) {
         const file = await stat(join(task.dir, task.filename)).catch(() => null)
