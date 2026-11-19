@@ -150,18 +150,23 @@ export class Scheduler {
 
   async remove(id: string): Promise<void> {
     if (this.pending?.queueId === id) this.cancelPending()
-    const queue = this.queues.find((q) => q.id === id)
-    if (queue) {
-      // Orphaned tasks would otherwise be invisible: they'd still carry a
-      // queueId pointing at nothing and never be scheduled again.
-      for (const task of this.deps.manager.list()) {
-        if (task.queueId === id) task.queueId = null
+    let detached = false
+    // Orphaned tasks would otherwise be invisible: they'd still carry a
+    // queueId pointing at nothing and never be scheduled again.
+    for (const task of this.deps.manager.list()) {
+      if (task.queueId === id) {
+        task.queueId = null
+        detached = true
       }
     }
 
     this.queues = this.queues.filter((q) => q.id !== id)
     this.drained.delete(id)
     await this.persist()
+    if (detached) {
+      this.deps.manager.notifyTaskMetadataChanged()
+      this.deps.manager.applySettings()
+    }
   }
 
   /** Keeps queue ordering in step when a task is moved from the main table. */
@@ -378,6 +383,14 @@ export class Scheduler {
   private synchronizeMembership(): void {
     const tasks = this.deps.manager.list()
     const byId = new Map(tasks.map((task) => [task.id, task]))
+    const validQueueIds = new Set(this.queues.map((queue) => queue.id))
+    let detached = false
+    for (const task of tasks) {
+      if (task.queueId && !validQueueIds.has(task.queueId)) {
+        task.queueId = null
+        detached = true
+      }
+    }
     for (const queue of this.queues) {
       queue.taskIds = queue.taskIds.filter((id) => byId.get(id)?.queueId === queue.id)
       const members = new Set(queue.taskIds)
@@ -388,6 +401,7 @@ export class Scheduler {
         }
       }
     }
+    if (detached) this.deps.manager.notifyTaskMetadataChanged()
   }
 
   /**

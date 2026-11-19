@@ -218,4 +218,66 @@ describe('batch queue moves', () => {
     await scheduler.syncTaskQueues(['2', '9'], null)
     deepStrictEqual(scheduler.list().find((queue) => queue.id === 'b')!.taskIds, ['1', '3'])
   })
+
+  it('removing a queue emits task updates, schedules freed tasks, and startup sync clears dangling queueIds (F-05)', async () => {
+    const settings: EngineSettings = {
+      maxConcurrentTasks: 2, maxConnectionsPerTask: 1, minSplitSize: 1024,
+      retryLimit: 1, timeoutMs: 1000, speedLimit: null, proxyUrl: null,
+      hostConnectionLimits: [], quotaBytes: null, quotaWindowMinutes: 60,
+      antivirusProgram: null, antivirusArgs: [], antivirusTimeoutSeconds: 1
+    }
+    const taskUpdates: Array<Array<{ id: string; queueId: string | null }>> = []
+    let applySettingsCalls = 0
+
+    const manager = new DownloadManager({
+      getSettings: () => settings,
+      onTasks: (tasks) => {
+        taskUpdates.push(tasks.map((t) => ({ id: t.id, queueId: t.queueId })))
+      },
+      onProgress: () => {}
+    })
+    const origApply = manager.applySettings.bind(manager)
+    manager.applySettings = () => {
+      applySettingsCalls++
+      origApply()
+    }
+
+    const scheduler = new Scheduler({
+      manager,
+      onQueues: () => {},
+      saveQueues: async () => {},
+      onPending: () => {},
+      onExitRequested: () => {}
+    })
+    scheduler.load(sanitizeQueues([{ id: 'nightly', name: 'Nightly', taskIds: [] }]))
+    cleanups.push(async () => {
+      scheduler.stop()
+      await manager.shutdown()
+    })
+
+    const t1 = createTask({ url: 'https://example.test/a.bin', dir: tmpdir(), filename: 'a.bin', queueId: 'nightly' })
+    t1.status = 'paused'
+    const t2 = createTask({ url: 'https://example.test/b.bin', dir: tmpdir(), filename: 'b.bin', queueId: 'ghost-queue' })
+    t2.status = 'paused'
+    await manager.load([t1, t2])
+
+    const updatesBeforeRemove = taskUpdates.length
+    const applyBeforeRemove = applySettingsCalls
+    await scheduler.remove('nightly')
+
+    strictEqual(t1.queueId, null, 'removed queue task must lose queueId')
+    ok(taskUpdates.length > updatesBeforeRemove, 'removing a queue must emit task updates to persist and notify renderer')
+    strictEqual(
+      taskUpdates.at(-1)?.find((t) => t.id === t1.id)?.queueId,
+      null,
+      'emitted task snapshot must show cleared queueId'
+    )
+    ok(applySettingsCalls > applyBeforeRemove, 'removing a queue must trigger scheduling via applySettings')
+
+    // Startup / refresh sync must clear dangling queueId pointing to a non-existent queue
+    const updatesBeforeSync = taskUpdates.length
+    scheduler.refresh()
+    strictEqual(t2.queueId, null, 'synchronizeMembership must clear dangling queueId')
+    ok(taskUpdates.length > updatesBeforeSync, 'clearing dangling queueId must emit task updates')
+  })
 })
