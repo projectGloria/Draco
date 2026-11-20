@@ -1598,20 +1598,22 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         return
       }
 
-      case 'draco:fallback-download': {
+      case 'draco:fallback-open-tab': {
+        // A declined target=_blank link: give the page back its navigation.
         const url = typeof message.url === 'string' ? message.url : ''
-        if (!/^https?:/i.test(url) || typeof chrome.downloads?.download !== 'function') {
+        if (!/^https?:/i.test(url) || typeof chrome.tabs?.create !== 'function') {
           sendResponse({ ok: false })
           return
         }
         await addPassThrough(url)
-        const rawName = typeof message.filename === 'string' ? message.filename.trim() : ''
-        const safeName =
-          rawName && !/[\\/:*?"<>|]/.test(rawName) && !rawName.includes('..') ? rawName : undefined
+        const tab = sender.tab
         try {
-          await chrome.downloads.download({
+          await chrome.tabs.create({
             url,
-            ...(safeName ? { filename: safeName } : {})
+            active: true,
+            ...(typeof tab?.id === 'number' ? { openerTabId: tab.id } : {}),
+            ...(typeof tab?.windowId === 'number' ? { windowId: tab.windowId } : {}),
+            ...(typeof tab?.index === 'number' ? { index: tab.index + 1 } : {})
           })
           sendResponse({ ok: true })
         } catch {

@@ -96,7 +96,12 @@ export class DashRunner implements Runner {
         if (this.videoRunner?.task?.size !== null && this.audioRunner?.task?.size !== null) {
           this.task.size = (this.videoRunner?.task?.size ?? 0) + (this.audioRunner?.task?.size ?? 0)
         }
-        this.deps.onProbed?.(this.task)
+        // Deliberately not forwarded to the parent's `onProbed`. In the app that
+        // hook refiles the task, which can move `this.task.dir` while both halves
+        // are still writing - and the mux would then look for them in a folder
+        // they were never put in. The composite's name and folder were settled
+        // before it started; only the size is new here.
+        this.deps.onUpdate(this.task)
       }
     }
 

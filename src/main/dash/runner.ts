@@ -220,7 +220,9 @@ export class MpdRunner implements Runner {
     return new Promise((resolve, reject) => {
       this.assertSupportedPolicy()
       const args = ['-y', '-nostdin', '-hide_banner', '-loglevel', 'error']
-      args.push('-protocol_whitelist', 'http,https,tcp,tls')
+      // httpproxy: ffmpeg's TLS layer tunnels https through -http_proxy with
+      // the httpproxy protocol, and nested protocols inherit this whitelist.
+      args.push('-protocol_whitelist', 'http,https,tcp,tls,httpproxy')
       args.push('-rw_timeout', String(Math.max(1, Math.round(this.context.timeoutMs * 1000))))
       if (this.context.proxyUrl) args.push('-http_proxy', this.context.proxyUrl)
       const headerBlock = ffmpegHeaders(this.task.headers)

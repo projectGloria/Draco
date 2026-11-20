@@ -171,11 +171,12 @@ addEventListener(
 
     const replay = () => {
       if (anchor.target === '_blank' && !named) {
-        void sendToExtension({
-          type: 'draco:fallback-download',
-          url,
-          filename: suggested || undefined
-        }).then((res) => {
+        // Replay the original navigation: a new tab. A PDF or video opens in
+        // the browser's viewer exactly as it would have; a real attachment
+        // still downloads through the browser from that tab. The background
+        // opens it because window.open() here, after the async handoff, has
+        // lost its user activation and would be popup-blocked.
+        void sendToExtension({ type: 'draco:fallback-open-tab', url }).then((res) => {
           if (!res?.ok) triggerAnchorClick()
         })
         return

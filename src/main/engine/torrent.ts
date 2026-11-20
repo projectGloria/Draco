@@ -5,6 +5,13 @@ import type { RunnerContext } from './manager.ts'
 import { DEFAULT_TORRENT_TRACKERS } from './create.ts'
 import { fetchCachedTorrentDescriptor } from './probe.ts'
 import { localTorrentDescriptor } from './torrent-store.ts'
+import { loadReadOnlyChunkStore } from './torrent-readonly-store.ts'
+import { logger } from '../log.ts'
+
+const log = logger('torrent')
+
+/** How long a finished torrent may take to come back up on the read-only store. */
+const READ_ONLY_REOPEN_MS = 30_000
 
 interface TorrentProgressFile {
   path: string
@@ -41,7 +48,11 @@ export function torrentDownloadOptions(path: string): { path: string; deselect: 
  * inside the runner because a seeding session outlives the runner that produced
  * it and has to keep the same panel up to date.
  */
-function torrentInfoOf(torrent: Torrent, selectedFiles?: string[]): DownloadTask['torrentInfo'] {
+function torrentInfoOf(
+  torrent: Torrent,
+  selectedFiles?: string[],
+  carried: TransferCarry = NO_CARRY
+): DownloadTask['torrentInfo'] {
   const selected = selectedFiles ? new Set(selectedFiles) : null
   return {
     infoHash: torrent.infoHash,
@@ -62,9 +73,29 @@ function torrentInfoOf(torrent: Torrent, selectedFiles?: string[]): DownloadTask
     })),
     trackers: [...torrent.announce],
     sources: [...torrent.urlList],
-    uploaded: torrent.uploaded,
-    ratio: Number.isFinite(torrent.ratio) ? torrent.ratio : 0
+    uploaded: carried.uploaded + (Number(torrent.uploaded) || 0),
+    ratio: ratioOf(torrent, carried)
   }
+}
+
+/**
+ * What the downloading session had already transferred when the torrent was
+ * re-added for seeding. The re-added torrent starts its own counters at zero,
+ * and a ratio that reset the moment a download finished would be a lie.
+ */
+interface TransferCarry {
+  uploaded: number
+  received: number
+}
+
+const NO_CARRY: TransferCarry = { uploaded: 0, received: 0 }
+
+function ratioOf(torrent: Torrent, carried: TransferCarry): number {
+  if (carried === NO_CARRY) return Number.isFinite(torrent.ratio) ? torrent.ratio : 0
+  const uploaded = carried.uploaded + (Number(torrent.uploaded) || 0)
+  const received = carried.received + (Number(torrent.received) || 0)
+  const ratio = uploaded / (received || torrent.length || 1)
+  return Number.isFinite(ratio) ? ratio : 0
 }
 
 /** How often the details panel may be rebuilt while it is being watched. */
@@ -77,6 +108,7 @@ export class TorrentRunner implements Runner {
   private torrent: Torrent | null = null
   private controller = new AbortController()
   private cleanupPromise: Promise<void> | null = null
+  private carried: TransferCarry = NO_CARRY
 
   public readonly task: DownloadTask
   private readonly context: RunnerContext
@@ -427,9 +459,80 @@ export class TorrentRunner implements Runner {
     // The download is over either way - `onFinished` still runs, the row still
     // goes green, the queue still starts the next task - but the peers who made
     // this download possible keep an upload to talk to.
-    if (!this.handOverForSeeding()) await this.cleanup()
+    // Seeding goes on from a read-only copy of the store, or not at all: the
+    // downloading store holds every file open read-write, which locks the
+    // finished file against programs like WinRAR for as long as it seeds.
+    // Decided synchronously, so a torrent that will not seed starts its
+    // teardown without yielding first.
+    const source = this.reseedSource()
+    const reopened = source ? await this.reopenReadOnly(source) : false
+    if (!reopened || !this.handOverForSeeding()) await this.cleanup()
 
     this.context.onFinished(this.task, null)
+  }
+
+  /** What re-adding the torrent for seeding needs, or null when it cannot seed. */
+  private reseedSource(): { torrentFile: Uint8Array; bitfield: Uint8Array } | null {
+    const torrent = this.torrent as any
+    if (!this.client || !torrent || !this.context.onSeed) return null
+    const torrentFile: Uint8Array | undefined = torrent.torrentFile
+    const bitfield: Uint8Array | undefined = torrent.bitfield?.buffer
+    return torrentFile && bitfield ? { torrentFile, bitfield } : null
+  }
+
+  /**
+   * Closes the downloading store and adds the same torrent back on a store that
+   * can only read, with the finished bitfield so nothing is hashed again.
+   *
+   * Returns false when seeding could not be set up; the caller then tears the
+   * client down, which also releases the files.
+   */
+  private async reopenReadOnly({ torrentFile, bitfield }: { torrentFile: Uint8Array; bitfield: Uint8Array }): Promise<boolean> {
+    const client = this.client
+    const torrent = this.torrent as any
+    if (!client || !torrent) return false
+
+    const announce = Array.isArray(torrent.announce) && torrent.announce.length > 0
+      ? [...torrent.announce]
+      : [...DEFAULT_TORRENT_TRACKERS]
+    const carried: TransferCarry = {
+      uploaded: Number(torrent.uploaded) || 0,
+      received: Number(torrent.received) || 0
+    }
+    const pieces = new Uint8Array(bitfield)
+
+    this.torrent = null
+    // `destroyStore: false` closes the file handles and leaves the payload.
+    await new Promise<void>((resolve) => {
+      try { torrent.destroy({ destroyStore: false }, () => resolve()) } catch { resolve() }
+    })
+    if (this.client !== client) return false
+
+    let seed: any = null
+    try {
+      const ReadOnlyChunkStore = await loadReadOnlyChunkStore()
+      if (this.client !== client) return false
+      seed = client.add(torrentFile, {
+        ...torrentDownloadOptions(this.task.dir),
+        announce,
+        store: ReadOnlyChunkStore,
+        bitfield: pieces
+      })
+      await new Promise<void>((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error('timed out reopening the torrent read-only')), READ_ONLY_REOPEN_MS)
+        timer.unref?.()
+        seed.once('ready', () => { clearTimeout(timer); resolve() })
+        seed.once('error', (error: unknown) => { clearTimeout(timer); reject(error) })
+      })
+      if (this.client !== client) return false
+      this.torrent = seed as Torrent
+      this.carried = carried
+      return true
+    } catch (error) {
+      log.warn(`not seeding ${this.task.filename}: ${error instanceof Error ? error.message : String(error)}`)
+      try { seed?.destroy({ destroyStore: false }) } catch {}
+      return false
+    }
   }
 
   /**
@@ -449,20 +552,21 @@ export class TorrentRunner implements Runner {
     this.torrent = null
 
     const task = this.task
+    const carried = this.carried
     let stopped = false
     let stopping: Promise<void> | null = null
 
     const session: SeedSession = {
       taskId: task.id,
       progress: () => ({
-        uploaded: Number(torrent.uploaded) || 0,
-        ratio: Number.isFinite(torrent.ratio) ? torrent.ratio : 0,
+        uploaded: carried.uploaded + (Number(torrent.uploaded) || 0),
+        ratio: ratioOf(torrent, carried),
         uploadSpeed: Number(torrent.uploadSpeed) || 0,
         peers: torrent.wires?.length ?? 0
       }),
       refreshInfo: () => {
         if (stopped) return
-        task.torrentInfo = torrentInfoOf(torrent, task.selectedFiles)
+        task.torrentInfo = torrentInfoOf(torrent, task.selectedFiles, carried)
       },
       applyUploadLimit: (bytesPerSecond) => {
         if (stopped || typeof (client as any).throttleUpload !== 'function') return

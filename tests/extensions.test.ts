@@ -443,7 +443,6 @@ describe('link interception security and fallback (F-01 / F-04)', () => {
           }
           if (msg.type === 'draco:list-media') return { media: [] }
           if (msg.type === 'draco:link-click') return opts.linkReply ?? { taken: false }
-          if (msg.type === 'draco:fallback-download') return { ok: true }
           return { ok: true }
         }
       },
@@ -566,17 +565,22 @@ describe('link interception security and fallback (F-01 / F-04)', () => {
     }
   })
 
-  it('delegates declined target="_blank" downloads to background instead of popup-blocked window.open (F-04)', async () => {
+  it('replays declined target="_blank" links as a background-opened tab, not a forced download (F-04)', async () => {
     const env = await loadContentScript({ active: true, linkReply: { taken: false } })
     try {
-      const anchor = new env.FakeAnchor('https://files.example.com/manual.zip', null, '_blank')
+      const anchor = new env.FakeAnchor('https://files.example.com/manual.pdf', null, '_blank')
       const ev = env.makeClickEvent(anchor, { isTrusted: true })
       env.dispatchClick(ev)
       await new Promise((r) => setTimeout(r, 20))
       strictEqual(env.getWindowOpenCalls(), 0, 'must not rely on popup-blocked window.open')
-      const fallbacks = env.sentMessages.filter((m) => m.type === 'draco:fallback-download')
-      strictEqual(fallbacks.length, 1, 'should ask background to start browser download')
-      strictEqual(fallbacks[0].url, 'https://files.example.com/manual.zip')
+      strictEqual(
+        env.sentMessages.filter((m) => m.type === 'draco:fallback-download').length,
+        0,
+        'a viewable link must not be force-downloaded'
+      )
+      const opened = env.sentMessages.filter((m) => m.type === 'draco:fallback-open-tab')
+      strictEqual(opened.length, 1, 'should ask background to open the link in a new tab')
+      strictEqual(opened[0].url, 'https://files.example.com/manual.pdf')
     } finally {
       env.cleanup()
     }

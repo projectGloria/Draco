@@ -1,7 +1,8 @@
 import type { MediaVariant, RequestHeaders } from '../../shared/types.ts'
 import { mapConcurrent } from '../engine/concurrency.ts'
 import { buildHeaders } from '../engine/probe.ts'
-import { fetchGuarded, headersForResource } from '../fetch-guard.ts'
+import { documentIsPrivate, fetchGuarded, headersForResource } from '../fetch-guard.ts'
+import { hostResolvesPrivate } from '../engine/http.ts'
 import { readResponsePrefix, readResponseText } from '../response-limit.ts'
 import { isMasterPlaylist, parseMaster, parseMediaPlaylist, type MediaPlaylist } from './playlist-parser.ts'
 
@@ -17,18 +18,23 @@ export interface PlaylistRequestOptions {
   credentialUrl?: string
 }
 
-async function fetchText(url: string, headers: RequestHeaders | undefined, options: PlaylistRequestOptions = {}): Promise<{ text: string; finalUrl: string }> {
+async function fetchText(url: string, headers: RequestHeaders | undefined, options: PlaylistRequestOptions = {}): Promise<{ text: string; finalUrl: string; basePrivate: boolean }> {
   const timeoutMs = options.timeoutMs ?? 30_000
   const signal = AbortSignal.any([AbortSignal.timeout(timeoutMs), ...(options.signal ? [options.signal] : [])])
+  // Resolved once, before the request; the guard and the parser both reuse it.
+  const startsPrivate = await hostResolvesPrivate(new URL(url).hostname)
   const res = await fetchGuarded(url, {
     headers: headersForResource(url, options.credentialUrl ?? url, buildHeaders(headers)),
     timeoutMs,
-    signal
+    signal,
+    startsPrivate
   })
 
   try {
     if (!res.ok) throw new Error(`Playlist request failed with ${res.status}`)
-    return { text: await readResponseText(res, 10 * 1024 * 1024), finalUrl: res.url || url }
+    const text = await readResponseText(res, 10 * 1024 * 1024)
+    const finalUrl = res.url || url
+    return { text, finalUrl, basePrivate: documentIsPrivate(url, finalUrl, startsPrivate) }
   } finally {
     await res.body?.cancel().catch(() => {})
   }
@@ -46,7 +52,7 @@ export async function resolveVariants(
   const baseUrl = fetched.finalUrl
 
   if (isMasterPlaylist(text)) {
-    const variants = parseMaster(text, baseUrl)
+    const variants = parseMaster(text, baseUrl, { basePrivate: fetched.basePrivate })
     if (variants.length > 0) {
       if (options.estimateSizes === false) return variants
       // BANDWIDTH is useful for sorting, but it is not trustworthy enough for
@@ -72,7 +78,7 @@ export async function resolveVariants(
     }
   }
 
-  const playlist = parseMediaPlaylist(text, baseUrl)
+  const playlist = parseMediaPlaylist(text, baseUrl, { basePrivate: fetched.basePrivate })
   return [
     {
       url: baseUrl,
@@ -253,9 +259,9 @@ async function loadMediaPlaylistDepth(
   const baseUrl = fetched.finalUrl
 
   if (isMasterPlaylist(text)) {
-    const best = parseMaster(text, baseUrl)[0]
+    const best = parseMaster(text, baseUrl, { basePrivate: fetched.basePrivate })[0]
     if (best) return loadMediaPlaylistDepth(best.url, headers, depth + 1, options)
   }
 
-  return parseMediaPlaylist(text, baseUrl)
+  return parseMediaPlaylist(text, baseUrl, { basePrivate: fetched.basePrivate })
 }

@@ -1,7 +1,8 @@
 import type { MediaVariant, RequestHeaders } from '../../shared/types.ts'
-import { fetchGuarded } from '../fetch-guard.ts'
+import { documentIsPrivate, fetchGuarded } from '../fetch-guard.ts'
 import { readResponseText } from '../response-limit.ts'
 import { isPrivateHost } from '../engine/create.ts'
+import { hostResolvesPrivate } from '../engine/http.ts'
 import { buildHeaders } from '../engine/probe.ts'
 
 export interface MpdSummary {
@@ -15,7 +16,52 @@ export interface MpdSummary {
 }
 
 /** A manifest can be inspected safely, but encrypted media is never bypassed. */
-export function inspectMpd(xml: string): MpdSummary {
+export interface MpdSource {
+  /** Where the manifest was fetched from (its final URL). Relative URLs resolve against it. */
+  url?: string
+  /**
+   * The manifest's host is on a private network (by where it resolves). A LAN
+   * server pointing at itself or a neighbour is expected; only a public
+   * manifest reaching into a private network is refused, matching HLS.
+   */
+  private?: boolean
+}
+
+/** Every address the manifest declares: BaseURLs plus absolute SegmentTemplate/SegmentURL ones. */
+function declaredAddresses(xml: string): string[] {
+  const out: string[] = []
+  for (const match of xml.matchAll(/<BaseURL\b[^>]*>([\s\S]*?)<\/BaseURL>/gi)) out.push(match[1].trim())
+  for (const match of xml.matchAll(/<(?:SegmentTemplate|SegmentURL|Initialization|RepresentationIndex)\b([^>]*)>/gi)) {
+    for (const name of ['media', 'initialization', 'index', 'sourceURL']) {
+      const value = attribute(match[1], name)
+      // Only absolute addresses can leave the manifest's own host.
+      if (value && /^[a-z][a-z0-9+.-]*:/i.test(value.trim())) out.push(value.trim())
+    }
+  }
+  return out
+}
+
+function assertSafeAddresses(xml: string, source: MpdSource): void {
+  const base = source.url ?? 'https://placeholder.invalid'
+  for (const raw of declaredAddresses(xml)) {
+    let parsed: URL
+    try {
+      // `$Number$`-style template identifiers are not valid in a host, but
+      // they only appear in paths; parse with them blanked out.
+      parsed = new URL(raw.replace(/\$[A-Za-z]+(?:%0\d+d)?\$/g, '0'), base)
+    } catch {
+      continue
+    }
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+      throw new Error('DASH manifest specifies an invalid or private BaseURL')
+    }
+    if (!source.private && parsed.hostname && isPrivateHost(parsed.hostname)) {
+      throw new Error('DASH manifest specifies an invalid or private BaseURL')
+    }
+  }
+}
+
+export function inspectMpd(xml: string, source: MpdSource = {}): MpdSummary {
   if (!/<MPD\b/i.test(xml)) throw new Error('The server did not return an MPEG-DASH manifest')
 
   const protection = [...xml.matchAll(/<ContentProtection\b([^>]*)>/gi)]
@@ -29,17 +75,7 @@ export function inspectMpd(xml: string): MpdSummary {
     throw new Error(`${system} is protected and cannot be downloaded by Draco`)
   }
 
-  for (const baseMatch of xml.matchAll(/<BaseURL\b[^>]*>([\s\S]*?)<\/BaseURL>/gi)) {
-    const raw = baseMatch[1].trim()
-    try {
-      const parsed = new URL(raw, 'https://placeholder.invalid')
-      if (parsed.protocol === 'file:' || parsed.protocol === 'data:' || (parsed.hostname && isPrivateHost(parsed.hostname))) {
-        throw new Error('DASH manifest specifies an invalid or private BaseURL')
-      }
-    } catch (e) {
-      if (e instanceof Error && e.message.includes('BaseURL')) throw e
-    }
-  }
+  assertSafeAddresses(xml, source)
 
   const mpdTag = /<MPD\b([^>]*)>/i.exec(xml)?.[1] ?? ''
   const durationText = attribute(mpdTag, 'mediaPresentationDuration')
@@ -104,10 +140,12 @@ export async function resolveMpd(
   const requestSignal = signal ? AbortSignal.any([signal, controller.signal]) : controller.signal
 
   try {
+    const startsPrivate = await hostResolvesPrivate(new URL(url).hostname)
     const response = await fetchGuarded(url, {
       headers: buildHeaders(headers),
       signal: requestSignal,
-      timeoutMs
+      timeoutMs,
+      startsPrivate
     })
     let xml: string
     try {
@@ -116,7 +154,11 @@ export async function resolveMpd(
     } finally {
       await response.body?.cancel().catch(() => {})
     }
-    const summary = inspectMpd(xml)
+    const manifestUrl = response.url || url
+    const summary = inspectMpd(xml, {
+      url: manifestUrl,
+      private: documentIsPrivate(url, manifestUrl, startsPrivate)
+    })
     if (summary.dynamic) throw new Error('Live MPEG-DASH streams are not supported yet')
 
     const detail = summary.maxHeight ? `${summary.maxHeight}p max` : 'automatic quality'

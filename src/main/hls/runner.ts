@@ -13,7 +13,7 @@ import {
 } from 'node:fs/promises'
 import { basename, join } from 'node:path'
 import type { DownloadTask, Segment } from '@shared/types'
-import { isPrivateHost } from '../engine/create.ts'
+import { hostResolvesPrivate } from '../engine/http.ts'
 import { fetchGuarded, headersForResource } from '../fetch-guard.ts'
 import { QuotaExceededError, type RateLimiter } from '../engine/limiter.ts'
 import { discardReservedPath, moveFile, uniquePath } from '../engine/naming.ts'
@@ -142,6 +142,18 @@ export class HlsRunner implements Runner {
     this.task = task
     this.config = config
     this.deps = deps
+  }
+
+  private taskHostPrivate: Promise<boolean> | null = null
+
+  /**
+   * Whether segments and keys may come from private addresses: yes when the
+   * task's own host is on a private network. Decided by where that host
+   * resolves, not its spelling, so `nas`, a split-horizon name pointing at
+   * 192.168.x or a Tailscale MagicDNS name count as private too.
+   */
+  private taskHostIsPrivate(): Promise<boolean> {
+    return (this.taskHostPrivate ??= hostResolvesPrivate(new URL(this.task.url).hostname))
   }
 
   private get tempDir(): string {
@@ -798,12 +810,13 @@ export class HlsRunner implements Runner {
           headers.range = `bytes=${byteRange.offset}-${byteRange.offset + byteRange.length - 1}`
         }
 
-        const allowPrivate = isPrivateHost(new URL(this.task.url).hostname)
+        const allowPrivate = await this.taskHostIsPrivate()
         const res = await fetchGuarded(url, {
           headers,
           signal: this.controller.signal,
           timeoutMs: this.config.timeoutMs,
-          allowPrivate
+          allowPrivate,
+          startsPrivate: allowPrivate
         })
 
         try {
@@ -917,12 +930,13 @@ export class HlsRunner implements Runner {
           await delay(backoff, this.controller.signal)
         }
         try {
-          const allowPrivate = isPrivateHost(new URL(this.task.url).hostname)
+          const allowPrivate = await this.taskHostIsPrivate()
           const res = await fetchGuarded(key.url, {
             headers: headersForResource(key.url, this.task.url, buildHeaders(this.task.headers)),
             signal: this.controller.signal,
             timeoutMs: this.config.timeoutMs,
-            allowPrivate
+            allowPrivate,
+            startsPrivate: allowPrivate
           })
 
           let candidate: Buffer

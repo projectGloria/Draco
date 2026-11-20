@@ -28,6 +28,15 @@ import {
 } from './workspace.ts'
 
 const log = logger('manager')
+
+/** The host a task connects to, lowercased; '' when there is none (magnet links). */
+function taskHost(task: DownloadTask): string {
+  try {
+    return new URL(task.url).hostname.toLowerCase()
+  } catch {
+    return ''
+  }
+}
 const RECOVERY_CONCURRENCY = 8
 const FINALIZATION_CONCURRENCY = 2
 
@@ -1251,16 +1260,24 @@ export class DownloadManager {
 
       const settings = this.options.getSettings()
       if (!settings.catMode) return
-      // One keep-alive trickle at a time; queued tasks only exist while normal
-      // active slots are saturated, so this burst is intentionally bounded to a
-      // single 100 KB/s connection charged against the shared app-wide limiter.
+      // Queued tasks only exist while every normal slot is full, so a trickle
+      // is by design one connection over maxConcurrentTasks (the Options hint
+      // says so). It is bounded: one at a time, ~100 KB/s, charged against the
+      // shared limiter. Two cases are never overshot:
+      // - a limit of 1 is a deliberate "one connection at a time" (metered
+      //   link, one-session-per-account host), so no trickle at all;
+      // - a host that already has a download running never gets a second
+      //   connection from a trickle.
+      if (settings.maxConcurrentTasks <= 1) return
       if ([...this.runners.values()].some((r) => r.task.isCatMode)) return
+      const busyHosts = new Set([...this.runners.values()].map((r) => taskHost(r.task)).filter(Boolean))
 
       // A queue's waiting items must not download around its concurrency/order.
       // The MPD runner hands network I/O to ffmpeg, which cannot honor the
       // trickle limiter. Leave it queued for its normal start instead.
       const queuedTasks = [...this.tasks.values()].filter((t) =>
-        !t.queueId && t.kind !== 'dash' && t.status === 'queued' && !this.runners.has(t.id))
+        !t.queueId && t.kind !== 'dash' && t.status === 'queued' && !this.runners.has(t.id) &&
+        !busyHosts.has(taskHost(t)))
       if (queuedTasks.length === 0) return
 
       // Round-robin: always pick the one that hasn't been pinged in the longest time.

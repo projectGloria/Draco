@@ -5,7 +5,7 @@ import type { SiteCredential } from '@shared/types'
 import { getPaths } from './bootstrap/paths.ts'
 import { logger } from './log.ts'
 import { readJsonOrThrowIfPresent, writeJsonAtomic } from './json-file.ts'
-import { assembleProxyUrl, PROXY_CREDENTIAL_REALM } from './proxy-credentials.ts'
+import { assembleProxyUrl, PROXY_CREDENTIAL_REALM, proxyCredentialKey } from './proxy-credentials.ts'
 
 const log = logger('credentials')
 
@@ -192,8 +192,45 @@ export function hasCredentialsFor(url: string): boolean {
   return host !== null && entries.some((entry) => entry.host === host && entry.realm !== PROXY_CREDENTIAL_REALM)
 }
 
-export async function saveProxyCredential(host: string, username: string, password: string): Promise<void> {
-  await saveCredential({ host, realm: PROXY_CREDENTIAL_REALM, username, password })
+/**
+ * Seals the proxy credential under `key` (a `scheme://host:port` origin, see
+ * `proxyCredentialKey`). Unlike site passwords, the password may be empty:
+ * API-key proxies put the key in the username (`http://KEY@host`). So the
+ * username is sealed too, inside the secret, and the plaintext `username`
+ * column stays empty. There is one proxy, so saving replaces any older entry.
+ */
+export async function saveProxyCredential(key: string, username: string, password: string): Promise<void> {
+  if (!safeStorage.isEncryptionAvailable()) {
+    throw new Error('Windows will not encrypt saved passwords right now, so none were saved')
+  }
+  const host = hostOf(String(key ?? ''))
+  if (!host) throw new Error('That is not a host Draco can match against')
+  if (!username) throw new Error('A proxy username is needed')
+  const secret = safeStorage.encryptString(JSON.stringify({ username, password: password ?? '' })).toString('base64')
+  await changeCredentials(async () => {
+    if (!loaded) await loadCredentials()
+    const entry: StoredCredential = {
+      id: randomUUID(),
+      host,
+      realm: PROXY_CREDENTIAL_REALM,
+      username: '',
+      secret,
+      createdAt: Date.now()
+    }
+    const nextEntries = [...entries.filter((row) => row.realm !== PROXY_CREDENTIAL_REALM), entry]
+    await persist(nextEntries)
+    entries = nextEntries
+    log.info(`saved proxy credentials for ${host}`)
+  })
+}
+
+function openProxySecret(entry: StoredCredential): { username: string; password: string } | null {
+  const plain = safeStorage.decryptString(Buffer.from(entry.secret, 'base64'))
+  // Older entries kept the username in the clear and sealed only the password.
+  if (entry.username) return { username: entry.username, password: plain }
+  const parsed = JSON.parse(plain) as { username?: unknown; password?: unknown }
+  if (typeof parsed?.username !== 'string' || !parsed.username) return null
+  return { username: parsed.username, password: typeof parsed.password === 'string' ? parsed.password : '' }
 }
 
 export async function clearProxyCredentials(): Promise<void> {
@@ -209,13 +246,15 @@ export async function clearProxyCredentials(): Promise<void> {
 /** Reassembles the authenticated proxy URL from the sealed credential store for dispatcher construction only. */
 export function resolveProxyUrl(sanitizedUrl: string | null): string | null {
   if (!sanitizedUrl || !loaded) return sanitizedUrl
-  const host = hostOf(sanitizedUrl)
+  // Same key form as the save side (scheme kept), so http-on-443 matches.
+  const key = proxyCredentialKey(sanitizedUrl)
+  const host = key ? hostOf(key) : null
   if (!host) return sanitizedUrl
   const match = entries.find((entry) => entry.host === host && entry.realm === PROXY_CREDENTIAL_REALM)
   if (!match) return sanitizedUrl
   try {
-    const password = safeStorage.decryptString(Buffer.from(match.secret, 'base64'))
-    return assembleProxyUrl(sanitizedUrl, { username: match.username, password })
+    const creds = openProxySecret(match)
+    return creds ? assembleProxyUrl(sanitizedUrl, creds) : sanitizedUrl
   } catch (error) {
     log.warn(`could not decrypt saved proxy password for ${host}: ${error instanceof Error ? error.message : String(error)}`)
     return sanitizedUrl

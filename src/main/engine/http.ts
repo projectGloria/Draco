@@ -96,6 +96,30 @@ function retireAllCached(): void {
   guardedDispatchers.clear()
 }
 
+/**
+ * Whether this host is on a private network: by its text (`nas.local`,
+ * `192.168.1.10`) or by what it actually resolves to (`nas`, a split-horizon
+ * corporate name, a Tailscale MagicDNS name in 100.64/10). Used to decide
+ * whether a download that *started* on a private host may keep fetching from
+ * private addresses. A failed lookup counts as public, the stricter answer.
+ */
+export function hostResolvesPrivate(hostname: string): Promise<boolean> {
+  if (isPrivateHost(hostname)) return Promise.resolve(true)
+  const lookup = customLookup ?? (dns.lookup as unknown as LookupFn)
+  const host = hostname.replace(/^\[|\]$/g, '')
+  return new Promise((resolve) => {
+    try {
+      lookup(host, { all: true }, (err, address) => {
+        if (err) return resolve(false)
+        const list = Array.isArray(address) ? address.map((entry) => entry?.address) : [address]
+        resolve(list.some((entry) => typeof entry === 'string' && entry !== '' && isPrivateHost(entry)))
+      })
+    } catch {
+      resolve(false)
+    }
+  })
+}
+
 /** Overrides the underlying DNS lookup (for tests). Pass null to restore `dns.lookup`. */
 export function setDnsLookup(lookup: LookupFn | null): void {
   customLookup = lookup

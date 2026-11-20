@@ -281,9 +281,9 @@ describe('batch queue moves', () => {
     ok(taskUpdates.length > updatesBeforeSync, 'clearing dangling queueId must emit task updates')
   })
 
-  it('Cat Mode trickles a waiting queued task when active slots are full, at most one at a time (F-06)', async (t) => {
+  it('Cat Mode trickles a waiting queued task when active slots are full, at most one at a time, never to a busy host (F-06)', async (t) => {
     const settings: EngineSettings = {
-      maxConcurrentTasks: 1, maxConnectionsPerTask: 1, minSplitSize: 1024,
+      maxConcurrentTasks: 2, maxConnectionsPerTask: 1, minSplitSize: 1024,
       retryLimit: 1, timeoutMs: 1000, speedLimit: null, proxyUrl: null,
       hostConnectionLimits: [], quotaBytes: null, quotaWindowMinutes: 60,
       antivirusProgram: null, antivirusArgs: [], antivirusTimeoutSeconds: 1,
@@ -316,24 +316,68 @@ describe('batch queue moves', () => {
       await manager.shutdown()
     })
 
-    const t1 = createTask({ url: 'https://example.test/1.m3u8', kind: 'hls', dir: tmpdir(), filename: '1.mp4' })
-    const t2 = createTask({ url: 'https://example.test/2.m3u8', kind: 'hls', dir: tmpdir(), filename: '2.mp4' })
-    const t3 = createTask({ url: 'https://example.test/3.m3u8', kind: 'hls', dir: tmpdir(), filename: '3.mp4' })
+    const t0 = createTask({ url: 'https://a.example.test/0.m3u8', kind: 'hls', dir: tmpdir(), filename: '0.mp4' })
+    const t1 = createTask({ url: 'https://a.example.test/1.m3u8', kind: 'hls', dir: tmpdir(), filename: '1.mp4' })
+    const tSame = createTask({ url: 'https://a.example.test/s.m3u8', kind: 'hls', dir: tmpdir(), filename: 's.mp4' })
+    const t2 = createTask({ url: 'https://b.example.test/2.m3u8', kind: 'hls', dir: tmpdir(), filename: '2.mp4' })
+    const t3 = createTask({ url: 'https://c.example.test/3.m3u8', kind: 'hls', dir: tmpdir(), filename: '3.mp4' })
+    manager.add(t0, true)
     manager.add(t1, true)
+    manager.add(tSame, true)
     manager.add(t2, true)
     manager.add(t3, true)
+    strictEqual(t0.status, 'downloading')
     strictEqual(t1.status, 'downloading')
+    strictEqual(tSame.status, 'queued')
     strictEqual(t2.status, 'queued')
     strictEqual(t3.status, 'queued')
 
-    // First 30s tick: Cat Mode should start a keep-alive trickle on t2
+    // First 30s tick: Cat Mode should start a keep-alive trickle on t2, skipping
+    // tSame because its host already has a download running.
     t.mock.timers.tick(30_000)
+    strictEqual(tSame.isCatMode, undefined, 'a host that is already downloading must not get a second connection')
     strictEqual(t2.isCatMode, true, 'Cat Mode must start a keep-alive burst for a waiting queued task')
     strictEqual(t3.isCatMode, undefined, 'Cat Mode must run at most one burst at a time')
 
     // Second 30s tick while t2 is still in Cat Mode: must not start a second concurrent burst
     t.mock.timers.tick(30_000)
     strictEqual(t3.isCatMode, undefined, 'must not start a second concurrent Cat Mode burst')
+  })
+
+  it('Cat Mode never trickles past a concurrency limit of 1 (F-06)', async (t) => {
+    const settings: EngineSettings = {
+      maxConcurrentTasks: 1, maxConnectionsPerTask: 1, minSplitSize: 1024,
+      retryLimit: 1, timeoutMs: 1000, speedLimit: null, proxyUrl: null,
+      hostConnectionLimits: [], quotaBytes: null, quotaWindowMinutes: 60,
+      antivirusProgram: null, antivirusArgs: [], antivirusTimeoutSeconds: 1,
+      catMode: true
+    }
+    t.mock.timers.enable({ apis: ['setInterval'] })
+    const manager = new DownloadManager({
+      getSettings: () => settings,
+      onTasks: () => {},
+      onProgress: () => {},
+      createHlsRunner: (task) => ({
+        task,
+        running: false,
+        async start() { this.running = true; task.status = 'downloading' },
+        async pause() { this.running = false; task.status = 'paused' },
+        tick() {},
+        async resetForRestart() { return true }
+      })
+    })
+    cleanups.push(async () => {
+      t.mock.timers.reset()
+      await manager.shutdown()
+    })
+    const t1 = createTask({ url: 'https://a.example.test/1.m3u8', kind: 'hls', dir: tmpdir(), filename: '1.mp4' })
+    const t2 = createTask({ url: 'https://b.example.test/2.m3u8', kind: 'hls', dir: tmpdir(), filename: '2.mp4' })
+    manager.add(t1, true)
+    manager.add(t2, true)
+    strictEqual(t2.status, 'queued')
+    t.mock.timers.tick(30_000)
+    strictEqual(t2.isCatMode, undefined, 'max 1 means one connection: no keep-alive trickle')
+    strictEqual(t2.status, 'queued')
   })
 
   it('restoring interrupted or paused tasks clears stale transient detail while preserving quota holds', async () => {
@@ -367,5 +411,55 @@ describe('batch queue moves', () => {
     strictEqual(hls.detail, null, 'interrupted HLS download must clear stale piece count detail')
     strictEqual(restarted.detail, null, 'paused task must clear stale verification-restart detail')
     strictEqual(quotaHeld.detail, 'Transfer quota reached; resumes at 03:00', 'quota hold detail must be preserved')
+  })
+})
+
+describe('queue retries (re-entry)', () => {
+  it('spends one retry per failure when the task broadcast triggers a refresh mid-tick', async () => {
+    const settings: EngineSettings = {
+      maxConcurrentTasks: 4, maxConnectionsPerTask: 1, minSplitSize: 1024,
+      retryLimit: 1, timeoutMs: 1000, speedLimit: null, proxyUrl: null,
+      hostConnectionLimits: [], quotaBytes: null, quotaWindowMinutes: 60,
+      antivirusProgram: null, antivirusArgs: [], antivirusTimeoutSeconds: 1
+    }
+    let scheduler: Scheduler
+    let ready = false
+    const manager = new DownloadManager({
+      getSettings: () => settings,
+      // What the app does in index.ts: any finished or failed queued task asks
+      // the scheduler to look again - synchronously, from inside the broadcast.
+      onTasks: (tasks) => {
+        if (ready && tasks.some((t) => t.queueId && (t.status === 'done' || t.status === 'error'))) scheduler.refresh()
+      },
+      onProgress: () => {},
+      queuePolicy: (id) => scheduler.list().find((queue) => queue.id === id),
+      queueSpeedLimit: () => null,
+      createHlsRunner: (task) => ({
+        task, running: false,
+        async start() { this.running = true; task.status = 'downloading' },
+        async pause() { this.running = false; task.status = 'paused' },
+        tick() {}, async resetForRestart() { return false }
+      })
+    })
+    scheduler = new Scheduler({ manager, onQueues: () => {}, saveQueues: async () => {}, onPending: () => {}, onExitRequested: () => {} })
+    scheduler.load(sanitizeQueues([{ id: 'q', name: 'Queue', maxConcurrent: 1, parallelismConfigured: true, retryLimit: 3, retryDelaySeconds: 0 }]))
+    cleanups.push(async () => { scheduler.stop(); await manager.shutdown() })
+
+    const failed = createTask({ url: 'https://example.com/f.m3u8', dir: tmpdir(), filename: 'f.mp4', kind: 'hls', queueId: 'q' })
+    const other = createTask({ url: 'https://example.com/o.m3u8', dir: tmpdir(), filename: 'o.mp4', kind: 'hls', queueId: 'q' })
+    manager.add(failed, false)
+    manager.add(other, false)
+    other.status = 'done'
+    failed.status = 'error'
+    failed.error = 'boom'
+    scheduler.list()[0].running = true
+    ready = true
+
+    scheduler.refresh()
+    await new Promise((resolve) => setImmediate(resolve))
+    await new Promise((resolve) => setImmediate(resolve))
+    strictEqual(failed.queueRetryCount, 1, 'one failure must cost exactly one retry')
+    const status = failed.status as DownloadTask['status']
+    ok(status === 'queued' || status === 'downloading', `retried task is in flight (${status})`)
   })
 })

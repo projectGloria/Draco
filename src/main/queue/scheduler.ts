@@ -46,6 +46,15 @@ export class Scheduler {
    */
   private drained = new Set<string>()
   private deps: SchedulerDeps
+  /**
+   * Set while a tick runs. Starting tasks and touching retry metadata emit a
+   * task-list update, and the app answers that by calling `refresh()` - so
+   * without this the tick re-entered itself while a retried task was still
+   * `error`, and one failure spent two (or more) of the queue's retries.
+   */
+  private ticking = false
+  private rerunAfterTick = false
+  private rerunTimer: NodeJS.Immediate | null = null
 
   constructor(deps: SchedulerDeps) {
     this.deps = deps
@@ -73,6 +82,9 @@ export class Scheduler {
   stop(): void {
     if (this.timer) clearInterval(this.timer)
     this.timer = null
+    if (this.rerunTimer) clearImmediate(this.rerunTimer)
+    this.rerunTimer = null
+    this.rerunAfterTick = false
     this.cancelPending()
   }
 
@@ -252,6 +264,29 @@ export class Scheduler {
   /* ---------------------------------------------------------------- */
 
   private tick(): void {
+    if (this.ticking) {
+      // Asked again from inside a tick: run once more afterwards, on a clean
+      // stack, instead of recursing into half-updated state.
+      this.rerunAfterTick = true
+      return
+    }
+    this.ticking = true
+    try {
+      this.tickOnce()
+    } finally {
+      this.ticking = false
+    }
+    if (this.rerunAfterTick && !this.rerunTimer) {
+      this.rerunAfterTick = false
+      this.rerunTimer = setImmediate(() => {
+        this.rerunTimer = null
+        this.tick()
+      })
+      this.rerunTimer.unref?.()
+    }
+  }
+
+  private tickOnce(): void {
     const before = this.fingerprint()
     this.synchronizeMembership()
     this.releaseDrainedWithWork()
@@ -317,8 +352,10 @@ export class Scheduler {
       }
     }
 
-    if (retryMetadataChanged) this.deps.manager.notifyTaskMetadataChanged()
+    // Start first: once the retried rows are `queued`, anything that reacts to
+    // the metadata broadcast sees them as in flight rather than still failed.
     if (startable.length > 0) this.deps.manager.start(startable, true)
+    if (retryMetadataChanged) this.deps.manager.notifyTaskMetadataChanged()
 
     // Drained: everything in the queue reached a terminal state. A pending
     // action is cancelled automatically when the queue is no longer drained,

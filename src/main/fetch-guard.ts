@@ -47,6 +47,25 @@ export interface FetchGuardedOptions {
   requireHttps?: boolean
   maxRedirects?: number
   allowPrivate?: boolean
+  /**
+   * The caller resolved the start host itself and found it private (a LAN
+   * name such as `nas`), so redirects from that origin may stay in the
+   * private network. Without it only a literal private address counts. The
+   * guard never re-resolves a host on its own: a second lookup is exactly
+   * where a DNS-rebinding name would flip to a private answer.
+   */
+  startsPrivate?: boolean
+}
+
+/**
+ * Whether a document fetched from `start` and finally served from `final`
+ * came from the private network: a literal private address, or the start
+ * origin when the caller found that start private. A redirect onto another
+ * name is judged by its spelling only, never by re-resolving it.
+ */
+export function documentIsPrivate(start: string, final: string, startsPrivate: boolean): boolean {
+  const finalUrl = new URL(final)
+  return isPrivateHost(finalUrl.hostname) || (startsPrivate && finalUrl.origin === new URL(start).origin)
 }
 
 /** Stop an unread response immediately; Undici emits its abort on the body. */
@@ -55,7 +74,7 @@ export function discardRequestBody(body: Awaited<ReturnType<typeof request>>['bo
   body.destroy()
 }
 
-function redirectTarget(url: URL, location: string, options: FetchGuardedOptions): URL {
+function redirectTarget(url: URL, location: string, options: FetchGuardedOptions, fromPrivate: boolean): URL {
   let target: URL
   try {
     target = new URL(location, url)
@@ -71,7 +90,7 @@ function redirectTarget(url: URL, location: string, options: FetchGuardedOptions
   if (options.pinHost && target.host.toLowerCase() !== options.pinHost.toLowerCase()) {
     throw new Error('A redirect left the original host')
   }
-  if (!isPrivateHost(url.hostname) && isPrivateHost(target.hostname)) {
+  if (!fromPrivate && isPrivateHost(target.hostname)) {
     throw new Error('A redirect pointed into a private network')
   }
   return target
@@ -95,7 +114,7 @@ export async function fetchGuarded(
   }
   if (options.requireHttps && url.protocol !== 'https:') throw new Error('This request requires HTTPS')
   if (options.allowPrivate === false && isPrivateHost(url.hostname)) throw new Error('Connecting to private network addresses is not allowed')
-  const initialIsPrivate = isPrivateHost(url.hostname)
+  const startedPrivate = options.startsPrivate ?? isPrivateHost(url.hostname)
   const initialOrigin = url.origin
   let headers = { ...options.headers }
   const maxRedirects = options.maxRedirects ?? 8
@@ -105,7 +124,7 @@ export async function fetchGuarded(
     const allowPrivateForHop =
       options.allowPrivate === false
         ? false
-        : hop === 0 || initialIsPrivate || url.origin === initialOrigin
+        : hop === 0 || startedPrivate || url.origin === initialOrigin
     let response: Response
     try {
       response = await fetch(url, {
@@ -128,7 +147,8 @@ export async function fetchGuarded(
     await response.body?.cancel().catch(() => {})
     if (hop >= maxRedirects) throw new Error('Too many redirects')
 
-    const target = redirectTarget(url, location, options)
+    const fromPrivate = isPrivateHost(url.hostname) || (url.origin === initialOrigin && startedPrivate)
+    const target = redirectTarget(url, location, options, fromPrivate)
 
     if (target.origin !== url.origin) {
       headers = headersForOtherOrigin(headers)
@@ -148,7 +168,7 @@ export async function requestGuarded(
   }
   if (options.requireHttps && url.protocol !== 'https:') throw new Error('This request requires HTTPS')
   if (options.allowPrivate === false && isPrivateHost(url.hostname)) throw new Error('Connecting to private network addresses is not allowed')
-  const initialIsPrivate = isPrivateHost(url.hostname)
+  const startedPrivate = options.startsPrivate ?? isPrivateHost(url.hostname)
   const initialOrigin = url.origin
   let headers = { ...options.headers }
   const maxRedirects = options.maxRedirects ?? 8
@@ -158,7 +178,7 @@ export async function requestGuarded(
     const allowPrivateForHop =
       options.allowPrivate === false
         ? false
-        : hop === 0 || initialIsPrivate || url.origin === initialOrigin
+        : hop === 0 || startedPrivate || url.origin === initialOrigin
     let response: Awaited<ReturnType<typeof request>>
     try {
       response = await request(url, {
@@ -181,7 +201,8 @@ export async function requestGuarded(
     // hop rather than waiting for EOF (the socket idle timeout cannot help).
     discardRequestBody(response.body)
     if (hop >= maxRedirects) throw new Error('Too many redirects')
-    const target = redirectTarget(url, location, options)
+    const fromPrivate = isPrivateHost(url.hostname) || (url.origin === initialOrigin && startedPrivate)
+    const target = redirectTarget(url, location, options, fromPrivate)
     if (target.origin !== url.origin) headers = headersForOtherOrigin(headers)
     url = target
   }

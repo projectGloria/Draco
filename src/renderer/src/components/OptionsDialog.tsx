@@ -408,7 +408,7 @@ function GeneralTab({ settings, patch }: {
 
       <Field
         label="Cat mode 🐱"
-        hint="Keep queued downloads alive by occasionally downloading tiny 5-second chunks at low speed (prevents server timeouts)."
+        hint="Keep queued downloads alive by occasionally downloading tiny 5-second chunks at low speed (prevents server timeouts). This uses one extra slow connection beyond the concurrent-download limit, but never when the limit is 1 and never to a site that is already downloading."
       >
         <label className="flex items-center gap-2 text-[12.5px] cursor-pointer w-max h-8">
           <input
