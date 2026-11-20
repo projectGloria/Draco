@@ -172,7 +172,7 @@ For technical details on Chrome and Firefox integration, refer to [BROWSER_TAKEO
 Download and run the installer from the latest release:
 
 ```powershell
-dist/Draco-1.0.0-x64.exe
+dist/Draco-1.1.1-x64.exe
 ```
 
 The installer configures:
@@ -287,7 +287,7 @@ Ensure the following tools are installed on your Windows development environment
    npm run dist
    ```
    Packaged artifacts will be generated inside the `dist/` directory:
-   - `dist/Draco-1.0.0-x64.exe` (NSIS Installer)
+   - `dist/Draco-1.1.1-x64.exe` (NSIS Installer)
    - `dist/Draco-0.1.2-portable.exe` (Portable Binary)
 
 ### Running Tests & Benchmarks
