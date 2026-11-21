@@ -10,7 +10,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 concurrency:
   group: build-installers-${{ github.ref }}
@@ -75,48 +75,28 @@ jobs:
       - name: Build app
         run: npm run build
 
-      - name: Package NSIS installer and portable exe
-        run: npx electron-builder --win --publish never
+      # Unpacked app folder only; GloriaSetup replaces the NSIS installer.
+      - name: Package unpacked app
+        run: npx electron-builder --win --dir --publish never
 
-      - name: Package CLI-only installer
-        run: npm run dist:cli:package
-
-      - name: Collect installers
-        shell: bash
+      - name: Collect runtime files
+        shell: pwsh
         run: |
-          v='${{ steps.version.outputs.version }}'
-          mkdir -p installers
-          cp "dist/Draco-$v-x64.exe"           "installers/Draco-$v-windows-x64-setup.exe"
-          cp "dist/Draco-$v-portable.exe"      "installers/Draco-$v-windows-x64-portable.exe"
-          cp "dist/Draco-CLI-$v-x64-Setup.exe" "installers/Draco-CLI-$v-windows-x64-setup.exe"
-          (cd installers && sha256sum *.exe > SHA256SUMS.txt)
-          ls -l installers
+          New-Item -ItemType Directory -Force app-dist | Out-Null
+          Copy-Item -Path 'dist\win-unpacked\*' -Destination app-dist -Recurse -Force
+          if (-not (Test-Path app-dist\Draco.exe)) { throw 'Draco.exe missing from app-dist' }
 
-      - name: Upload installers
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: installers
-          path: installers/
-          if-no-files-found: error
-          retention-days: 30
+      - name: Make sure the release exists
+        if: github.ref_type == 'tag'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 || gh release create "$GITHUB_REF_NAME" --generate-notes
 
-  release:
-    name: GitHub Release
-    if: startsWith(github.ref, 'refs/tags/v')
-    needs: build
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      - name: Download installers
-        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+      - name: Pack and attach setup
+        uses: projectGloria/GloriaSetup@v0.1.0
         with:
-          name: installers
-          path: installers
-
-      - name: Create release
-        uses: softprops/action-gh-release@8a0cd651e5b2365bd640854a3fa5dfc70e4875f3 # v3.0.4
-        with:
-          files: installers/*
-          generate_release_notes: true
-          fail_on_unmatched_files: true
+          app-dir: app-dist
+          manifest: gloria.toml
+          certificate: ${{ secrets.WINDOWS_PFX_BASE64 }}
+          certificate-password: ${{ secrets.WINDOWS_PFX_PASSWORD }}
