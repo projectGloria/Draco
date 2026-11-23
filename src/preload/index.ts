@@ -2,6 +2,7 @@ import { contextBridge, ipcRenderer, webUtils, type IpcRendererEvent } from 'ele
 import type {
   BootstrapState,
   Category,
+  ConnectionAnalysisProgress,
   CookieCheckProgress,
   DownloadTask,
   MediaAudioTrack,
@@ -71,6 +72,7 @@ const api: RendererApi = {
   openFile: (id: string) => ipcRenderer.invoke('tasks:open', id),
   revealFile: (id: string) => ipcRenderer.invoke('tasks:reveal', id),
   openTorrentItem: (id: string, path: string) => ipcRenderer.invoke('tasks:openTorrentItem', id, path),
+  prepareWatch: (id: string, torrentFilePath?: string) => ipcRenderer.invoke('tasks:watch', id, torrentFilePath),
   stopSeeding: (ids: string[]) => ipcRenderer.invoke('tasks:stopSeeding', ids),
   listSeeding: () => ipcRenderer.invoke('tasks:seeding'),
   setTorrentFiles: (id: string, paths: string[]) => ipcRenderer.invoke('tasks:setTorrentFiles', id, paths),
@@ -148,6 +150,8 @@ const api: RendererApi = {
   listBrowsers: () => ipcRenderer.invoke('cookies:browsers'),
   checkCookies: (browser: string) => ipcRenderer.invoke('cookies:check', browser),
   onCookieCheckProgress: (cb) => subscribe<CookieCheckProgress>('cookies:progress', cb),
+  analyzeConnection: () => ipcRenderer.invoke('connection:analyze'),
+  onConnectionAnalysisProgress: (cb) => subscribe<ConnectionAnalysisProgress>('connection:progress', cb),
 
   /* window */
   minimize: () => ipcRenderer.invoke('window:minimize'),

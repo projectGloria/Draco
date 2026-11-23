@@ -342,6 +342,91 @@ export class TorrentRunner implements Runner {
   }
 
   /**
+   * Elevates a playable torrent file's pieces to critical/sequential priority
+   * (especially the first and last pieces for container headers/moov atoms) and
+   * returns its path and size so the live video stream can read as pieces land.
+   */
+  prioritizeSequentialFile(filePath?: string): { path: string; size: number } | null {
+    if (!this.torrent || !this.torrent.metadata) return null
+    const selected = this.task.selectedFiles ? new Set(this.task.selectedFiles) : null
+    const candidates = (this.torrent.files as any[]).filter((f) => !selected || selected.has(f.path))
+    if (candidates.length === 0) return null
+
+    const target = filePath
+      ? candidates.find((f) => f.path === filePath)
+      : candidates
+          .filter((f) => /\.(?:mp4|webm|mkv|mov|m4v|avi|mp3|m4a|flac|ogg|opus|wav)$/i.test(f.path))
+          .reduce((best, f) => (!best || f.length > best.length ? f : best), null as any) ??
+        candidates.reduce((best, f) => (!best || f.length > best.length ? f : best), null as any)
+    if (!target) return null
+
+    try {
+      target.select()
+      const startPiece = typeof target._startPiece === 'number' ? target._startPiece : null
+      const endPiece = typeof target._endPiece === 'number' ? target._endPiece : null
+      const torrentAny = this.torrent as any
+      if (startPiece !== null && endPiece !== null && typeof torrentAny.critical === 'function') {
+        const headEnd = Math.min(endPiece, startPiece + 4)
+        const tailStart = Math.max(startPiece, endPiece - 2)
+        torrentAny.critical(startPiece, headEnd)
+        torrentAny.critical(tailStart, endPiece)
+      }
+    } catch {
+      // Optional WebTorrent internal priority hint
+    }
+
+    return { path: target.path, size: Number(target.length) || 0 }
+  }
+
+  /**
+   * Returns how many contiguous bytes of a torrent file starting at `offset`
+   * have been verified by the piece bitfield, and marks the next missing piece
+   * critical so the player does not stall.
+   */
+  readTorrentFileProgressAt(filePath: string, offset: number, prioritize = false): number {
+    if (this.task.status === 'done') {
+      const infoFile = this.task.torrentInfo?.files.find((f) => f.path === filePath)
+      const size = infoFile?.size ?? this.task.size ?? 0
+      return Math.max(0, size - offset)
+    }
+    if (!this.torrent || !this.torrent.metadata) return 0
+    const target = (this.torrent.files as any[]).find((f) => f.path === filePath)
+    if (!target) return 0
+    const fileLength = Number(target.length) || 0
+    if (offset < 0 || offset >= fileLength) return 0
+
+    const torrentAny = this.torrent as any
+    const pieceLength = Number(torrentAny.pieceLength) || 0
+    const fileOffset = Number(target.offset) || 0
+    const bitfield = torrentAny.bitfield
+
+    if (!pieceLength || !bitfield || typeof bitfield.get !== 'function') {
+      const downloaded = Math.min(fileLength, Math.max(0, Number(target.downloaded) || 0))
+      return offset < downloaded ? downloaded - offset : 0
+    }
+
+    const absStart = fileOffset + offset
+    const absEnd = fileOffset + fileLength
+    const startPiece = Math.floor(absStart / pieceLength)
+    const lastPiece = Math.floor(Math.max(absStart, absEnd - 1) / pieceLength)
+
+    let contiguousEnd = absStart
+    for (let piece = startPiece; piece <= lastPiece; piece++) {
+      if (!bitfield.get(piece)) {
+        if (prioritize && typeof torrentAny.critical === 'function') {
+          try {
+            torrentAny.critical(piece, Math.min(lastPiece, piece + 3))
+          } catch {}
+        }
+        break
+      }
+      contiguousEnd = Math.min(absEnd, (piece + 1) * pieceLength)
+    }
+
+    return Math.max(0, contiguousEnd - absStart)
+  }
+
+  /**
    * Pushes the current caps at the client.
    *
    * WebTorrent has its own per-client throttle. Apply the tightest app/queue

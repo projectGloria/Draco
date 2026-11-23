@@ -48,6 +48,8 @@ import { MAX_PLAYLIST_ENTRIES, isPlaylistUrl, singleVideoUrl, type PlaylistEntry
 import { iconForExtension, iconForSite } from './icons.ts'
 import { thumbnailFor } from './thumbnails.ts'
 import { checkCookies } from './cookie-check.ts'
+import { analyzeConnection } from './connection-detect.ts'
+import { resolveWatchSession } from './media/watch-server.ts'
 import { listBrowsers } from './browser-icons.ts'
 import {
   registerShellHandlers,
@@ -82,6 +84,8 @@ const log = logger('ipc')
 let clipboardSave = Promise.resolve()
 /** Guards `cookies:check`, which spawns yt-dlp and owns one progress bar. */
 let cookieCheckRunning = false
+/** Guards `connection:analyze`, which runs latency and bandwidth probes. */
+let connectionAnalysisRunning = false
 
 export interface AppContext {
   manager: DownloadManager
@@ -919,6 +923,16 @@ export function registerIpc(ctx: AppContext): void {
     return target ? (await shell.openPath(target)) === '' : false
   })
 
+  handle('tasks:watch', async (id: string, torrentFilePath?: string) => {
+    if (typeof id !== 'string') throw new Error('Invalid task ID')
+    return resolveWatchSession(
+      ctx.manager,
+      id,
+      getPaths().tempDir,
+      typeof torrentFilePath === 'string' ? torrentFilePath : undefined
+    )
+  })
+
   handle('tasks:revealTorrentItem', async (id: string, itemPath: string) => {
     const target = await openableTorrentItem(ctx, id, itemPath)
     if (!target) return false
@@ -1255,6 +1269,16 @@ export function registerIpc(ctx: AppContext): void {
       return await checkCookies(String(browser), (progress) => send('cookies:progress', progress))
     } finally {
       cookieCheckRunning = false
+    }
+  })
+
+  handle('connection:analyze', async () => {
+    if (connectionAnalysisRunning) throw new Error('A connection analysis is already running')
+    connectionAnalysisRunning = true
+    try {
+      return await analyzeConnection((progress) => send('connection:progress', progress))
+    } finally {
+      connectionAnalysisRunning = false
     }
   })
 

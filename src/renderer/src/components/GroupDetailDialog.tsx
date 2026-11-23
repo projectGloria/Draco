@@ -4,6 +4,7 @@ import { displaySource } from '@shared/display-source'
 import { useT } from '../i18n'
 import { formatBytes, formatEta, formatSpeed, formatWhen, percent } from '../lib/format'
 import { summarizeGroup } from '@shared/groups'
+import { isPlayableMediaTask } from '@shared/playable-media'
 import { canPauseTask } from '@shared/task-status'
 import { useApp } from '../store/app'
 import { reportError, toast } from '../store/toasts'
@@ -28,9 +29,11 @@ type GroupTab = 'content' | 'hosts' | 'errors'
 
 export default function GroupDetailDialog({
   groupId,
+  onWatch,
   onClose
 }: {
   groupId: string
+  onWatch?(taskId: string): void
   onClose(): void
 }): React.ReactElement | null {
   const t = useT()
@@ -153,7 +156,7 @@ export default function GroupDetailDialog({
 
         <div className="min-h-[245px] max-h-[330px] overflow-auto p-3">
           {tab === 'content' ? (
-            <GroupContent members={members} />
+            <GroupContent members={members} onWatch={onWatch} />
           ) : tab === 'hosts' ? (
             <GroupHosts members={members} />
           ) : (
@@ -165,13 +168,23 @@ export default function GroupDetailDialog({
   )
 }
 
-function GroupContent({ members }: { members: DownloadTask[] }): React.ReactElement {
+function GroupContent({
+  members,
+  onWatch
+}: {
+  members: DownloadTask[]
+  onWatch?(taskId: string): void
+}): React.ReactElement {
   const t = useT()
   const [menu, setMenu] = useState<{ at: MenuPosition; task: DownloadTask } | null>(null)
   const [active, setActive] = useState<string | null>(null)
 
   const open = (task: DownloadTask): void => {
     if (task.status !== 'done') {
+      if (onWatch && isPlayableMediaTask(task) && (task.received > 0 || task.status === 'downloading')) {
+        onWatch(task.id)
+        return
+      }
       toast('info', t('notFinishedYet'))
       return
     }
@@ -182,6 +195,15 @@ function GroupContent({ members }: { members: DownloadTask[] }): React.ReactElem
     const running = canPauseTask(task.status)
     return [
       { label: t('open'), disabled: task.status !== 'done', onClick: () => open(task) },
+      ...(onWatch && isPlayableMediaTask(task)
+        ? [
+            {
+              label: task.status === 'done' ? t('watchVideo') : t('watchWhileDownloading'),
+              disabled: task.received <= 0 && task.status !== 'downloading' && task.status !== 'done',
+              onClick: () => onWatch(task.id)
+            }
+          ]
+        : []),
       { label: t('openFolder'), onClick: () => void window.api.revealFile(task.id) },
       {},
       {

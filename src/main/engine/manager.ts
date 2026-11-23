@@ -370,6 +370,10 @@ export class DownloadManager {
     return this.tasks.get(id)
   }
 
+  getRunner(id: string): Runner | undefined {
+    return this.runners.get(id)
+  }
+
   /**
    * The heavy diagnostics for one task, on request.
    *

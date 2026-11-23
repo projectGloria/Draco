@@ -12,7 +12,7 @@ import {
   type FileHandle
 } from 'node:fs/promises'
 import { basename, join } from 'node:path'
-import type { DownloadTask, Segment } from '@shared/types'
+import type { DownloadTask, Segment } from '../../shared/types.ts'
 import { hostResolvesPrivate } from '../engine/http.ts'
 import { fetchGuarded, headersForResource } from '../fetch-guard.ts'
 import { QuotaExceededError, type RateLimiter } from '../engine/limiter.ts'
@@ -1190,6 +1190,39 @@ export class HlsRunner implements Runner {
   }
 
   /* ---------------------------------------------------------------- */
+
+  /**
+   * Snapshot of the currently resolved HLS tracks and their on-disk parts directory,
+   * used by the live media server to watch an HLS download while pieces are arriving.
+   */
+  liveHlsState(): {
+    partsDir: string
+    video: { id: string; initPath: string | null; segmentCount: number; durations: number[] } | null
+    audio: { id: string; initPath: string | null; segmentCount: number; durations: number[] } | null
+  } | null {
+    const video = this.tracks.find((t) => t.role === 'video') ?? null
+    const audio = this.tracks.find((t) => t.role === 'audio') ?? null
+    if (!video && !audio) return null
+    return {
+      partsDir: this.partsDir,
+      video: video
+        ? {
+            id: video.id,
+            initPath: video.initSegment ? this.initPath(video.id) : null,
+            segmentCount: video.segments.length,
+            durations: video.segments.map((s) => s.duration)
+          }
+        : null,
+      audio: audio
+        ? {
+            id: audio.id,
+            initPath: audio.initSegment ? this.initPath(audio.id) : null,
+            segmentCount: audio.segments.length,
+            durations: audio.segments.map((s) => s.duration)
+          }
+        : null
+    }
+  }
 
   async resetForRestart(): Promise<boolean> {
     if (this.restarted) return false

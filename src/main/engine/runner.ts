@@ -32,6 +32,16 @@ export interface Runner {
    * has already had its one restart, so the manager cannot loop forever.
    */
   resetForRestart(): Promise<boolean>
+  /**
+   * Returns how many contiguous bytes starting at `offset` are already written
+   * on disk, and optionally prioritizes downloading that range if missing.
+   */
+  readProgressAt?(offset: number, prioritize?: boolean): number
+  /**
+   * Selects a torrent payload file for sequential first/last piece priority
+   * while the user watches it during download.
+   */
+  prioritizeSequentialFile?(filePath?: string): { path: string; size: number } | null
 }
 
 /**

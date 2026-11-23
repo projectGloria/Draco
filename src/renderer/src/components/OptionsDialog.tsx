@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type {
   Category,
+  ConnectionAnalysisProgress,
+  ConnectionAnalysisResult,
   CookieCheckProgress,
   CookieCheckResult,
   InstalledBrowser,
@@ -9,7 +11,7 @@ import type {
   ToolId,
   ToolStatus
 } from '@shared/types'
-import { formatBytes, formatWhen } from '../lib/format'
+import { formatBytes, formatSpeed, formatWhen } from '../lib/format'
 import { applyOptionsDraftPatch, toggleDraftColumn } from '@shared/options-draft'
 import { useApp } from '../store/app'
 import { reportError, toast } from '../store/toasts'
@@ -743,6 +745,56 @@ function ConnectionTab({ settings, patch }: {
   settings: Settings
   patch: (change: Partial<Settings>) => void
 }): React.ReactElement {
+  const t = useT()
+  const [analyzing, setAnalyzing] = useState(false)
+  const [analysisProgress, setAnalysisProgress] = useState<ConnectionAnalysisProgress | null>(null)
+  const [analysisResult, setAnalysisResult] = useState<ConnectionAnalysisResult | null>(null)
+
+  useEffect(() => window.api.onConnectionAnalysisProgress(setAnalysisProgress), [])
+
+  const runAutoDetect = async (): Promise<void> => {
+    if (analyzing) return
+    setAnalyzing(true)
+    setAnalysisResult(null)
+    setAnalysisProgress({ stage: 'latency', percent: 8 })
+    try {
+      const result = await window.api.analyzeConnection()
+      setAnalysisResult(result)
+      patch({
+        maxConcurrentTasks: result.maxConcurrentTasks,
+        maxConnectionsPerTask: result.maxConnectionsPerTask,
+        adaptiveConnectionCeiling: result.adaptiveConnectionCeiling,
+        minSplitSize: result.minSplitSize,
+        retryLimit: result.retryLimit,
+        timeoutMs: result.timeoutMs
+      })
+      toast(
+        'success',
+        t('autoDetectApplied', {
+          speed: formatSpeed(result.effectiveSpeedBps) || formatBytes(result.effectiveSpeedBps) + '/s',
+          latency: result.latencyMs
+        })
+      )
+    } catch (err) {
+      reportError(t('autoDetectFailed'), err)
+    } finally {
+      setAnalyzing(false)
+      setAnalysisProgress(null)
+    }
+  }
+
+  const stageLabel = (stage: ConnectionAnalysisProgress['stage']): string => {
+    switch (stage) {
+      case 'latency':
+        return t('autoDetectStageLatency')
+      case 'single':
+        return t('autoDetectStageSingle')
+      case 'multi':
+        return t('autoDetectStageMulti')
+      case 'done':
+        return t('autoDetectStageDone')
+    }
+  }
 
   const [limitText, setLimitText] = useState(
     settings.speedLimit ? String(Math.round(settings.speedLimit / 1024)) : ''
@@ -773,6 +825,58 @@ function ConnectionTab({ settings, patch }: {
 
   return (
     <div className="space-y-4 max-h-[410px] overflow-y-auto pr-1">
+      <div className="rounded-lg border border-line bg-white/[0.02] p-3.5 space-y-2.5">
+        <div className="flex items-start justify-between gap-3">
+          <div className="min-w-0 flex-1">
+            <div className="text-[12.5px] font-semibold">{t('autoDetectTitle')}</div>
+            <p className="text-[11px] text-faint mt-0.5 leading-relaxed">
+              {t('autoDetectDesc')}
+            </p>
+          </div>
+          <PrimaryButton onClick={() => void runAutoDetect()} disabled={analyzing}>
+            <span className="flex items-center gap-1.5">
+              <RefreshIcon className={'w-3.5 h-3.5 ' + (analyzing ? 'spin-slow' : '')} />
+              {analyzing ? t('autoDetectRunning') : t('autoDetectButton')}
+            </span>
+          </PrimaryButton>
+        </div>
+
+        {analysisProgress && (
+          <div className="pt-1">
+            <div className="flex items-center justify-between text-[11px] text-muted">
+              <span>{stageLabel(analysisProgress.stage)}</span>
+              <span className="tnum text-faint">{analysisProgress.percent}%</span>
+            </div>
+            <div className="h-1.5 mt-1.5 rounded-full bg-white/[0.06] overflow-hidden">
+              <span
+                className="block h-full rounded-full transition-[width] duration-300"
+                style={{ width: `${analysisProgress.percent}%`, background: 'var(--grad)' }}
+              />
+            </div>
+          </div>
+        )}
+
+        {analysisResult && !analysisProgress && (
+          <div
+            className="rounded-md px-3 py-2 text-[11.5px] border"
+            style={{ borderColor: 'rgba(52, 211, 153, 0.25)', background: 'rgba(52, 211, 153, 0.08)' }}
+          >
+            <div className="font-semibold text-ok">
+              {t(`autoDetectProfile_${analysisResult.profile}` as TKey)}
+            </div>
+            <div className="text-muted mt-0.5 tnum">
+              {t('autoDetectSummary', {
+                speed: formatSpeed(analysisResult.effectiveSpeedBps) || formatBytes(analysisResult.effectiveSpeedBps) + '/s',
+                latency: analysisResult.latencyMs,
+                tasks: analysisResult.maxConcurrentTasks,
+                conns: analysisResult.maxConnectionsPerTask,
+                ceiling: analysisResult.adaptiveConnectionCeiling ?? analysisResult.maxConnectionsPerTask
+              })}
+            </div>
+          </div>
+        )}
+      </div>
+
       <div className="grid grid-cols-2 gap-3">
         <NumberField
           label="Downloads at once"

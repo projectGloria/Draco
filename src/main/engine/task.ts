@@ -1053,6 +1053,30 @@ export class TaskRunner {
   }
 
   /**
+   * Returns how many contiguous bytes starting at `offset` are already written
+   * to the part file, and nudges the segmenter to prioritize `offset` when it
+   * lies in an unwritten region.
+   */
+  readProgressAt(offset: number, prioritize = false): number {
+    if (this.task.status === 'done') {
+      const total = this.task.size ?? this.received
+      return Math.max(0, total - offset)
+    }
+    if (!this.segmenter) return 0
+    const available = this.segmenter.contiguousBytesAt(offset)
+    if (available === 0 && prioritize && this.running && this.task.resumable) {
+      this.segmenter.prioritizeOffset(offset)
+      // Allow one extra demand connection if we are below the target ceiling
+      if (this.connectionCap < Math.max(this.connectionTarget, 2)) {
+        this.connectionCap = Math.min(Math.max(this.connectionTarget, 2), this.connectionCap + 1)
+        this.task.connections = this.connectionCap
+      }
+      this.fill()
+    }
+    return available
+  }
+
+  /**
    * Called by the manager when a run failed because the server refused to
    * honour ranges. Wipes the partial data so the retry starts clean.
    */

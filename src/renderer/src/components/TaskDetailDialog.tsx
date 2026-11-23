@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import type { DownloadTask, Segment, TaskLiveDetail } from '@shared/types'
 import { displaySource } from '@shared/display-source'
 import { formatBytes, formatEta, formatSpeed, formatWhen, percent } from '../lib/format'
+import { isPlayableMediaExtension, isPlayableMediaTask } from '@shared/playable-media'
 import { useT } from '../i18n'
 import { HISTORY_SAMPLES, speedHistory } from '../lib/history'
 import { recoveryHint } from '@shared/recovery'
@@ -73,9 +74,11 @@ function useLiveDetail(id: string): TaskLiveDetail | null {
 
 export default function TaskDetailDialog({
   id,
+  onWatch,
   onClose
 }: {
   id: string
+  onWatch?(taskId: string, torrentFilePath?: string): void
   onClose(): void
 }): React.ReactElement | null {
   const storedTask = useApp((s) => s.tasks.find((t) => t.id === id))
@@ -146,6 +149,14 @@ export default function TaskDetailDialog({
             {t('copyUrl')}
           </GhostButton>
           <GhostButton onClick={() => void window.api.revealFile(id)}>{t('openFolder')}</GhostButton>
+          {onWatch && isPlayableMediaTask(task) && (
+            <GhostButton
+              onClick={() => onWatch(id)}
+              disabled={task.received <= 0 && task.status !== 'downloading' && task.status !== 'done'}
+            >
+              {task.status === 'done' ? t('watchVideo') : t('watchWhileDownloading')}
+            </GhostButton>
+          )}
           <GhostButton
             onClick={() => {
               const call = running
@@ -168,7 +179,7 @@ export default function TaskDetailDialog({
       <Overview task={task} categoryLabel={categoryName(categories, task.categoryId)} />
 
       {task.kind === 'torrent' ? (
-        <TorrentDetails task={task} tab={torrentTab} onTabChange={setTorrentTab} />
+        <TorrentDetails task={task} tab={torrentTab} onTabChange={setTorrentTab} onWatch={onWatch} />
       ) : (
         <>
       <div className="mt-5">
@@ -264,11 +275,13 @@ export default function TaskDetailDialog({
 function TorrentDetails({
   task,
   tab,
-  onTabChange
+  onTabChange,
+  onWatch
 }: {
   task: DownloadTask
   tab: TorrentTab
   onTabChange(tab: TorrentTab): void
+  onWatch?(taskId: string, torrentFilePath?: string): void
 }): React.ReactElement {
   const t = useT()
   const info = task.torrentInfo
@@ -339,7 +352,7 @@ function TorrentDetails({
         ) : tab === 'peers' ? (
           <TorrentPeers task={task} />
         ) : (
-          <TorrentContent task={task} />
+          <TorrentContent task={task} onWatch={onWatch} />
         )}
       </div>
     </div>
@@ -410,7 +423,13 @@ function TorrentPeers({ task }: { task: DownloadTask }): React.ReactElement {
   )
 }
 
-function TorrentContent({ task }: { task: DownloadTask }): React.ReactElement {
+function TorrentContent({
+  task,
+  onWatch
+}: {
+  task: DownloadTask
+  onWatch?(taskId: string, torrentFilePath?: string): void
+}): React.ReactElement {
   const t = useT()
   // The wanted-set arrives immediately in tasks:changed; diagnostics are
   // polled once a second. Reading the old diagnostic flag lost a second click
@@ -427,8 +446,22 @@ function TorrentContent({ task }: { task: DownloadTask }): React.ReactElement {
   const [active, setActive] = useState<string | null>(null)
 
   const openItem = async (path: string): Promise<void> => {
+    const fileEntry = files.find((f) => f.path === path)
+    if (
+      onWatch &&
+      isPlayableMediaExtension(path) &&
+      task.status !== 'done' &&
+      ((fileEntry?.downloaded ?? 0) > 0 || task.status === 'downloading')
+    ) {
+      onWatch(task.id, path)
+      return
+    }
     try {
       if (!(await window.api.openTorrentItem(task.id, path))) {
+        if (onWatch && isPlayableMediaExtension(path)) {
+          onWatch(task.id, path)
+          return
+        }
         toast('info', t('fileNotOnDisk'))
       }
     } catch (error) {
@@ -552,6 +585,14 @@ function TorrentContent({ task }: { task: DownloadTask }): React.ReactElement {
           onClose={() => setMenu(null)}
           items={[
             { label: t('open'), onClick: () => void openItem(menu.path) },
+            ...(onWatch && isPlayableMediaExtension(menu.path)
+              ? [
+                  {
+                    label: task.status === 'done' ? t('watchVideo') : t('watchWhileDownloading'),
+                    onClick: () => onWatch(task.id, menu.path)
+                  }
+                ]
+              : []),
             { label: t('showInExplorer'), onClick: () => void revealItem(menu.path) },
             {},
             {

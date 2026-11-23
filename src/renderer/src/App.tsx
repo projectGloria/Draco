@@ -15,6 +15,7 @@ import Sidebar from './components/Sidebar'
 import StatusBar from './components/StatusBar'
 import TaskDetailDialog from './components/TaskDetailDialog'
 import GroupDetailDialog from './components/GroupDetailDialog'
+import VideoPlayerDialog from './components/VideoPlayerDialog'
 import TitleBar from './components/TitleBar'
 import Toasts from './components/Toasts'
 import ToolUpdateDialog from './components/ToolUpdateDialog'
@@ -80,6 +81,7 @@ export default function App(): React.ReactElement {
   const [clipboardDownload, setClipboardDownload] = useState<ClipboardItem | null>(null)
   const [detailId, setDetailId] = useState<string | null>(null)
   const [groupDetailId, setGroupDetailId] = useState<string | null>(null)
+  const [watchTarget, setWatchTarget] = useState<{ taskId: string; torrentFilePath?: string } | null>(null)
   const [schedulerOpen, setSchedulerOpen] = useState(false)
   const [schedulerQueueId, setSchedulerQueueId] = useState<string | undefined>()
   const [siteGrabberOpen, setSiteGrabberOpen] = useState(false)
@@ -442,6 +444,7 @@ export default function App(): React.ReactElement {
               display={displayRows}
               onDetails={setDetailId}
               onGroupDetails={setGroupDetailId}
+              onWatch={(taskId, torrentFilePath) => setWatchTarget({ taskId, torrentFilePath })}
               onDelete={requestDelete}
             />
           )}
@@ -495,9 +498,29 @@ export default function App(): React.ReactElement {
           }}
         />
       )}
-      {detailId && <TaskDetailDialog key={detailId} id={detailId} onClose={() => setDetailId(null)} />}
+      {detailId && (
+        <TaskDetailDialog
+          key={detailId}
+          id={detailId}
+          onWatch={(taskId, torrentFilePath) => setWatchTarget({ taskId, torrentFilePath })}
+          onClose={() => setDetailId(null)}
+        />
+      )}
       {groupDetailId && (
-        <GroupDetailDialog key={groupDetailId} groupId={groupDetailId} onClose={() => setGroupDetailId(null)} />
+        <GroupDetailDialog
+          key={groupDetailId}
+          groupId={groupDetailId}
+          onWatch={(taskId) => setWatchTarget({ taskId })}
+          onClose={() => setGroupDetailId(null)}
+        />
+      )}
+      {watchTarget && (
+        <VideoPlayerDialog
+          key={`${watchTarget.taskId}:${watchTarget.torrentFilePath ?? ''}`}
+          taskId={watchTarget.taskId}
+          torrentFilePath={watchTarget.torrentFilePath}
+          onClose={() => setWatchTarget(null)}
+        />
       )}
       {schedulerOpen && <SchedulerDialog initialQueueId={schedulerQueueId} onClose={() => { setSchedulerOpen(false); setSchedulerQueueId(undefined) }} />}
       {siteGrabberOpen && <SiteGrabberDialog onClose={() => setSiteGrabberOpen(false)} />}

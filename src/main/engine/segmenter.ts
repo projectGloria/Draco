@@ -52,6 +52,14 @@ export class Segmenter {
    */
   private readonly rates = new WeakMap<Segment, RateSample>()
 
+  /**
+   * Optional byte offset requested by an in-progress reader (Watch while downloading).
+   * When set, `nextIdle()` and `split()` prioritize the gap at or immediately after
+   * this offset so playback or container probing (e.g. MP4 moov atom at EOF) never
+   * waits on distant segments.
+   */
+  private priorityOffset: number | null = null
+
   constructor(size: number | null, minSplitSize: number) {
     this.size = size
     this.minSplitSize = minSplitSize
@@ -152,10 +160,59 @@ export class Segmenter {
   }
 
   /**
+   * Returns how many contiguous bytes starting at `offset` are already written
+   * on disk across adjacent segments. Returns > 0 when `offset` sits inside a
+   * written region, or 0 when `offset` is still an unwritten hole.
+   */
+  contiguousBytesAt(offset: number): number {
+    if (this.size !== null && offset >= this.size) return 0
+    if (offset < 0) return 0
+
+    let cursor = offset
+    for (const seg of this.segments) {
+      if (seg.end >= 0 && seg.end < cursor) continue
+      if (seg.start > cursor) break
+      if (cursor >= seg.position) return cursor - offset
+      cursor = seg.position
+      if (seg.end >= 0 && seg.position <= seg.end) {
+        return cursor - offset
+      }
+    }
+    return cursor - offset
+  }
+
+  /**
+   * Directs the next available connection to prioritize downloading at `offset`.
+   */
+  prioritizeOffset(offset: number | null): void {
+    this.priorityOffset = offset !== null && offset >= 0 ? Math.floor(offset) : null
+  }
+
+  /**
    * A segment nobody is working on that still has bytes owing - either the very
    * first one, or one whose connection died and left work behind.
+   * When `priorityOffset` is set, prefers the idle segment covering or closest
+   * after that offset.
    */
   nextIdle(): Segment | null {
+    if (this.priorityOffset !== null) {
+      const targetOffset = this.priorityOffset
+      for (const seg of this.segments) {
+        if (seg.active || Segmenter.remaining(seg) <= 0) continue
+        if (seg.position <= targetOffset && (seg.end < 0 || targetOffset <= seg.end)) {
+          this.priorityOffset = null
+          return seg
+        }
+      }
+      for (const seg of this.segments) {
+        if (seg.active || Segmenter.remaining(seg) <= 0) continue
+        if (seg.position >= targetOffset) {
+          this.priorityOffset = null
+          return seg
+        }
+      }
+    }
+
     for (const seg of this.segments) {
       if (!seg.active && Segmenter.remaining(seg) > 0) return seg
     }
@@ -167,22 +224,34 @@ export class Segmenter {
    * tail, or null when nothing is worth cutting. The caller hands the result to
    * an idle connection.
    *
-   * Picking the segment with the most bytes left is only right when every
-   * connection runs at the same speed - the assumption this whole engine exists
-   * to avoid. The segment holding the most work may well be the one about to
-   * finish first. What sets the length of the download is the segment that
-   * finishes *last*, so that is the one to cut.
-   *
-   * Where to cut follows from the same reasoning. An incumbent moving at `r`,
-   * against a newcomer expected to manage `q`, should keep `r / (r + q)` of
-   * what is left for the two halves to land together; halving is that formula
-   * with the rates assumed equal. So a slow connection gives most of its work
-   * away and a fast one keeps most of its own, and before anything has been
-   * measured this behaves exactly as it always did.
+   * When `priorityOffset` falls inside an active segment's unwritten region,
+   * splits directly at `priorityOffset` (leaving a safe write-buffer margin for
+   * the active worker) so a reader waiting on that byte offset gets immediate
+   * service.
    */
   split(): Segment | null {
     // Unknown length means one open-ended range; there is no midpoint to find.
     if (this.size === null) return null
+
+    if (this.priorityOffset !== null) {
+      const wanted = this.priorityOffset
+      const margin = Math.min(this.minSplitSize, 256 * 1024)
+      for (const seg of this.segments) {
+        if (seg.end < 0 || wanted > seg.end) continue
+        if (wanted >= seg.position + margin) {
+          this.priorityOffset = null
+          const tail: Segment = {
+            start: wanted,
+            end: seg.end,
+            position: wanted,
+            active: false
+          }
+          seg.end = wanted - 1
+          this.segments.splice(this.segments.indexOf(seg) + 1, 0, tail)
+          return tail
+        }
+      }
+    }
 
     const typical = this.typicalRate()
 

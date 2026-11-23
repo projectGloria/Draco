@@ -3,6 +3,7 @@ import type { ColumnId, DownloadTask, TaskStatus } from '@shared/types'
 import { displaySource } from '@shared/display-source'
 import { formatBytes, formatEta, formatPercent, formatSpeed, formatWhen, percent } from '../lib/format'
 import type { DisplayRow, TaskGroup } from '@shared/groups'
+import { isPlayableMediaTask } from '@shared/playable-media'
 import { isQuotaHold } from '@shared/quota'
 import { moveQueueItem, orderedQueueIds } from '@shared/queue-order'
 import { useApp } from '../store/app'
@@ -69,6 +70,7 @@ export default function DownloadTable({
   display,
   onDetails,
   onGroupDetails,
+  onWatch,
   onDelete
 }: {
   /** The flat task list, for selection ranges and keyboard commands. */
@@ -81,6 +83,8 @@ export default function DownloadTable({
   onDetails(id: string): void
   /** Opens the group's properties window - the batch equivalent of a torrent's. */
   onGroupDetails(groupId: string): void
+  /** Opens the in-app video player for an in-progress or completed media download. */
+  onWatch(id: string, torrentFilePath?: string): void
   onDelete(ids: string[]): void
 }): React.ReactElement {
   const t = useT()
@@ -106,12 +110,14 @@ export default function DownloadTable({
   const queuesRef = useRef(queues)
   const onDetailsRef = useRef(onDetails)
   const onGroupDetailsRef = useRef(onGroupDetails)
+  const onWatchRef = useRef(onWatch)
   const onDeleteRef = useRef(onDelete)
   rowsRef.current = rows
   selectionRef.current = selection
   queuesRef.current = queues
   onDetailsRef.current = onDetails
   onGroupDetailsRef.current = onGroupDetails
+  onWatchRef.current = onWatch
   onDeleteRef.current = onDelete
 
   const columns = useMemo(() => {
@@ -352,6 +358,16 @@ export default function DownloadTable({
   }, [clickRow, activeQueue])
 
   const openTask = useCallback((task: DownloadTask): void => {
+    if (isPlayableMediaTask(task) && (task.received > 0 || task.status === 'downloading' || task.status === 'paused' || task.status === 'done')) {
+      if (task.status === 'done') {
+        void window.api.openFile(task.id).then((ok) => {
+          if (!ok) onWatchRef.current(task.id)
+        }).catch(() => onWatchRef.current(task.id))
+      } else {
+        onWatchRef.current(task.id)
+      }
+      return
+    }
     if (task.status === 'done') {
       void window.api.openFile(task.id).catch((err) => reportError('Could not open the file', err))
     } else {
@@ -471,6 +487,15 @@ export default function DownloadTable({
         disabled: task.status !== 'done',
         onClick: () => void window.api.openFile(task.id).catch((err) => reportError(t('openFileFailed'), err))
       },
+      ...(isPlayableMediaTask(task)
+        ? [
+            {
+              label: task.status === 'done' ? t('watchVideo') : t('watchWhileDownloading'),
+              disabled: task.received <= 0 && task.status !== 'downloading' && task.status !== 'done',
+              onClick: () => onWatchRef.current(task.id)
+            }
+          ]
+        : []),
       {
         label: t('openFolder'),
         onClick: () => void window.api.revealFile(task.id).catch((err) => reportError(t('openFolderFailed'), err))

@@ -542,6 +542,54 @@ export interface CookieCheckResult {
 }
 
 /* ------------------------------------------------------------------ */
+/* Connection auto-detect                                              */
+/* ------------------------------------------------------------------ */
+
+export type ConnectionAnalysisStage = 'latency' | 'single' | 'multi' | 'done'
+
+export type ConnectionProfile = 'slow' | 'medium' | 'fast' | 'ultra'
+
+export interface ConnectionAnalysisProgress {
+  stage: ConnectionAnalysisStage
+  percent: number
+}
+
+export interface ConnectionAnalysisResult {
+  profile: ConnectionProfile
+  latencyMs: number
+  singleSpeedBps: number
+  multiSpeedBps: number
+  effectiveSpeedBps: number
+  maxConcurrentTasks: number
+  maxConnectionsPerTask: number
+  adaptiveConnectionCeiling: number | null
+  minSplitSize: number
+  retryLimit: number
+  timeoutMs: number
+}
+
+/* ------------------------------------------------------------------ */
+/* Live media watch-while-downloading                                  */
+/* ------------------------------------------------------------------ */
+
+export interface WatchSessionInfo {
+  taskId: string
+  title: string
+  /** Primary video (or audio-only) stream URL under `draco-media://`. */
+  streamUrl: string
+  /** Separate audio stream URL when watching an unmuxed dual-stream download. */
+  audioStreamUrl: string | null
+  mimeType: string
+  status: TaskStatus
+  size: number | null
+  received: number
+  /** Contiguous bytes available starting from byte 0. */
+  contiguousBytes: number
+  /** True when byte-range seeking can prioritize arbitrary unreached offsets. */
+  canSeekAnyRange: boolean
+}
+
+/* ------------------------------------------------------------------ */
 /* Site credentials                                                    */
 /* ------------------------------------------------------------------ */
 
@@ -1006,6 +1054,8 @@ export interface RendererApi {
   openFile(id: string): Promise<boolean>
   revealFile(id: string): Promise<boolean>
   openTorrentItem(id: string, path: string): Promise<boolean>
+  /** Resolves the live stream descriptor for watching an in-progress or completed video. */
+  prepareWatch(id: string, torrentFilePath?: string): Promise<WatchSessionInfo>
   /** Stops seeding these tasks; resolves true when any of them was. */
   stopSeeding(ids: string[]): Promise<boolean>
   /** The ids currently seeding, so the list can mark them. */
@@ -1137,6 +1187,10 @@ export interface RendererApi {
   checkCookies(browser: string): Promise<CookieCheckResult>
   /** Stage-by-stage progress of the running check. */
   onCookieCheckProgress(cb: (progress: CookieCheckProgress) => void): () => void
+
+  /* connection auto-detect */
+  analyzeConnection(): Promise<ConnectionAnalysisResult>
+  onConnectionAnalysisProgress(cb: (progress: ConnectionAnalysisProgress) => void): () => void
 
   /* window */
   minimize(): Promise<void>

@@ -1,6 +1,6 @@
 import { basename, extname, join } from 'node:path'
 import { rm, stat } from 'node:fs/promises'
-import type { DownloadTask } from '@shared/types'
+import type { DownloadTask } from '../../shared/types.ts'
 import { QuotaExceededError } from '../engine/limiter.ts'
 import { splitConnectionBudget } from '../engine/connection-budget.ts'
 import { TaskRunner, quotaDetail } from '../engine/task.ts'
@@ -399,6 +399,18 @@ export class DashRunner implements Runner {
       position: s.position + vOffset
     }))
     this.task.segments = [...this.videoRunner.task.segments, ...offsetAudioSegments]
+  }
+
+  readProgressAt(offset: number, prioritize = false): number {
+    return this.videoRunner.readProgressAt(offset, prioritize)
+  }
+
+  get videoTaskRunner(): TaskRunner {
+    return this.videoRunner
+  }
+
+  get audioTaskRunner(): TaskRunner {
+    return this.audioRunner
   }
 
   async resetForRestart(): Promise<boolean> {
