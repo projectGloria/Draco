@@ -132,7 +132,7 @@ jobs:
             throw 'Draco.exe missing from app-dist'
           }
 
-          npx --yes gloria-setup@0.2.2 --app app-dist --manifest gloria.toml --version $env:VERSION --out dist
+          npx --yes gloria-setup@0.2.4 --app app-dist --manifest gloria.toml --version $env:VERSION --out dist
           $setup = "dist\Draco_$($env:VERSION)_x64-setup.exe"
           if (-not (Test-Path $setup)) {
             throw "Expected installer not found at $setup"

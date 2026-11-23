@@ -1,6 +1,6 @@
 {
   "name": "draco",
-  "version": "1.4.0",
+  "version": "1.4.1",
   "description": "A personal download manager: dynamic segmented downloads, browser takeover, queues and a scheduler",
   "main": "./out/main/index.js",
   "bin": {
