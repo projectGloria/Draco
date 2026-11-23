@@ -52,6 +52,7 @@ function fixture(overrides: Record<string, unknown> = {}) {
     constants: { F_OK: 0 },
     access: async () => { throw new Error('ENOENT') },
     broadcast() {},
+    LoopbackWatchServer: class { async close() {} },
     persistTasks() {}, send() {}, closeHandoffWindow() {},
     ...overrides
   }
