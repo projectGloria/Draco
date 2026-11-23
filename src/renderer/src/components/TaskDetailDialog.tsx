@@ -590,6 +590,17 @@ function TorrentContent({
                   {
                     label: task.status === 'done' ? t('watchVideo') : t('watchWhileDownloading'),
                     onClick: () => onWatch(task.id, menu.path)
+                  },
+                  {
+                    label: t('watchOpenExternal'),
+                    onClick: () => {
+                      void window.api
+                        .watchExternal(task.id, menu.path)
+                        .then((ok) => {
+                          if (!ok) toast('info', t('watchExternalFailed'))
+                        })
+                        .catch((err) => reportError(t('watchExternalFailed'), err))
+                    }
                   }
                 ]
               : []),

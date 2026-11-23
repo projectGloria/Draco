@@ -50,6 +50,7 @@ import { thumbnailFor } from './thumbnails.ts'
 import { checkCookies } from './cookie-check.ts'
 import { analyzeConnection } from './connection-detect.ts'
 import { resolveWatchSession } from './media/watch-server.ts'
+import { LoopbackWatchServer, launchExternalPlayerForTask } from './media/external-player.ts'
 import { listBrowsers } from './browser-icons.ts'
 import {
   registerShellHandlers,
@@ -492,6 +493,8 @@ function safeSaveDialog(options: Electron.SaveDialogOptions, parent?: BrowserWin
 }
 
 export function registerIpc(ctx: AppContext): void {
+  const loopbackWatch = new LoopbackWatchServer(ctx.manager, () => getPaths().tempDir)
+
   // When the handoff-window cap evicts a window, its pending request must go
   // with it, or the request lingers until the list cap evicts it instead.
   setHandoffEvictListener((requestId) => {
@@ -925,11 +928,38 @@ export function registerIpc(ctx: AppContext): void {
 
   handle('tasks:watch', async (id: string, torrentFilePath?: string) => {
     if (typeof id !== 'string') throw new Error('Invalid task ID')
-    return resolveWatchSession(
+    const fileArg = typeof torrentFilePath === 'string' ? torrentFilePath : undefined
+    const session = await resolveWatchSession(
       ctx.manager,
       id,
       getPaths().tempDir,
-      typeof torrentFilePath === 'string' ? torrentFilePath : undefined
+      fileArg
+    )
+    try {
+      const urls = await loopbackWatch.urlsForTask(id, fileArg)
+      session.externalStreamUrl = urls.videoUrl
+    } catch {}
+    return session
+  })
+
+  handle('tasks:watchExternal', async (id: string, torrentFilePath?: string) => {
+    if (typeof id !== 'string') throw new Error('Invalid task ID')
+    const task = ctx.manager.get(id)
+    if (!task) return false
+    const fileArg = typeof torrentFilePath === 'string' ? torrentFilePath : undefined
+
+    // If the task is already finished on disk, open the finished file directly in the default player
+    if (task.status === 'done') {
+      const target = fileArg ? await openableTorrentItem(ctx, id, fileArg) : await openable(ctx, id)
+      if (target) return (await shell.openPath(target)) === ''
+    }
+
+    return launchExternalPlayerForTask(
+      loopbackWatch,
+      getPaths().tempDir,
+      id,
+      fileArg,
+      (path) => shell.openPath(path)
     )
   })
 

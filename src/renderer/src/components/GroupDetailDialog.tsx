@@ -201,6 +201,18 @@ function GroupContent({
               label: task.status === 'done' ? t('watchVideo') : t('watchWhileDownloading'),
               disabled: task.received <= 0 && task.status !== 'downloading' && task.status !== 'done',
               onClick: () => onWatch(task.id)
+            },
+            {
+              label: t('watchOpenExternal'),
+              disabled: task.received <= 0 && task.status !== 'downloading' && task.status !== 'done',
+              onClick: () => {
+                void window.api
+                  .watchExternal(task.id)
+                  .then((ok) => {
+                    if (!ok) toast('info', t('watchExternalFailed'))
+                  })
+                  .catch((error) => reportError(t('watchExternalFailed'), error))
+              }
             }
           ]
         : []),

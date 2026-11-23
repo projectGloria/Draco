@@ -213,6 +213,9 @@ const en = {
   watchLiveBadge: 'Watching live download',
   watchCompletedBadge: 'Download complete',
   watchOpenExternal: 'Open in external player',
+  watchCopyStreamUrl: 'Copy stream URL',
+  watchStreamUrlCopied: 'Live stream URL copied to clipboard',
+  watchExternalFailed: 'Could not open an external media player',
   watchFailed: 'Could not start video playback'
 } as const
 
@@ -434,6 +437,9 @@ const tr: Record<Key, string> = {
   watchLiveBadge: 'Canlı indirme izleniyor',
   watchCompletedBadge: 'İndirme tamamlandı',
   watchOpenExternal: 'Harici oynatıcıda aç',
+  watchCopyStreamUrl: 'Akış URL’sini kopyala',
+  watchStreamUrlCopied: 'Canlı akış URL’si panoya kopyalandı',
+  watchExternalFailed: 'Harici medya oynatıcı açılamadı',
   watchFailed: 'Video oynatma başlatılamadı'
 }
 

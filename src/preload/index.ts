@@ -73,6 +73,7 @@ const api: RendererApi = {
   revealFile: (id: string) => ipcRenderer.invoke('tasks:reveal', id),
   openTorrentItem: (id: string, path: string) => ipcRenderer.invoke('tasks:openTorrentItem', id, path),
   prepareWatch: (id: string, torrentFilePath?: string) => ipcRenderer.invoke('tasks:watch', id, torrentFilePath),
+  watchExternal: (id: string, torrentFilePath?: string) => ipcRenderer.invoke('tasks:watchExternal', id, torrentFilePath),
   stopSeeding: (ids: string[]) => ipcRenderer.invoke('tasks:stopSeeding', ids),
   listSeeding: () => ipcRenderer.invoke('tasks:seeding'),
   setTorrentFiles: (id: string, paths: string[]) => ipcRenderer.invoke('tasks:setTorrentFiles', id, paths),

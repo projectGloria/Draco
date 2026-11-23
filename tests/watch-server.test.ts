@@ -1,9 +1,18 @@
-import { ok, strictEqual } from 'node:assert/strict'
+import { deepStrictEqual, ok, strictEqual } from 'node:assert/strict'
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, it } from 'node:test'
+import { createTask } from '../src/main/engine/create.ts'
+import { DownloadManager } from '../src/main/engine/manager.ts'
 import { Segmenter } from '../src/main/engine/segmenter.ts'
+import { partPathFor } from '../src/main/engine/workspace.ts'
+import {
+  buildExternalPlayerArgs,
+  classifyPlayerExecutable,
+  LoopbackWatchServer,
+  parseExecutableFromShellCommand
+} from '../src/main/media/external-player.ts'
 import {
   contiguousWrittenBytesFromSegments,
   serveByteSourceResponse,
@@ -114,5 +123,94 @@ describe('Watch while downloading (live streaming & demand prioritization)', () 
       contiguousWrittenBytesFromSegments([{ start: 0, end: 99, position: 45, active: true }], 100, 0),
       45
     )
+  })
+
+  it('builds external player arguments with synchronized dual-stream audio for mpv, VLC, and MPC-HC', () => {
+    strictEqual(classifyPlayerExecutable('C:\\Program Files\\VideoLAN\\VLC\\vlc.exe'), 'vlc')
+    strictEqual(classifyPlayerExecutable('C:\\Tools\\mpv\\mpv.exe'), 'mpv')
+    strictEqual(classifyPlayerExecutable('C:\\Program Files\\MPC-HC\\mpc-hc64.exe'), 'mpc')
+
+    strictEqual(
+      parseExecutableFromShellCommand('"C:\\Program Files\\VideoLAN\\VLC\\vlc.exe" --started-from-file "%1"'),
+      'C:\\Program Files\\VideoLAN\\VLC\\vlc.exe'
+    )
+
+    deepStrictEqual(
+      buildExternalPlayerArgs('mpv', 'http://127.0.0.1:9000/v.mp4', 'http://127.0.0.1:9000/a.m4a', 'My Video'),
+      ['--force-media-title=My Video', '--audio-file=http://127.0.0.1:9000/a.m4a', 'http://127.0.0.1:9000/v.mp4']
+    )
+
+    deepStrictEqual(
+      buildExternalPlayerArgs('vlc', 'http://127.0.0.1:9000/v.mp4', 'http://127.0.0.1:9000/a.m4a', 'My Video'),
+      ['--meta-title=My Video', '--input-slave=http://127.0.0.1:9000/a.m4a', 'http://127.0.0.1:9000/v.mp4']
+    )
+
+    deepStrictEqual(
+      buildExternalPlayerArgs('mpc', 'http://127.0.0.1:9000/v.mp4', 'http://127.0.0.1:9000/a.m4a', 'My Video'),
+      ['http://127.0.0.1:9000/v.mp4', '/dub', 'http://127.0.0.1:9000/a.m4a']
+    )
+  })
+
+  it('serves live byte-range HTTP streams over 127.0.0.1 for external media players', async () => {
+    const workDir = await mkdtemp(join(tmpdir(), 'draco-loopback-watch-'))
+    const manager = new DownloadManager({
+      getSettings: () => ({
+        tempDir: workDir,
+        maxConcurrentTasks: 2,
+        maxConnectionsPerTask: 4,
+        minSplitSize: 64 * 1024,
+        retryLimit: 3,
+        timeoutMs: 10_000,
+        speedLimit: null,
+        proxyUrl: null,
+        hostConnectionLimits: [],
+        quotaBytes: null,
+        quotaWindowMinutes: 60,
+        antivirusProgram: null,
+        antivirusArgs: [],
+        antivirusTimeoutSeconds: 30
+      }),
+      onTasks() {},
+      onProgress() {}
+    })
+
+    const loopback = new LoopbackWatchServer(manager, () => workDir)
+
+    try {
+      const task = createTask({
+        url: 'https://example.com/movie.mp4',
+        dir: workDir,
+        filename: 'movie.mp4'
+      })
+      const payload = Buffer.from('EXTERNAL-PLAYER-LIVE-STREAM-PAYLOAD-0123456789')
+      task.size = payload.length
+      task.received = payload.length
+      task.status = 'paused'
+      task.segments = [{ start: 0, end: payload.length - 1, position: payload.length, active: false }]
+
+      const partPath = partPathFor(task.dir, task.filename, task.id, workDir)
+      await mkdtemp(join(workDir, 'init-')).catch(() => {})
+      const { mkdir } = await import('node:fs/promises')
+      const { dirname } = await import('node:path')
+      await mkdir(dirname(partPath), { recursive: true })
+      await writeFile(partPath, payload)
+
+      await manager.load([task])
+
+      const { videoUrl } = await loopback.urlsForTask(task.id)
+      ok(videoUrl.startsWith('http://127.0.0.1:'), `expected loopback URL, got ${videoUrl}`)
+
+      const res = await fetch(videoUrl, {
+        headers: { Range: 'bytes=9-26' }
+      })
+      strictEqual(res.status, 206)
+      strictEqual(res.headers.get('content-range'), `bytes 9-26/${payload.length}`)
+      const text = await res.text()
+      strictEqual(text, 'PLAYER-LIVE-STREAM')
+    } finally {
+      await loopback.close()
+      manager.dispose()
+      await rm(workDir, { recursive: true, force: true }).catch(() => {})
+    }
   })
 })

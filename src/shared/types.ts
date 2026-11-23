@@ -579,6 +579,8 @@ export interface WatchSessionInfo {
   streamUrl: string
   /** Separate audio stream URL when watching an unmuxed dual-stream download. */
   audioStreamUrl: string | null
+  /** Local loopback HTTP stream URL (`http://127.0.0.1:<port>/stream/...`) for external players. */
+  externalStreamUrl?: string
   mimeType: string
   status: TaskStatus
   size: number | null
@@ -1056,6 +1058,8 @@ export interface RendererApi {
   openTorrentItem(id: string, path: string): Promise<boolean>
   /** Resolves the live stream descriptor for watching an in-progress or completed video. */
   prepareWatch(id: string, torrentFilePath?: string): Promise<WatchSessionInfo>
+  /** Launches the user's external video player (VLC, mpv, MPC-HC, etc.) streaming the live download. */
+  watchExternal(id: string, torrentFilePath?: string): Promise<boolean>
   /** Stops seeding these tasks; resolves true when any of them was. */
   stopSeeding(ids: string[]): Promise<boolean>
   /** The ids currently seeding, so the list can mark them. */

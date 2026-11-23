@@ -3,9 +3,9 @@ import type { WatchSessionInfo } from '@shared/types'
 import { formatBytes, formatEta, formatPercent, formatSpeed, percent } from '../lib/format'
 import { useT } from '../i18n'
 import { useApp } from '../store/app'
-import { reportError } from '../store/toasts'
+import { reportError, toast } from '../store/toasts'
 import Dialog, { GhostButton, PrimaryButton } from './Dialog'
-import { FolderIcon, PauseIcon, PlayIcon, VideoIcon } from './Icons'
+import { CopyIcon, FolderIcon, PauseIcon, PlayIcon, VideoIcon } from './Icons'
 import ProgressBar from './ProgressBar'
 
 export default function VideoPlayerDialog({
@@ -198,15 +198,31 @@ export default function VideoPlayerDialog({
             </GhostButton>
           )}
 
-          {task?.status === 'done' && (
+          {session?.externalStreamUrl && (
             <GhostButton
               onClick={() => {
-                const openCall = torrentFilePath
-                  ? window.api.openTorrentItem(task.id, torrentFilePath)
-                  : window.api.openFile(task.id)
-                void openCall.then((ok) => {
-                  if (ok) onClose()
-                })
+                void window.api.copyToClipboard(session.externalStreamUrl!)
+                toast('info', t('watchStreamUrlCopied'))
+              }}
+            >
+              <span className="flex items-center gap-1.5">
+                <CopyIcon className="w-3.5 h-3.5" />
+                {t('watchCopyStreamUrl')}
+              </span>
+            </GhostButton>
+          )}
+
+          {task && (
+            <GhostButton
+              onClick={() => {
+                videoRef.current?.pause()
+                audioRef.current?.pause()
+                void window.api
+                  .watchExternal(task.id, torrentFilePath)
+                  .then((ok) => {
+                    if (!ok) toast('info', t('watchExternalFailed'))
+                  })
+                  .catch((err) => reportError(t('watchExternalFailed'), err))
               }}
             >
               {t('watchOpenExternal')}
