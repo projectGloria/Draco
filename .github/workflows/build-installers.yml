@@ -60,43 +60,56 @@ jobs:
           fi
 
       - name: Install dependencies
+        shell: pwsh
         run: npm ci --no-audit --no-fund
 
       - name: Run tests
+        shell: pwsh
         run: npm test
 
       # Same steps as `npm run dist`, split up so electron-builder gets --publish never.
       - name: Fetch bundled runtime (yt-dlp, ffmpeg)
+        shell: pwsh
         run: npm run runtime
 
       - name: Build browser bridge host
+        shell: pwsh
         run: npm run host
 
       - name: Build app
+        shell: pwsh
         run: npm run build
 
       # Unpacked app folder only; GloriaSetup replaces the NSIS installer.
       - name: Package unpacked app
+        shell: pwsh
         run: npx electron-builder --win --dir --publish never
 
-      - name: Collect runtime files
+      - name: Collect runtime files and pack with GloriaSetup
         shell: pwsh
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
         run: |
+          $ErrorActionPreference = 'Stop'
           New-Item -ItemType Directory -Force app-dist | Out-Null
           Copy-Item -Path 'dist\win-unpacked\*' -Destination app-dist -Recurse -Force
           if (-not (Test-Path app-dist\Draco.exe)) { throw 'Draco.exe missing from app-dist' }
+          npx --yes gloria-setup@0.2.0 --app app-dist --manifest gloria.toml --version $env:VERSION --out dist
+          $setup = "dist\Draco_$($env:VERSION)_x64-setup.exe"
+          if (-not (Test-Path $setup)) { throw "Expected installer not found at $setup" }
+          $proc = Start-Process -FilePath $setup -ArgumentList '/S --dry-run' -Wait -PassThru
+          if ($proc.ExitCode -ne 0) { throw "GloriaSetup dry-run failed with exit code $($proc.ExitCode)" }
 
-      - name: Make sure the release exists
+      - name: Upload installer to release
         if: github.ref_type == 'tag'
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 || gh release create "$GITHUB_REF_NAME" --generate-notes
-
-      - name: Pack and attach setup
-        uses: projectGloria/GloriaSetup@v0.1.0
-        with:
-          app-dir: app-dist
-          manifest: gloria.toml
-          certificate: ${{ secrets.WINDOWS_PFX_BASE64 }}
-          certificate-password: ${{ secrets.WINDOWS_PFX_PASSWORD }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          installer="Draco_${VERSION}_x64-setup.exe"
+          cd dist
+          sha256sum "$installer" > SHA256SUMS.txt
+          gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 || gh release create "$GITHUB_REF_NAME" --title "Draco $GITHUB_REF_NAME" --generate-notes
+          gh release upload "$GITHUB_REF_NAME" "$installer" SHA256SUMS.txt --clobber

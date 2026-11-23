@@ -1,0 +1,209 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Build and verify the installer without publishing a GitHub Release'
+        required: false
+        default: true
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  version:
+    name: Check version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.check.outputs.version }}
+      build: ${{ steps.check.outputs.build }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Compare manifest version
+        id: check
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BEFORE_SHA: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          pkg_ver=$(node -p "require('./package.json').version")
+          toml_ver=$(sed -n 's/^version = "\(.*\)"/\1/p' gloria.toml | head -n 1)
+          if [[ "$pkg_ver" != "$toml_ver" ]]; then
+            echo "::error::package.json version ($pkg_ver) does not match gloria.toml version ($toml_ver)"
+            exit 1
+          fi
+          echo "version=$pkg_ver" >> "$GITHUB_OUTPUT"
+
+          if [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
+            echo "build=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          prev_ver=""
+          if [[ -n "$BEFORE_SHA" && "$BEFORE_SHA" != "0000000000000000000000000000000000000000" ]] && git cat-file -e "${BEFORE_SHA}:package.json" 2>/dev/null; then
+            prev_ver=$(git show "${BEFORE_SHA}:package.json" | node -e "const fs = require('fs'); console.log(JSON.parse(fs.readFileSync(0, 'utf8')).version || '')")
+          fi
+
+          if [[ "$pkg_ver" != "$prev_ver" ]]; then
+            echo "Version changed: ${prev_ver:-<none>} -> $pkg_ver"
+            echo "build=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "Version unchanged ($pkg_ver); skipping release build."
+            echo "build=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  build:
+    name: Build & Pack (windows-x64)
+    needs: version
+    if: needs.version.outputs.build == 'true'
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '26'
+          cache: npm
+
+      - name: Set up Go (browser bridge host)
+        uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
+        with:
+          go-version-file: host/go.mod
+          cache: false
+
+      - name: Cache Electron and electron-builder downloads
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~\AppData\Local\electron\Cache
+            ~\AppData\Local\electron-builder\Cache
+          key: electron-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
+          restore-keys: electron-${{ runner.os }}-
+
+      - name: Install dependencies
+        shell: pwsh
+        run: npm ci --no-audit --no-fund
+
+      - name: Run tests
+        shell: pwsh
+        run: npm test
+
+      - name: Fetch bundled runtime (yt-dlp, ffmpeg, node)
+        shell: pwsh
+        run: npm run runtime
+
+      - name: Build browser bridge host
+        shell: pwsh
+        run: npm run host
+
+      - name: Build app
+        shell: pwsh
+        run: npm run build
+
+      - name: Package unpacked app
+        shell: pwsh
+        run: npx electron-builder --win --dir --publish never
+
+      - name: Stage unpacked app and pack installer with GloriaSetup
+        shell: pwsh
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Force app-dist | Out-Null
+          Copy-Item -Path 'dist\win-unpacked\*' -Destination app-dist -Recurse -Force
+          if (-not (Test-Path 'app-dist\Draco.exe')) {
+            throw 'Draco.exe missing from app-dist'
+          }
+
+          npx --yes gloria-setup@0.2.0 --app app-dist --manifest gloria.toml --version $env:VERSION --out dist
+          $setup = "dist\Draco_$($env:VERSION)_x64-setup.exe"
+          if (-not (Test-Path $setup)) {
+            throw "Expected installer not found at $setup"
+          }
+
+          $proc = Start-Process -FilePath $setup -ArgumentList '/S --dry-run' -Wait -PassThru
+          if ($proc.ExitCode -ne 0) {
+            throw "GloriaSetup dry-run failed with exit code $($proc.ExitCode)"
+          }
+
+      - name: Upload installer artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: draco-setup-${{ needs.version.outputs.version }}
+          path: dist/Draco_${{ needs.version.outputs.version }}_x64-setup.exe
+          if-no-files-found: error
+          compression-level: 0
+
+  publish:
+    name: Publish GitHub Release
+    needs: [version, build]
+    if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || !inputs.dry_run)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Download installer artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: draco-setup-${{ needs.version.outputs.version }}
+          path: release-assets
+
+      - name: Publish and verify release assets
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          tag="v${VERSION}"
+          installer="Draco_${VERSION}_x64-setup.exe"
+
+          cd release-assets
+          if [[ ! -f "$installer" ]]; then
+            echo "::error::Missing installer asset $installer"
+            exit 1
+          fi
+
+          sha256sum "$installer" > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+          prerelease_flag=()
+          if [[ "$VERSION" == *"-"* ]]; then
+            prerelease_flag=(--prerelease)
+          fi
+
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release upload "$tag" "$installer" SHA256SUMS.txt --clobber
+          else
+            gh release create "$tag" "$installer" SHA256SUMS.txt \
+              --title "Draco $tag" \
+              --generate-notes \
+              --draft \
+              "${prerelease_flag[@]}"
+          fi
+
+          mkdir -p verify
+          gh release download "$tag" --dir verify --pattern "$installer" --pattern "SHA256SUMS.txt"
+          (cd verify && sha256sum --check SHA256SUMS.txt)
+
+          gh release edit "$tag" --draft=false
