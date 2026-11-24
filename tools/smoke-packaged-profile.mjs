@@ -17,11 +17,12 @@ const token = 'smoke-secret-marker'
 const filename = 'resume.bin'
 const part = join(profile, 'incomplete', '.draco-tasks',
   createHash('sha256').update(id).digest('hex'), filename + '.dracodl')
+const migratedPart = join(dirname(part), 'data.dracodl')
 const legacyId = 'packaged-legacy-smoke'
 const legacyFile = 'legacy.bin'
 const legacyPart = join(profile, 'incomplete', legacyFile + '.dracodl')
-const migratedPart = join(profile, 'incomplete', '.draco-tasks',
-  createHash('sha256').update(legacyId).digest('hex'), legacyFile + '.dracodl')
+const migratedLegacyPart = join(profile, 'incomplete', '.draco-tasks',
+  createHash('sha256').update(legacyId).digest('hex'), 'data.dracodl')
 const conflictPart = join(profile, 'incomplete', 'conflict.bin.dracodl')
 const conflictIds = ['packaged-conflict-a', 'packaged-conflict-b']
 
@@ -115,7 +116,10 @@ try {
         report.writeRetryPassed !== (run === 1) || report.settingsCommitPassed !== true) {
       throw new Error(`Unexpected restore on run ${run}: ${JSON.stringify(report)}`)
     }
-    if ((await stat(migratedPart)).size !== 512 ||
+    if ((await stat(migratedPart)).size !== 2048 ||
+        await stat(part).catch(() => null) !== null ||
+        await stat(part + '.json').catch(() => null) !== null ||
+        (await stat(migratedLegacyPart)).size !== 512 ||
         await stat(legacyPart).catch(() => null) !== null ||
         await stat(legacyPart + '.json').catch(() => null) !== null ||
         (await stat(conflictPart)).size !== 256) {
