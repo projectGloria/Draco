@@ -310,18 +310,11 @@ npm run verify:package
 
 ### How to Release
 
-Installers are built by GitHub Actions ([`.github/workflows/build-installers.yml`](.github/workflows/build-installers.yml)) on a Windows runner.
+The [release workflow](.github/workflows/release.yml) builds the Windows installer with GloriaSetup.
 
-1. Bump `version` in `package.json` (the tag must match it, e.g. `1.0.0` → `v1.0.0`) and commit.
-2. Tag and push:
-   ```bash
-   git tag v1.0.0 && git push --tags
-   ```
-3. Download the installers:
-   - **Releases page** — a tag build creates a GitHub Release with the installers attached.
-   - **Actions tab** — every run (including manual *Run workflow* runs) uploads an `installers` artifact.
-
-Files produced: `Draco-<version>-windows-x64-setup.exe`, `Draco-<version>-windows-x64-portable.exe`, `Draco-CLI-<version>-windows-x64-setup.exe`, plus `SHA256SUMS.txt`.
+1. Update `package.json`, both root version fields in `package-lock.json`, and `gloria.toml`. Commit and push to `main`.
+2. Run `gh workflow run release.yml --ref main`. To build and verify without publishing, add `-f dry_run=true`.
+3. Once the run succeeds, find `Draco_<version>_x64-setup.exe` and `SHA256SUMS.txt` on the GitHub Release for `v<version>`.
 
 ---
 

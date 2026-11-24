@@ -1,6 +1,6 @@
 id = "Draco"
 name = "Draco"
-version = "1.4.1"
+version = "1.4.2"
 main_exe = "Draco.exe"
 icon = "resources/icon.ico"
 accent = "#10b981"
