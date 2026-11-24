@@ -273,7 +273,7 @@ export class LoopbackWatchServer {
     title: string
     filename: string
   }> {
-    const session = await resolveWatchSession(this.manager, taskId, this.getTempDir(), torrentFilePath)
+    const session = await resolveWatchSession(this.manager, taskId, torrentFilePath)
     const port = await this.ensureStarted()
     const task = this.manager.get(taskId)
     const rawName = torrentFilePath
@@ -284,7 +284,7 @@ export class LoopbackWatchServer {
     const fileParam = torrentFilePath ? `&file=${encodeURIComponent(torrentFilePath)}` : ''
 
     const videoUrl = `http://127.0.0.1:${port}/stream/${encodedId}/${safeName}?track=video${fileParam}`
-    const audioUrl = session.audioStreamUrl
+    const audioUrl = session.hasDualTrack
       ? `http://127.0.0.1:${port}/stream/${encodedId}/${safeName}.m4a?track=audio`
       : null
 

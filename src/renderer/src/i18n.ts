@@ -149,7 +149,8 @@ const en = {
   showTorrentFileFailed: 'Could not show the torrent file',
   keepOneFileHint: 'Keep at least one file - use Remove to drop the whole torrent',
   torrentSelectionFailed: 'Could not change the torrent selection',
-  downloadingFile: 'Downloading this file', skippingFile: 'Skipping this file',
+  torrentOnlyStarted: 'Only started', torrentFileSkipped: 'Skipped', torrentFileWaiting: 'Waiting',
+  torrentFileSelected: 'Selected', torrentProgressUnavailable: 'File progress unavailable',
   showInExplorer: 'Show in Explorer', skipFile: 'Skip this file', downloadFile: 'Download this file',
   copyRelativePath: 'Copy relative path',
   status: 'Status', connections: 'Connections', added: 'Added', savedIn: 'Saved in', server: 'Server',
@@ -205,18 +206,8 @@ const en = {
   autoDetectProfile_fast: 'Fast broadband connection',
   autoDetectProfile_ultra: 'High-speed fiber / gigabit connection',
   autoDetectSummary: '{speed} peak · {latency} ms latency → {tasks} concurrent downloads, {conns} connections/task (ceiling {ceiling})',
-  watchVideo: 'Watch video',
-  watchWhileDownloading: 'Watch while downloading',
-  watchBufferingRange: 'Buffering from live download… ({percent} downloaded)',
-  watchWaitingFirstBytes: 'Waiting for initial video data to download…',
-  watchDualStreamBadge: 'Live dual-stream sync',
-  watchLiveBadge: 'Watching live download',
-  watchCompletedBadge: 'Download complete',
   watchOpenExternal: 'Open in external player',
-  watchCopyStreamUrl: 'Copy stream URL',
-  watchStreamUrlCopied: 'Live stream URL copied to clipboard',
-  watchExternalFailed: 'Could not open an external media player',
-  watchFailed: 'Could not start video playback'
+  watchExternalFailed: 'Could not open an external media player'
 } as const
 
 type Key = keyof typeof en
@@ -373,7 +364,8 @@ const tr: Record<Key, string> = {
   showTorrentFileFailed: 'Torrent dosyası gösterilemedi',
   keepOneFileHint: 'En az bir dosya seçili kalsın — tüm torrenti atmak için Kaldır’ı kullanın',
   torrentSelectionFailed: 'Torrent seçimi değiştirilemedi',
-  downloadingFile: 'Bu dosya indiriliyor', skippingFile: 'Bu dosya atlanıyor',
+  torrentOnlyStarted: 'Yalnızca başlayanlar', torrentFileSkipped: 'Atlandı', torrentFileWaiting: 'Bekliyor',
+  torrentFileSelected: 'Seçildi', torrentProgressUnavailable: 'Dosya ilerlemesi bilinmiyor',
   showInExplorer: 'Gezgin’de göster', skipFile: 'Bu dosyayı atla', downloadFile: 'Bu dosyayı indir',
   copyRelativePath: 'Göreli yolu kopyala',
   status: 'Durum', connections: 'Bağlantılar', added: 'Eklenme', savedIn: 'Kaydedildiği yer', server: 'Sunucu',
@@ -429,18 +421,8 @@ const tr: Record<Key, string> = {
   autoDetectProfile_fast: 'Hızlı genişbant bağlantı',
   autoDetectProfile_ultra: 'Yüksek hızlı fiber / gigabit bağlantı',
   autoDetectSummary: '{speed} tepe hız · {latency} ms gecikme → {tasks} eşzamanlı indirme, görev başına {conns} bağlantı (tavan {ceiling})',
-  watchVideo: 'Videoyu izle',
-  watchWhileDownloading: 'İndirirken izle',
-  watchBufferingRange: 'Canlı indirmeden önbelleğe alınıyor… ({percent} indirildi)',
-  watchWaitingFirstBytes: 'İlk video verilerinin indirilmesi bekleniyor…',
-  watchDualStreamBadge: 'Canlı çift akış senkronu',
-  watchLiveBadge: 'Canlı indirme izleniyor',
-  watchCompletedBadge: 'İndirme tamamlandı',
   watchOpenExternal: 'Harici oynatıcıda aç',
-  watchCopyStreamUrl: 'Akış URL’sini kopyala',
-  watchStreamUrlCopied: 'Canlı akış URL’si panoya kopyalandı',
-  watchExternalFailed: 'Harici medya oynatıcı açılamadı',
-  watchFailed: 'Video oynatma başlatılamadı'
+  watchExternalFailed: 'Harici medya oynatıcı açılamadı'
 }
 
 export function useT(): (key: Key, values?: Record<string, string | number>) => string {

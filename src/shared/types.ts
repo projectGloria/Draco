@@ -569,29 +569,6 @@ export interface ConnectionAnalysisResult {
 }
 
 /* ------------------------------------------------------------------ */
-/* Live media watch-while-downloading                                  */
-/* ------------------------------------------------------------------ */
-
-export interface WatchSessionInfo {
-  taskId: string
-  title: string
-  /** Primary video (or audio-only) stream URL under `draco-media://`. */
-  streamUrl: string
-  /** Separate audio stream URL when watching an unmuxed dual-stream download. */
-  audioStreamUrl: string | null
-  /** Local loopback HTTP stream URL (`http://127.0.0.1:<port>/stream/...`) for external players. */
-  externalStreamUrl?: string
-  mimeType: string
-  status: TaskStatus
-  size: number | null
-  received: number
-  /** Contiguous bytes available starting from byte 0. */
-  contiguousBytes: number
-  /** True when byte-range seeking can prioritize arbitrary unreached offsets. */
-  canSeekAnyRange: boolean
-}
-
-/* ------------------------------------------------------------------ */
 /* Site credentials                                                    */
 /* ------------------------------------------------------------------ */
 
@@ -1056,8 +1033,6 @@ export interface RendererApi {
   openFile(id: string): Promise<boolean>
   revealFile(id: string): Promise<boolean>
   openTorrentItem(id: string, path: string): Promise<boolean>
-  /** Resolves the live stream descriptor for watching an in-progress or completed video. */
-  prepareWatch(id: string, torrentFilePath?: string): Promise<WatchSessionInfo>
   /** Launches the user's external video player (VLC, mpv, MPC-HC, etc.) streaming the live download. */
   watchExternal(id: string, torrentFilePath?: string): Promise<boolean>
   /** Stops seeding these tasks; resolves true when any of them was. */

@@ -295,10 +295,8 @@ test('torrent checkboxes use committed selections before the next diagnostics po
   const outer = createRenderer()
   const props = { id: task.id, onClose() {} }
   let tree = outer.render(TaskDetailDialog, props)
-  let details = elements(tree).find((node) => node.type?.name === 'TorrentDetails')
-  details.props.onTabChange('content')
-  tree = outer.render(TaskDetailDialog, props)
-  details = elements(tree).find((node) => node.type?.name === 'TorrentDetails')
+  const details = elements(tree).find((node) => node.type?.name === 'TorrentDetails')
+  assert.equal(details.props.tab, 'content')
   const detailsTree = createRenderer().render(details.type, details.props)
   const contents = elements(detailsTree).find((node) => node.type?.name === 'TorrentContent')
   assert.ok(contents)
@@ -314,4 +312,11 @@ test('torrent checkboxes use committed selections before the next diagnostics po
   checkboxes(tree)[0].props.onChange()
   await settle()
   assert.deepEqual(saved[1], ['two.mp4', 'one.mp4'])
+
+  const cachedTask = { ...task, torrentInfo: undefined, torrentFiles: [{ path: 'cached.mp4', size: 1 }] }
+  const cachedDetails = createRenderer().render(details.type, { ...details.props, task: cachedTask })
+  const cachedContents = elements(cachedDetails).find((node) => node.type?.name === 'TorrentContent')
+  tree = renderer.render(cachedContents.type, cachedContents.props)
+  assert.ok(elements(tree).some((node) => node.props.title === 'cached.mp4'))
+  assert.ok(elements(tree).some((node) => node.props.title === 'File progress unavailable'))
 })

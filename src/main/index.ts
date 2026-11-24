@@ -5,7 +5,7 @@
 // their own load on top.
 process.env.UV_THREADPOOL_SIZE ??= '32'
 
-import { app, dialog, ipcMain, powerSaveBlocker, protocol, Notification } from 'electron'
+import { app, dialog, ipcMain, powerSaveBlocker, Notification } from 'electron'
 import { version } from '../../package.json'
 import { randomUUID } from 'node:crypto'
 import { mkdirSync } from 'node:fs'
@@ -80,7 +80,6 @@ import {
 } from './windows.ts'
 
 import { DashRunner } from './hls/dash.ts'
-import { handleMediaProtocolRequest } from './media/watch-server.ts'
 import {
   primeYouTube,
   refreshYouTubeFormat,
@@ -189,18 +188,6 @@ function updateOpenProgressWindows(tasks: DownloadTask[]): void {
 if (!app.requestSingleInstanceLock()) {
   app.quit()
 } else {
-  protocol.registerSchemesAsPrivileged([
-    {
-      scheme: 'draco-media',
-      privileges: {
-        standard: true,
-        secure: true,
-        supportFetchAPI: true,
-        stream: true,
-        bypassCSP: true
-      }
-    }
-  ])
   app.on('second-instance', (_event, argv) => {
     // Double-clicking a `.torrent` while Draco is already running is a second
     // launch: Windows hands the path to the new process, which finds the lock
@@ -439,9 +426,6 @@ async function main(): Promise<void> {
   }
 
   registerIpc(ctx)
-  protocol.handle('draco-media', (request) =>
-    handleMediaProtocolRequest(request, manager, getPaths().tempDir)
-  )
   ipcMain.handle('bootstrap:retry', () => void runBootstrap())
   ipcMain.handle('bootstrap:continue', () => {
     if (state.error?.canContinue) finish()

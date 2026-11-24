@@ -29,11 +29,9 @@ type GroupTab = 'content' | 'hosts' | 'errors'
 
 export default function GroupDetailDialog({
   groupId,
-  onWatch,
   onClose
 }: {
   groupId: string
-  onWatch?(taskId: string): void
   onClose(): void
 }): React.ReactElement | null {
   const t = useT()
@@ -156,7 +154,7 @@ export default function GroupDetailDialog({
 
         <div className="min-h-[245px] max-h-[330px] overflow-auto p-3">
           {tab === 'content' ? (
-            <GroupContent members={members} onWatch={onWatch} />
+            <GroupContent members={members} />
           ) : tab === 'hosts' ? (
             <GroupHosts members={members} />
           ) : (
@@ -168,23 +166,13 @@ export default function GroupDetailDialog({
   )
 }
 
-function GroupContent({
-  members,
-  onWatch
-}: {
-  members: DownloadTask[]
-  onWatch?(taskId: string): void
-}): React.ReactElement {
+function GroupContent({ members }: { members: DownloadTask[] }): React.ReactElement {
   const t = useT()
   const [menu, setMenu] = useState<{ at: MenuPosition; task: DownloadTask } | null>(null)
   const [active, setActive] = useState<string | null>(null)
 
   const open = (task: DownloadTask): void => {
     if (task.status !== 'done') {
-      if (onWatch && isPlayableMediaTask(task) && (task.received > 0 || task.status === 'downloading')) {
-        onWatch(task.id)
-        return
-      }
       toast('info', t('notFinishedYet'))
       return
     }
@@ -195,13 +183,8 @@ function GroupContent({
     const running = canPauseTask(task.status)
     return [
       { label: t('open'), disabled: task.status !== 'done', onClick: () => open(task) },
-      ...(onWatch && isPlayableMediaTask(task)
+      ...(isPlayableMediaTask(task)
         ? [
-            {
-              label: task.status === 'done' ? t('watchVideo') : t('watchWhileDownloading'),
-              disabled: task.received <= 0 && task.status !== 'downloading' && task.status !== 'done',
-              onClick: () => onWatch(task.id)
-            },
             {
               label: t('watchOpenExternal'),
               disabled: task.received <= 0 && task.status !== 'downloading' && task.status !== 'done',

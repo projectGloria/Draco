@@ -49,7 +49,6 @@ import { iconForExtension, iconForSite } from './icons.ts'
 import { thumbnailFor } from './thumbnails.ts'
 import { checkCookies } from './cookie-check.ts'
 import { analyzeConnection } from './connection-detect.ts'
-import { resolveWatchSession } from './media/watch-server.ts'
 import { LoopbackWatchServer, launchExternalPlayerForTask } from './media/external-player.ts'
 import { listBrowsers } from './browser-icons.ts'
 import {
@@ -926,22 +925,6 @@ export function registerIpc(ctx: AppContext): void {
     return target ? (await shell.openPath(target)) === '' : false
   })
 
-  handle('tasks:watch', async (id: string, torrentFilePath?: string) => {
-    if (typeof id !== 'string') throw new Error('Invalid task ID')
-    const fileArg = typeof torrentFilePath === 'string' ? torrentFilePath : undefined
-    const session = await resolveWatchSession(
-      ctx.manager,
-      id,
-      getPaths().tempDir,
-      fileArg
-    )
-    try {
-      const urls = await loopbackWatch.urlsForTask(id, fileArg)
-      session.externalStreamUrl = urls.videoUrl
-    } catch {}
-    return session
-  })
-
   handle('tasks:watchExternal', async (id: string, torrentFilePath?: string) => {
     if (typeof id !== 'string') throw new Error('Invalid task ID')
     const task = ctx.manager.get(id)
@@ -1390,13 +1373,8 @@ async function openableTorrentItem(
 ): Promise<string | null> {
   const task = ctx.manager.get(id)
   if (task?.kind !== 'torrent' || typeof itemPath !== 'string') return null
-  if (!task.torrentInfo?.files.some((file) => file.path === itemPath)) return null
-
-  const target = resolveTorrentItemPath(
-    task.dir,
-    itemPath,
-    task.torrentInfo.files.map((file) => file.path)
-  )
+  const files = task.torrentInfo?.files ?? task.torrentFiles ?? []
+  const target = resolveTorrentItemPath(task.dir, itemPath, files.map((file) => file.path))
   if (!target) return null
 
   try {

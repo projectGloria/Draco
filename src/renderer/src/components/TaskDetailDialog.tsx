@@ -74,11 +74,9 @@ function useLiveDetail(id: string): TaskLiveDetail | null {
 
 export default function TaskDetailDialog({
   id,
-  onWatch,
   onClose
 }: {
   id: string
-  onWatch?(taskId: string, torrentFilePath?: string): void
   onClose(): void
 }): React.ReactElement | null {
   const storedTask = useApp((s) => s.tasks.find((t) => t.id === id))
@@ -90,7 +88,7 @@ export default function TaskDetailDialog({
   const [queueId, setQueueId] = useState(storedTask?.queueId ?? '')
   const previousTask = useRef(storedTask)
   const t = useT()
-  const [torrentTab, setTorrentTab] = useState<TorrentTab>('general')
+  const [torrentTab, setTorrentTab] = useState<TorrentTab>('content')
 
   const detail = useLiveDetail(id)
 
@@ -118,6 +116,7 @@ export default function TaskDetailDialog({
   const dirty =
     filename !== task.filename || description !== task.description || (queueId || null) !== task.queueId
   const hint = recoveryHint(task)
+  const showContents = task.kind === 'torrent' && torrentTab === 'content'
 
   async function save(): Promise<void> {
     try {
@@ -136,7 +135,8 @@ export default function TaskDetailDialog({
     <Dialog
       title={task.filename}
       subtitle={displaySource(task.url)}
-      width={task.kind === 'torrent' ? 920 : 740}
+      width={task.kind === 'torrent' ? 1080 : 740}
+      height={task.kind === 'torrent' ? 600 : undefined}
       onClose={onClose}
       footer={
         <>
@@ -149,12 +149,16 @@ export default function TaskDetailDialog({
             {t('copyUrl')}
           </GhostButton>
           <GhostButton onClick={() => void window.api.revealFile(id)}>{t('openFolder')}</GhostButton>
-          {onWatch && isPlayableMediaTask(task) && (
+          {task.kind !== 'torrent' && isPlayableMediaTask(task) && (
             <GhostButton
-              onClick={() => onWatch(id)}
+              onClick={() => {
+                void window.api.watchExternal(id)
+                  .then((ok) => { if (!ok) toast('info', t('watchExternalFailed')) })
+                  .catch((error) => reportError(t('watchExternalFailed'), error))
+              }}
               disabled={task.received <= 0 && task.status !== 'downloading' && task.status !== 'done'}
             >
-              {task.status === 'done' ? t('watchVideo') : t('watchWhileDownloading')}
+              {t('watchOpenExternal')}
             </GhostButton>
           )}
           <GhostButton
@@ -176,92 +180,95 @@ export default function TaskDetailDialog({
         </>
       }
     >
-      <Overview task={task} categoryLabel={categoryName(categories, task.categoryId)} />
+      <div className={showContents ? 'flex h-full flex-col' : undefined}>
+        <Overview task={task} categoryLabel={showContents ? undefined : categoryName(categories, task.categoryId)} />
+        {task.kind === 'torrent' ? (
+          <TorrentDetails task={task} tab={torrentTab} onTabChange={setTorrentTab} />
+        ) : (
+          <>
+            <div className="mt-5">
+              <SectionLabel>
+                {t('connections')}
+                <span className="text-faint font-normal normal-case tracking-normal ml-2">
+                  {t('activeOf', { active: task.segments.filter((s) => s.active).length, total: task.segments.length })}
+                  {' · '}
+                  {task.resumable ? t('resumeSupported') : t('resumeNotSupported')}
+                </span>
+              </SectionLabel>
 
-      {task.kind === 'torrent' ? (
-        <TorrentDetails task={task} tab={torrentTab} onTabChange={setTorrentTab} onWatch={onWatch} />
-      ) : (
-        <>
-      <div className="mt-5">
-        <SectionLabel>
-          {t('connections')}
-          <span className="text-faint font-normal normal-case tracking-normal ml-2">
-            {t('activeOf', { active: task.segments.filter((s) => s.active).length, total: task.segments.length })}
-            {' · '}
-            {task.resumable ? t('resumeSupported') : t('resumeNotSupported')}
-          </span>
-        </SectionLabel>
+              {/* A playlist's pieces have no offset in the finished file until they
+                  are joined, so there is no map to draw for one. */}
+              {task.kind === 'file' && task.size ? (
+                <FileMap segments={task.segments} size={task.size} />
+              ) : null}
 
-        {/* A playlist's pieces have no offset in the finished file until they
-            are joined, so there is no map to draw for one. */}
-        {task.kind === 'file' && task.size ? (
-          <FileMap segments={task.segments} size={task.size} />
-        ) : null}
+              <div className="mt-3 space-y-1.5 max-h-[220px] overflow-y-auto pr-1">
+                {task.segments.length === 0 ? (
+                  <p className="text-[12px] text-faint py-3">
+                    No connections yet — the download has not been started.
+                  </p>
+                ) : (
+                  task.segments.map((segment, index) => (
+                    <SegmentRow
+                      key={index}
+                      index={index}
+                      segment={segment}
+                      status={task.status}
+                    />
+                  ))
+                )}
+              </div>
+            </div>
 
-        <div className="mt-3 space-y-1.5 max-h-[220px] overflow-y-auto pr-1">
-          {task.segments.length === 0 ? (
-            <p className="text-[12px] text-faint py-3">
-              No connections yet — the download has not been started.
-            </p>
-          ) : (
-            task.segments.map((segment, index) => (
-              <SegmentRow
-                key={index}
-                index={index}
-                segment={segment}
-                status={task.status}
+            <div className="mt-5">
+              <SectionLabel>Speed, last 60 seconds</SectionLabel>
+              <Sparkline id={id} live={task.status === 'downloading'} />
+            </div>
+          </>
+        )}
+
+        {!showContents && (
+          <div className="mt-5 grid grid-cols-2 gap-3">
+            <div className="col-span-2">
+              <label className="label">{t('fileName')}</label>
+              <input
+                value={filename}
+                disabled={task.kind === 'torrent'}
+                onChange={(event) => setFilename(event.target.value)}
+                spellCheck={false}
+                className="field text-[12.5px]"
               />
-            ))
-          )}
-        </div>
+              {task.kind === 'torrent' && <p className="mt-1.5 text-[11px] text-faint">{t('torrentNameFixed')}</p>}
+            </div>
+            <div>
+              <label className="label">{t('queue')}</label>
+              <select
+                value={queueId}
+                onChange={(event) => setQueueId(event.target.value)}
+                className="field text-[12.5px]"
+              >
+                <option value="">None</option>
+                {queues.map((queue) => (
+                  <option key={queue.id} value={queue.id}>
+                    {queue.name}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div>
+              <label className="label">{t('description')}</label>
+              <input
+                value={description}
+                onChange={(event) => setDescription(event.target.value)}
+                placeholder={t('optional')}
+                className="field text-[12.5px]"
+              />
+            </div>
+          </div>
+        )}
       </div>
 
-      <div className="mt-5">
-        <SectionLabel>Speed, last 60 seconds</SectionLabel>
-        <Sparkline id={id} live={task.status === 'downloading'} />
-      </div>
-        </>
-      )}
-
-      <div className="mt-5 grid grid-cols-2 gap-3">
-        <div className="col-span-2">
-          <label className="label">{t('fileName')}</label>
-          <input
-            value={filename}
-            disabled={task.kind === 'torrent'}
-            onChange={(event) => setFilename(event.target.value)}
-            spellCheck={false}
-            className="field text-[12.5px]"
-          />
-          {task.kind === 'torrent' && <p className="mt-1.5 text-[11px] text-faint">{t('torrentNameFixed')}</p>}
-        </div>
-        <div>
-          <label className="label">{t('queue')}</label>
-          <select
-            value={queueId}
-            onChange={(event) => setQueueId(event.target.value)}
-            className="field text-[12.5px]"
-          >
-            <option value="">None</option>
-            {queues.map((queue) => (
-              <option key={queue.id} value={queue.id}>
-                {queue.name}
-              </option>
-            ))}
-          </select>
-        </div>
-        <div>
-          <label className="label">{t('description')}</label>
-          <input
-            value={description}
-            onChange={(event) => setDescription(event.target.value)}
-            placeholder={t('optional')}
-            className="field text-[12.5px]"
-          />
-        </div>
-      </div>
-
-      {hint && (
+      {hint && !showContents && (
         <div role="alert" className="mt-4 rounded-lg px-3 py-2.5 text-[11.5px] leading-relaxed border border-[rgba(248,113,113,0.25)] bg-[rgba(248,113,113,0.08)]">
           <div className="font-semibold text-err">{t('nextStep')}</div>
           <div className="mt-1">{t(hint)}</div>
@@ -275,17 +282,21 @@ export default function TaskDetailDialog({
 function TorrentDetails({
   task,
   tab,
-  onTabChange,
-  onWatch
+  onTabChange
 }: {
   task: DownloadTask
   tab: TorrentTab
   onTabChange(tab: TorrentTab): void
-  onWatch?(taskId: string, torrentFilePath?: string): void
 }): React.ReactElement {
   const t = useT()
   const info = task.torrentInfo
+  const files = info?.files ?? task.torrentFiles
   const tabs: Array<{ id: TorrentTab; label: string; icon: React.ReactElement }> = [
+    {
+      id: 'content',
+      label: `${t('tabContent')}${files ? ` (${files.length})` : ''}`,
+      icon: <ListIcon className="w-3.5 h-3.5" />
+    },
     { id: 'general', label: t('tabGeneral'), icon: <InfoIcon className="w-3.5 h-3.5" /> },
     {
       id: 'trackers',
@@ -301,20 +312,18 @@ function TorrentDetails({
       id: 'sources',
       label: `${t('tabSources')}${info ? ` (${info.sources.length})` : ''}`,
       icon: <LinkIcon className="w-3.5 h-3.5" />
-    },
-    {
-      id: 'content',
-      label: `${t('tabContent')}${info ? ` (${info.files.length})` : ''}`,
-      icon: <ListIcon className="w-3.5 h-3.5" />
     }
   ]
 
   return (
-    <div className="mt-5 border border-line rounded-lg overflow-hidden bg-white/[0.02]">
-      <div className="flex items-center border-b border-line bg-white/[0.03] overflow-x-auto">
+    <div className={'mt-4 border border-line rounded-lg overflow-hidden bg-white/[0.02] ' +
+      (tab === 'content' ? 'flex min-h-0 flex-1 flex-col' : '')}>
+      <div className="flex shrink-0 items-center border-b border-line bg-white/[0.03] overflow-x-auto">
         {tabs.map((entry) => (
           <button
             key={entry.id}
+            type="button"
+            aria-pressed={tab === entry.id}
             onClick={() => onTabChange(entry.id)}
             className={
               'flex items-center gap-1.5 px-3.5 py-2.5 text-[11px] font-semibold whitespace-nowrap border-r border-line transition-colors ' +
@@ -330,9 +339,11 @@ function TorrentDetails({
         ))}
       </div>
 
-      <div className="min-h-[245px] max-h-[330px] overflow-auto p-3">
-        {!info ? (
-          <div className="h-[220px] grid place-items-center text-[12px] text-faint">
+      <div className={tab === 'content' ? 'min-h-0 flex-1 overflow-auto' : 'min-h-[245px] max-h-[330px] overflow-auto p-3'}>
+        {tab === 'content' && files?.length ? (
+          <TorrentContent task={task} />
+        ) : !info || tab === 'content' ? (
+          <div className="h-full min-h-[160px] grid place-items-center px-3 text-center text-[12px] text-faint">
             {t('torrentDetailsPending')}
           </div>
         ) : tab === 'general' ? (
@@ -349,10 +360,8 @@ function TorrentDetails({
             rows={info.sources}
             empty="This torrent does not advertise HTTP web seeds."
           />
-        ) : tab === 'peers' ? (
-          <TorrentPeers task={task} />
         ) : (
-          <TorrentContent task={task} onWatch={onWatch} />
+          <TorrentPeers task={task} />
         )}
       </div>
     </div>
@@ -423,19 +432,19 @@ function TorrentPeers({ task }: { task: DownloadTask }): React.ReactElement {
   )
 }
 
-function TorrentContent({
-  task,
-  onWatch
-}: {
-  task: DownloadTask
-  onWatch?(taskId: string, torrentFilePath?: string): void
-}): React.ReactElement {
+function TorrentContent({ task }: { task: DownloadTask }): React.ReactElement {
   const t = useT()
   // The wanted-set arrives immediately in tasks:changed; diagnostics are
   // polled once a second. Reading the old diagnostic flag lost a second click
   // made before that poll and made successful selections appear to revert.
   const wanted = task.selectedFiles ? new Set(task.selectedFiles) : null
-  const files = task.torrentInfo!.files.map((file) => ({ ...file, selected: !wanted || wanted.has(file.path) }))
+  const metadata = task.torrentInfo?.files ?? task.torrentFiles ?? []
+  const files = metadata.map((file) => ({
+    path: file.path,
+    size: file.size,
+    downloaded: 'downloaded' in file && typeof file.downloaded === 'number' ? file.downloaded : null,
+    selected: !wanted || wanted.has(file.path)
+  }))
   const [menu, setMenu] = useState<{ at: MenuPosition; path: string } | null>(null)
   /**
    * The row the user has clicked. `file.selected` is a different thing - it is
@@ -446,22 +455,8 @@ function TorrentContent({
   const [active, setActive] = useState<string | null>(null)
 
   const openItem = async (path: string): Promise<void> => {
-    const fileEntry = files.find((f) => f.path === path)
-    if (
-      onWatch &&
-      isPlayableMediaExtension(path) &&
-      task.status !== 'done' &&
-      ((fileEntry?.downloaded ?? 0) > 0 || task.status === 'downloading')
-    ) {
-      onWatch(task.id, path)
-      return
-    }
     try {
       if (!(await window.api.openTorrentItem(task.id, path))) {
-        if (onWatch && isPlayableMediaExtension(path)) {
-          onWatch(task.id, path)
-          return
-        }
         toast('info', t('fileNotOnDisk'))
       }
     } catch (error) {
@@ -472,7 +467,7 @@ function TorrentContent({
   const revealItem = async (path: string): Promise<void> => {
     try {
       if (!(await window.api.revealTorrentItem(task.id, path))) {
-        toast('info', 'That file is not available on disk yet')
+        toast('info', t('fileNotOnDisk'))
       }
     } catch (error) {
       reportError(t('showTorrentFileFailed'), error)
@@ -506,44 +501,57 @@ function TorrentContent({
   }
 
   const selectedCount = files.filter((file) => file.selected).length
+  const startedFiles = files.filter((file) => (file.downloaded ?? 0) > 0)
+  const columns = 'grid grid-cols-[18px_minmax(0,1fr)_64px_90px_104px] sm:grid-cols-[18px_18px_minmax(0,1fr)_76px_104px_152px] gap-2 px-3'
 
   return (
-    <div className="text-[11.5px]">
-      <div className="flex items-center justify-between px-2 pb-2">
-        <span className="text-[10px] uppercase tracking-[0.4px] text-faint">
-          {selectedCount} of {files.length} selected
-        </span>
-        <div className="flex gap-2">
-          <button
-            type="button"
-            className="text-[10.5px] text-muted hover:text-ink"
-            onClick={() => void applySelection(new Set(files.map((file) => file.path)))}
-          >
-            Select all
-          </button>
-          <button
-            type="button"
-            className="text-[10.5px] text-muted hover:text-ink"
-            onClick={() => void applySelection(new Set(files.filter((file) => file.downloaded > 0).map((file) => file.path)))}
-          >
-            Only started
-          </button>
+    <div className="text-[12px]">
+      <div className="sticky top-0 z-10 border-b border-line bg-raised">
+        <div className="flex items-center justify-between gap-2 px-3 py-2">
+          <span className="text-muted">{t('selectedOfSize', { selected: selectedCount, total: files.length })}</span>
+          <div className="flex gap-2">
+            <GhostButton
+              disabled={selectedCount === files.length}
+              onClick={() => void applySelection(new Set(files.map((file) => file.path)))}
+            >
+              {t('selectAll')}
+            </GhostButton>
+            <GhostButton
+              disabled={startedFiles.length === 0}
+              onClick={() => void applySelection(new Set(startedFiles.map((file) => file.path)))}
+            >
+              {t('torrentOnlyStarted')}
+            </GhostButton>
+          </div>
+        </div>
+        <div className={columns + ' border-t border-line py-2 text-[10px] font-medium uppercase tracking-[0.4px] text-faint'}>
+          <span className="sm:col-span-2" />
+          <span>{t('colName')}</span>
+          <span className="text-right">{t('colSize')}</span>
+          <span>{t('colStatus')}</span>
+          <span>{t('colProgress')}</span>
         </div>
       </div>
-      <div className="grid grid-cols-[18px_18px_minmax(0,1fr)_90px_160px] gap-2 px-2 pb-2 text-[10px] uppercase tracking-[0.4px] text-faint">
-        <span /><span /><span>Name</span><span className="text-right">Size</span><span className="text-right">Progress</span>
-      </div>
       {files.map((file) => {
-        const fileProgress = file.size ? Math.min(100, (file.downloaded / file.size) * 100) : 100
-        const fileStatus = fileProgress >= 100
-          ? 'done'
-          : file.selected && task.status === 'downloading'
+        const pathParts = file.path.split(/[\\/]/)
+        const name = pathParts.pop()
+        const directory = pathParts.join('/')
+        const fileProgress = file.size === 0 ? 100 : file.downloaded === null ? null : percent(file.downloaded, file.size)
+        const complete = fileProgress === 100
+        const fileStatus = complete ? 'done'
+          : file.selected && task.status === 'downloading' && (file.downloaded ?? 0) > 0
             ? 'downloading'
             : 'paused'
+        const statusLabel = !file.selected ? t('torrentFileSkipped')
+          : complete ? t('statusDone')
+          : fileStatus === 'downloading' ? t('statusDownloading')
+          : task.status === 'paused' ? t('statusPaused')
+          : fileProgress === 0 ? t('torrentFileWaiting')
+          : t('torrentFileSelected')
         return (
           <div
             key={file.path}
-            className={'grid grid-cols-[18px_18px_minmax(0,1fr)_90px_160px] items-center gap-2 px-2 py-2 border-t border-line cursor-default select-none hover:bg-white/[0.035] ' + (file.selected ? '' : 'opacity-45')}
+            className={columns + ' items-center py-2.5 border-b border-line cursor-default select-none hover:bg-white/[0.035]'}
             style={active === file.path
               ? { background: 'var(--accent-soft)', boxShadow: 'inset 2px 0 0 var(--accent)' }
               : undefined}
@@ -562,19 +570,35 @@ function TorrentContent({
               type="checkbox"
               className="w-3.5 h-3.5 accent-[var(--accent)] cursor-pointer"
               checked={file.selected}
-              title={file.selected ? t('downloadingFile') : t('skippingFile')}
+              aria-label={`${t(file.selected ? 'skipFile' : 'downloadFile')} · ${file.path}`}
               onChange={() => toggleFile(file.path)}
               // The row's own click handlers select and open; the box only ever
               // changes what is wanted.
               onClick={(event) => event.stopPropagation()}
               onDoubleClick={(event) => event.stopPropagation()}
             />
-            <FileIcon name={file.path} className="w-4 h-4" />
-            <span className="truncate" title={file.path}>{file.path}</span>
+            <span className="hidden sm:block">
+              <FileIcon name={file.path} className="w-4 h-4" />
+            </span>
+            <span className={'truncate ' + (file.selected ? '' : 'text-muted')} title={file.path}>
+              {name}
+              {directory && <span className="ml-2 text-faint">{directory}</span>}
+            </span>
             <span className="text-right tnum text-muted">{formatBytes(file.size)}</span>
-            <div className="flex items-center gap-2 min-w-0">
-              <ProgressBar percent={fileProgress} status={fileStatus} height={5} />
-              <span className="w-[42px] shrink-0 text-right tnum">{fileProgress.toFixed(1)}%</span>
+            <span className={'truncate ' + (fileStatus === 'downloading' ? 'text-ink' : 'text-muted')} title={statusLabel}>
+              {statusLabel}
+            </span>
+            <div className="flex items-center gap-2 min-w-0" title={formatBytes(file.downloaded)}>
+              {fileProgress === null ? (
+                <span className="ml-auto text-faint" title={t('torrentProgressUnavailable')}>—</span>
+              ) : (
+                <>
+                  <ProgressBar percent={fileProgress} status={fileStatus} height={5} />
+                  <span className="w-[46px] shrink-0 text-right tnum">
+                    {(complete ? 100 : Math.min(fileProgress, 99.9)).toFixed(1)}%
+                  </span>
+                </>
+              )}
             </div>
           </div>
         )
@@ -585,12 +609,8 @@ function TorrentContent({
           onClose={() => setMenu(null)}
           items={[
             { label: t('open'), onClick: () => void openItem(menu.path) },
-            ...(onWatch && isPlayableMediaExtension(menu.path)
+            ...(isPlayableMediaExtension(menu.path)
               ? [
-                  {
-                    label: task.status === 'done' ? t('watchVideo') : t('watchWhileDownloading'),
-                    onClick: () => onWatch(task.id, menu.path)
-                  },
                   {
                     label: t('watchOpenExternal'),
                     onClick: () => {
@@ -637,13 +657,13 @@ function Overview({
   categoryLabel
 }: {
   task: DownloadTask
-  categoryLabel: string
+  categoryLabel?: string
 }): React.ReactElement {
   const t = useT()
   const done = task.size ? percent(task.received, task.size) : null
 
   return (
-    <div>
+    <div className="shrink-0">
       <div className="flex items-end justify-between gap-4 mb-2">
         <div className="tnum text-[13px]">
           <span className="font-semibold">{formatBytes(task.received)}</span>
@@ -664,14 +684,14 @@ function Overview({
 
       <ProgressBar percent={done} status={task.status} height={8} />
 
-      <div className="mt-3 grid grid-cols-4 gap-3 text-[11.5px]">
+      {categoryLabel !== undefined && <div className="mt-3 grid grid-cols-4 gap-3 text-[11.5px]">
         <Fact label={t('status')} value={task.status} />
         <Fact label={t('connections')} value={String(task.connections)} />
         <Fact label={t('category')} value={categoryLabel || '—'} />
         <Fact label={t('added')} value={formatWhen(task.createdAt)} />
         <Fact label={t('savedIn')} value={task.dir} wide />
         <Fact label={t('server')} value={displaySource(task.finalUrl || task.url)} wide />
-      </div>
+      </div>}
     </div>
   )
 }

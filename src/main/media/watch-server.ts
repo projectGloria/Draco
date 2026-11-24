@@ -1,6 +1,6 @@
 import { open, readdir, stat } from 'node:fs/promises'
 import { join } from 'node:path'
-import type { DownloadTask, Segment, WatchSessionInfo } from '../../shared/types.ts'
+import type { DownloadTask, Segment } from '../../shared/types.ts'
 import { isPlayableMediaTask, mimeTypeForMediaFilename } from '../../shared/playable-media.ts'
 import type { DownloadManager } from '../engine/manager.ts'
 import { readJournal } from '../engine/journal.ts'
@@ -491,25 +491,17 @@ async function serveHlsProgressiveResponse(
   })
 }
 
-/**
- * Inspects a task and builds the `WatchSessionInfo` descriptor that tells the
- * in-app video player how to stream it (`draco-media://stream/<taskId>`),
- * including whether a separate audio stream is active during dual-stream downloads.
- */
+/** Resolves the title and any separate audio track for the external player. */
 export async function resolveWatchSession(
   manager: DownloadManager,
   taskId: string,
-  tempDir?: string,
   torrentFilePath?: string
-): Promise<WatchSessionInfo> {
+): Promise<{ title: string; hasDualTrack: boolean }> {
   const task = manager.get(taskId)
   if (!task) throw new Error('Download was not found')
   if (!isPlayableMediaTask(task)) {
     throw new Error('This download is not a playable video or audio file')
   }
-
-  const encodedId = encodeURIComponent(task.id)
-  const fileQuery = torrentFilePath ? `&file=${encodeURIComponent(torrentFilePath)}` : ''
 
   // Check if final muxed file already exists on disk
   const finalPath = join(task.dir, task.filename)
@@ -529,13 +521,6 @@ export async function resolveWatchSession(
     }
   }
 
-  const source = createTaskByteSource(manager, taskId, tempDir, {
-    track: 'video',
-    torrentFilePath
-  })
-  const contiguousFromZero = source ? await source.availableBytesAt(0, false) : 0
-  const totalSize = source ? await source.totalSize() : task.size
-
   let selectedTorrentFile: string | undefined
   if (task.kind === 'torrent') {
     const runner = manager.getRunner(taskId)
@@ -552,27 +537,14 @@ export async function resolveWatchSession(
     }
   }
 
-  const queryForVideo = selectedTorrentFile
-    ? `?track=video&file=${encodeURIComponent(selectedTorrentFile)}`
-    : `?track=video${fileQuery}`
-
   return {
-    taskId: task.id,
     title: selectedTorrentFile ? `${task.filename} — ${selectedTorrentFile}` : task.filename,
-    streamUrl: `draco-media://stream/${encodedId}${queryForVideo}`,
-    audioStreamUrl: hasDualTrack ? `draco-media://stream/${encodedId}?track=audio` : null,
-    mimeType: mimeTypeForMediaFilename(selectedTorrentFile ?? task.filename, task.mimeType),
-    status: task.status,
-    size: totalSize ?? task.size ?? task.expectedSize ?? null,
-    received: task.received,
-    contiguousBytes: contiguousFromZero,
-    canSeekAnyRange: Boolean(isFinalOnDisk || task.resumable || task.kind === 'torrent')
+    hasDualTrack
   }
 }
 
 /**
- * Handles `draco-media://stream/<taskId>?track=video|audio&file=...` requests
- * registered with Electron's `protocol.handle`.
+ * Serves byte-range requests forwarded by the external player's loopback server.
  */
 export async function handleMediaProtocolRequest(
   request: Request,
