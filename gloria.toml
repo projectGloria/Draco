@@ -8,3 +8,4 @@ description = "Segmented download manager & stream capture"
 needs_webview2 = false
 data_folders = ["%APPDATA%\\Draco"]
 legacy_names = ["Draco"]
+app_user_model_id = "com.nihil.draco"
